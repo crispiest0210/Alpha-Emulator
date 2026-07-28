@@ -58,17 +58,27 @@ Current Game Boy results:
 | Blargg `cpu_instrs`, all 11 sub-tests individually | **pass** |
 | Blargg `instr_timing` | **passes** |
 | Blargg `mem_timing` | **passes** |
-| Blargg `cpu_instrs` (combined ROM) | hangs after printing sub-test 03's name — see below |
-| Blargg `dmg_sound` | no serial output at all within the frame budget |
-| dmg-acid2 | renders, but the output has **not** been checked against the reference image, so it is unvalidated rather than passing |
+| Blargg `cpu_instrs` (combined ROM) | hangs — see below |
+| Blargg `dmg_sound`, all 12 sub-tests | fail — see below |
+| dmg-acid2 | renders and completes, but unvalidated — see below |
 
-The combined `cpu_instrs` ROM is **not** a CPU bug: every one of its eleven sub-tests passes
-standalone, and MBC1 bank reads are verified against that exact ROM by a dedicated test. The
-cause is somewhere in the combined ROM's own sequencing between sub-tests and is still open.
+The harness prints the CPU's state when a ROM times out, which turned "no output" into three
+different diagnoses:
 
-The three remaining gaps are tracked as known failures in the corpus, so the suite stays green
-for *regressions* while they are open — and fails loudly if a known-failing ROM starts
-passing, which means the marker needs removing.
+- **Combined `cpu_instrs`** executes `STOP` inside the runner it copies into work RAM. Not an
+  instruction bug — all eleven sub-tests pass standalone and MBC1 bank reads are verified
+  against that exact ROM by a dedicated test. Either something earlier goes wrong and `STOP`
+  is collateral, or `STOP` itself is mishandled (a DMG resumes when a joypad line goes low).
+- **`dmg_sound`** spins in a wait loop in work RAM, neither halted nor locked, on all twelve
+  sub-tests. The APU is not producing a state transition the tests wait on — most likely a
+  length-counter or `NR52` status bit. This is the largest open gap.
+- **dmg-acid2** renders and then halts waiting for interrupts, which is how it signals it has
+  finished. The picture is probably correct; it stays unvalidated only because nobody has
+  compared it against the published reference image.
+
+All are tracked as known failures in the corpus, so the suite stays green for *regressions*
+while they are open — and fails loudly if one starts passing, which means the marker needs
+removing.
 
 The ARM cores have not been run against anything: `arm7wrestler` and `gba-suite` are not in
 the corpus yet, and there is no GBA system to run them on.

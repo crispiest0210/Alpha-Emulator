@@ -46,6 +46,15 @@ pub trait TestableSystem: System {
     /// The CPU register file.
     fn cpu_registers(&self) -> Vec<RegisterValue>;
 
+    /// A one-line description of why the CPU is where it is.
+    ///
+    /// Printed when a ROM times out, because "no output at all" is the least informative
+    /// failure there is: a halted CPU, a locked one, and a tight infinite loop all look
+    /// identical from outside, and they need completely different fixes.
+    fn debug_state(&self) -> String {
+        String::new()
+    }
+
     /// Read a byte with side effects allowed.
     ///
     /// Not `peek`: Blargg's signature lives in cartridge RAM, which a mapper may gate behind
@@ -488,6 +497,22 @@ mod tests;
 impl TestableSystem for system_gb::GbSystem {
     fn serial_output(&self) -> &[u8] {
         &self.bus().serial_output
+    }
+
+    fn debug_state(&self) -> String {
+        use core_common::CpuIntrospect;
+        let cpu = self.cpu();
+        format!(
+            "pc={:#06X} sp={:#06X} halted={} locked={} stopped={} ime={} lcdc={:#04X} ly={}",
+            cpu.program_counter(),
+            cpu.sp,
+            cpu.is_halted(),
+            cpu.is_locked(),
+            cpu.is_stopped(),
+            cpu.ime(),
+            self.bus().ppu.lcdc,
+            self.bus().timing.ppu.ly,
+        )
     }
 
     fn cpu_registers(&self) -> Vec<RegisterValue> {

@@ -177,6 +177,181 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
     },
 ];
 
+/// Blargg's `dmg_sound`, one ROM per sub-test.
+///
+/// Same reasoning as the `cpu_instrs` split: the combined ROM produces no output at all, and
+/// an aggregate silence says nothing about which of twelve areas is at fault.
+pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
+    TestRom {
+        name: "dmg_sound_01_registers",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/01-registers.gb",
+        path: "gb/blargg/dmg_sound/01-registers.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_02_len_ctr",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/02-len%20ctr.gb",
+        path: "gb/blargg/dmg_sound/02-len_ctr.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_03_trigger",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/03-trigger.gb",
+        path: "gb/blargg/dmg_sound/03-trigger.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_04_sweep",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/04-sweep.gb",
+        path: "gb/blargg/dmg_sound/04-sweep.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_05_sweep_details",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/05-sweep%20details.gb",
+        path: "gb/blargg/dmg_sound/05-sweep_details.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_06_overflow_on_trigger",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/06-overflow%20on%20trigger.gb",
+        path: "gb/blargg/dmg_sound/06-overflow_on_trigger.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_07_len_sweep_period_sync",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/07-len%20sweep%20period%20sync.gb",
+        path: "gb/blargg/dmg_sound/07-len_sweep_period_sync.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_08_len_ctr_during_power",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/08-len%20ctr%20during%20power.gb",
+        path: "gb/blargg/dmg_sound/08-len_ctr_during_power.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_09_wave_read_while_on",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/09-wave%20read%20while%20on.gb",
+        path: "gb/blargg/dmg_sound/09-wave_read_while_on.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_10_wave_trigger_while_on",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/10-wave%20trigger%20while%20on.gb",
+        path: "gb/blargg/dmg_sound/10-wave_trigger_while_on.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_11_regs_after_power",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/11-regs%20after%20power.gb",
+        path: "gb/blargg/dmg_sound/11-regs_after_power.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "dmg_sound_12_wave_write_while_on",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/12-wave%20write%20while%20on.gb",
+        path: "gb/blargg/dmg_sound/12-wave_write_while_on.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
+             halted nor locked, so the APU is failing to produce a state transition the test \
+             is waiting on — most likely a length-counter or NR52 status bit",
+        ),
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+];
+
 /// The Game Boy corpus.
 ///
 /// Deliberately small and end-to-end rather than exhaustive: these four are what prompts 03,
@@ -192,10 +367,11 @@ pub const GB_ROMS: &[TestRom] = &[
         max_frames: 20000,
         expected_hash: None,
         expected_failure: Some(
-            "hangs after printing sub-test 03's name. Not a CPU bug: all eleven sub-tests \
-             pass individually below, and MBC1 bank reads are verified against this exact \
-             ROM by `mbc1_banking_reaches_every_bank_of_a_real_rom`. Cause still unknown — \
-             something in the combined ROM's own sequencing between sub-tests",
+            "executes STOP while running its copied-to-WRAM runner at pc=0xC304, after \
+             printing sub-test 03's name. Not an instruction bug: all eleven sub-tests pass \
+             individually below, and MBC1 bank reads are verified against this exact ROM. \
+             Either STOP is reached because something earlier went wrong, or STOP itself is \
+             mishandled — a DMG resumes from STOP on a joypad line going low",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -226,7 +402,9 @@ pub const GB_ROMS: &[TestRom] = &[
         convention: Convention::BlarggSerial,
         max_frames: 6000,
         expected_hash: None,
-        expected_failure: Some("produces no serial output at all within the frame budget"),
+        expected_failure: Some(
+            "no output; the same wait-loop stall as the individual sound tests below",
+        ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
@@ -241,8 +419,10 @@ pub const GB_ROMS: &[TestRom] = &[
         // reference, and until then the harness must not claim this passes.
         expected_hash: None,
         expected_failure: Some(
-            "no validated reference hash recorded yet; the rendered output has not been \
-             compared against dmg-acid2's published reference image",
+            "renders and then halts waiting for interrupts, which is how this ROM signals it \
+             has finished — so the picture is probably right. It stays unvalidated only \
+             because the output has not been compared against the published reference image; \
+             recording that comparison would turn this into a real pass",
         ),
         licence: "MIT (Matt Currie).",
     },
@@ -279,7 +459,10 @@ impl TestRom {
 
 /// Every ROM across every system.
 pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
-    GB_ROMS.iter().chain(GB_CPU_INSTRS_SUBTESTS)
+    GB_ROMS
+        .iter()
+        .chain(GB_CPU_INSTRS_SUBTESTS)
+        .chain(GB_DMG_SOUND_SINGLES)
 }
 
 #[cfg(test)]

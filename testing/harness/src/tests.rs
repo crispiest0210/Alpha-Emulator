@@ -5,7 +5,7 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{Convention, TestRom, GB_CPU_INSTRS_SUBTESTS, GB_ROMS};
+use crate::corpus::{Convention, TestRom, GB_CPU_INSTRS_SUBTESTS, GB_DMG_SOUND_SINGLES, GB_ROMS};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -453,10 +453,10 @@ fn a_report_separates_skips_from_failures() {
 // ---------------------------------------------------------------------------
 
 /// Run one corpus ROM, skipping if it has not been fetched.
-fn run_gb_rom(rom: &TestRom) -> Option<TestOutcome> {
+fn run_gb_rom(rom: &TestRom) -> Option<(TestOutcome, String)> {
     let bytes = rom.load()?;
     let mut system = system_gb::GbSystem::new(bytes, None).expect("the ROM parses");
-    Some(match rom.convention {
+    let outcome = match rom.convention {
         Convention::BlarggSerial => run_blargg_serial(&mut system, rom.max_frames),
         Convention::BlarggMemory => run_blargg_memory(&mut system, rom.max_frames),
         Convention::Mooneye => run_mooneye(&mut system, rom.max_frames),
@@ -481,7 +481,9 @@ fn run_gb_rom(rom: &TestRom) -> Option<TestOutcome> {
                 },
             }
         }
-    })
+    };
+    let state = system.debug_state();
+    Some((outcome, state))
 }
 
 /// The whole Game Boy suite as one test.
@@ -500,11 +502,16 @@ fn gb_accuracy_suite() {
     let mut known_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
 
-    for rom in GB_ROMS.iter().chain(GB_CPU_INSTRS_SUBTESTS) {
-        let Some(outcome) = run_gb_rom(rom) else {
+    for rom in GB_ROMS
+        .iter()
+        .chain(GB_CPU_INSTRS_SUBTESTS)
+        .chain(GB_DMG_SOUND_SINGLES)
+    {
+        let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);
             continue;
         };
+        let mut failure_state = Some(state);
         eprintln!(
             "{:<22} {:>4}  {} frames",
             rom.name,
@@ -516,6 +523,9 @@ fn gb_accuracy_suite() {
         if !outcome.passed() {
             for line in outcome.report().lines() {
                 eprintln!("      | {}", line.trim_end());
+            }
+            if let Some(state) = failure_state.take() {
+                eprintln!("      | cpu: {state}");
             }
         }
 
