@@ -1,0 +1,23 @@
+# Build output
+/target/
+**/*.rs.bk
+
+# Fetched at test time, never committed (see prompt 17)
+/testing/test-roms/
+
+# Local manual-testing data: ROMs, saves, save states, library index
+/local/
+*.gb
+*.gbc
+*.gba
+*.nds
+*.sav
+*.state
+*.sqlite
+*.sqlite-journal
+
+# Snapshot test scratch
+**/*.snap.new
+
+# OS noise
+.DS_Store

@@ -1,0 +1,15 @@
+[package]
+name = "cpu-arm946e"
+description = "ARM946E-S CPU core (NDS ARM9): CP15, caches, TCM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+core-common.workspace = true
+savestate.workspace = true
+cpu-arm7tdmi.workspace = true
+bitflags.workspace = true

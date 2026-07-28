@@ -1,0 +1,18 @@
+[package]
+name = "system-gba"
+description = "Game Boy Advance system assembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+core-common.workspace = true
+savestate.workspace = true
+cart-common.workspace = true
+cpu-arm7tdmi.workspace = true
+ppu-tile2d.workspace = true
+apu-shared.workspace = true
+tracing.workspace = true

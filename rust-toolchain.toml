@@ -1,0 +1,6 @@
+# Pinned so `rustup` auto-selects the right toolchain on a fresh clone — part of
+# the "one-command setup" guarantee. This is also the project MSRV
+# (`rust-version` in the workspace manifest); raise both together.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

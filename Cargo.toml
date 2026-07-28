@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "xtask",
+    "crates/core-common",
+    "crates/cpu-sm83",
+    "crates/cpu-arm7tdmi",
+    "crates/cpu-arm946e",
+    "crates/ppu-tile2d",
+    "crates/apu-shared",
+    "crates/cart-common",
+    "crates/system-gb",
+    "crates/system-gbc",
+    "crates/system-gba",
+    "crates/system-nds",
+    "crates/savestate",
+    "crates/debugger",
+    "crates/library",
+    "crates/frontend-core",
+    "crates/frontend-native",
+    "crates/frontend-headless",
+    "testing/harness",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vietlong/alpha-emulator"
+authors = ["Alpha Emulator contributors"]
+
+[workspace.dependencies]
+# --- internal crates ---
+core-common = { path = "crates/core-common" }
+cpu-sm83 = { path = "crates/cpu-sm83" }
+cpu-arm7tdmi = { path = "crates/cpu-arm7tdmi" }
+cpu-arm946e = { path = "crates/cpu-arm946e" }
+ppu-tile2d = { path = "crates/ppu-tile2d" }
+apu-shared = { path = "crates/apu-shared" }
+cart-common = { path = "crates/cart-common" }
+system-gb = { path = "crates/system-gb" }
+system-gbc = { path = "crates/system-gbc" }
+system-gba = { path = "crates/system-gba" }
+system-nds = { path = "crates/system-nds" }
+savestate = { path = "crates/savestate" }
+debugger = { path = "crates/debugger" }
+library = { path = "crates/library" }
+frontend-core = { path = "crates/frontend-core" }
+
+# --- shared third-party (versions pinned once, here) ---
+anyhow = "1.0"
+thiserror = "2.0"
+bitflags = "2.13"
+serde = { version = "1.0", features = ["derive"] }
+# NB: bincode 3.0.0 on crates.io is a placeholder release that only `compile_error!`s.
+# 2.x is the real current line.
+bincode = { version = "2.0", features = ["serde"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4.6", features = ["derive"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+rtrb = "0.3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+directories = "6.0"
+
+# --- frontend-only (must never appear in core/system/cpu crates) ---
+wgpu = "29.0"
+winit = "0.30"
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
+cpal = "0.18"
+
+# --- dev/test ---
+insta = "1.48"
+criterion = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Emulation is unusably slow in a fully unoptimized debug build. Optimize the
+# core crates even in dev profile so `cargo xtask dev` is playable.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

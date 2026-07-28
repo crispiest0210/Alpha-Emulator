@@ -1,0 +1,14 @@
+[package]
+name = "core-common"
+description = "Shared emulation primitives: Scheduler, Bus, Cpu trait, System trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+bitflags.workspace = true

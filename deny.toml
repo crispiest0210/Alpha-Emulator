@@ -1,0 +1,58 @@
+# cargo-deny configuration.
+#
+# The `bans` section below is not a supply-chain policy — it is the mechanical
+# enforcement of the crate-boundary rule from 00-INDEX-AND-ARCHITECTURE.md §3:
+#
+#   Nothing under crates/system-*, crates/cpu-*, crates/ppu-*, crates/apu-*,
+#   crates/savestate, or crates/core-common may depend on winit, wgpu, egui, or cpal.
+#
+# `wrappers` lists the only crates permitted to depend *directly* on each GUI/audio
+# crate. Any core crate that grows such a dependency fails `cargo deny check bans`
+# in CI, rather than relying on code-review discipline to catch it.
+
+[graph]
+all-features = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[[bans.deny]]
+name = "winit"
+wrappers = ["frontend-native", "egui-winit"]
+
+[[bans.deny]]
+name = "wgpu"
+wrappers = ["frontend-native", "egui-wgpu"]
+
+[[bans.deny]]
+name = "egui"
+wrappers = ["frontend-native", "egui-wgpu", "egui-winit"]
+
+[[bans.deny]]
+name = "cpal"
+wrappers = ["frontend-native"]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[advisories]
+yanked = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
