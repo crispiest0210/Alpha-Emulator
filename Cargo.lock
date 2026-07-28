@@ -538,8 +538,10 @@ name = "core-common"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",
+ "savestate",
  "thiserror 2.0.19",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
