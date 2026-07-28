@@ -42,7 +42,7 @@ Component status:
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
-| `system-gbc` — CGB palette RAM, `KEY1` speed switch, tile attributes, model detection | units done and tested; **PPU/CPU wiring and HDMA not started** |
+| `system-gbc` — CGB palette RAM, `KEY1` speed switch, tile attributes, HDMA, model detection | units done and tested; **PPU/CPU wiring not started** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | Everything else | not started |
 

@@ -29,18 +29,21 @@
 //!   from; nothing reads it yet.
 //! - [`SpeedSwitch`] needs `STOP` in `system-gb` to consult it, and the CPU's cycle accounting
 //!   to apply [`SpeedSwitch::cpu_multiplier`].
-//! - HDMA (`0xFF51`-`0xFF55`) is not written yet; its HBlank mode needs a PPU hook to exist
-//!   first, so it follows the parameterisation rather than preceding it.
+//! - [`Hdma`] decides what to copy and when, but nothing calls it: its general-purpose mode
+//!   needs the bus to perform the copy, and its HBlank mode additionally needs a PPU hook at
+//!   the start of each horizontal blank.
 //! - DMG-compatibility mode needs the boot path to install a compatibility palette through
 //!   [`CgbPalettes::set_colour`].
 
 #![deny(unsafe_code)]
 
 pub mod attributes;
+pub mod hdma;
 pub mod palettes;
 pub mod speed;
 
 pub use attributes::{background_wins, TileAttributes};
+pub use hdma::Hdma;
 pub use palettes::{rgb555_to_rgba8, CgbPalettes};
 pub use speed::SpeedSwitch;
 
