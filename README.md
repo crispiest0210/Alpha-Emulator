@@ -16,7 +16,7 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ❌ | ❌ | ❌ | Subsystems done and tested; colour resolution wired into the PPU. Tile attributes, speed switch, and HDMA not yet driven |
+| Game Boy Color | ❌ | ❌ | ❌ | PPU renders in colour with per-tile palettes and banked tile data. Sprite priority, speed switch, and HDMA not yet driven |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
@@ -45,7 +45,7 @@ Component status:
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
-| `system-gbc` — CGB palette RAM, `KEY1` speed switch, tile attributes, HDMA, model detection | units done and tested; PPU resolves colour through CGB palette RAM. **Attribute fetch, speed switch, and HDMA not yet driven** |
+| `system-gbc` — CGB palette RAM, `KEY1` speed switch, HDMA, model detection | units done and tested; PPU renders colour with per-tile attributes. **CGB sprite priority, speed switch, and HDMA not yet driven** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | Everything else | not started |
 

@@ -20,7 +20,8 @@
 //! write to both. That is deliberate duplication of a *read*, not of state: neither module
 //! stores the other's fields.
 
-use crate::memory::GbModel;
+use crate::attributes::TileAttributes;
+use crate::memory::{self, GbModel};
 use core_common::{Framebuffer, Rgba8, Savable, StateError, StateReader, StateWriter};
 use ppu_tile2d::{
     render_sprites, render_text_background, BackgroundParams, BitDepth, MonochromePalette,
@@ -82,6 +83,11 @@ struct GbTilemap<'a> {
     vram: &'a [u8],
     map_base: usize,
     signed_tiles: bool,
+    /// Read the CGB attribute byte that sits beside each map cell in VRAM bank 1.
+    ///
+    /// Off for a DMG *and* for a CGB running a DMG cartridge: in both cases nothing ever wrote
+    /// that bank, so decoding it would turn uninitialised memory into palette and flip bits.
+    attributes: bool,
 }
 
 impl TilemapSource for GbTilemap<'_> {
@@ -93,9 +99,32 @@ impl TilemapSource for GbTilemap<'_> {
         } else {
             number as usize * 16
         };
+
+        if !self.attributes {
+            return TileRef {
+                data_offset,
+                ..Default::default()
+            };
+        }
+
+        // The attribute byte lives at the same offset one bank up — the two banks are parallel
+        // views of the same map, which is why one index serves both.
+        let raw = self
+            .vram
+            .get(cell + memory::VRAM_BANK_SIZE)
+            .copied()
+            .unwrap_or(0);
+        let attributes = TileAttributes::from_byte(raw);
         TileRef {
-            data_offset,
-            ..Default::default()
+            // A tile's *pixels* can also live in the second bank, independently of where its
+            // attribute byte does.
+            data_offset: data_offset + (attributes.bank as usize) * memory::VRAM_BANK_SIZE,
+            palette: attributes.palette,
+            flip_x: attributes.flip_x,
+            flip_y: attributes.flip_y,
+            // `TileRef` counts priority with lower in front, the opposite sense to the
+            // hardware bit, which asks to be drawn *over* sprites.
+            priority: u8::from(!attributes.priority),
         }
     }
 }
@@ -199,8 +228,9 @@ impl GbPpu {
         // On a CGB the background always draws; `LCDC` bit 0 only drops its priority.
         let draw_background = self.has(lcdc::BG_ENABLE) || !model.bg_enable_blanks_background();
         if draw_background {
-            self.render_background(line, vram);
-            self.render_window(line, vram);
+            let attributes = model.uses_tile_attributes();
+            self.render_background(line, vram, attributes);
+            self.render_window(line, vram, attributes);
         }
         if self.has(lcdc::OBJ_ENABLE) {
             self.render_sprites_for_line(line, vram, oam);
@@ -217,7 +247,7 @@ impl GbPpu {
         self.scanline.resolve_into(palettes, backdrop, row);
     }
 
-    fn render_background(&mut self, line: u8, vram: &[u8]) {
+    fn render_background(&mut self, line: u8, vram: &[u8], attributes: bool) {
         let map = GbTilemap {
             vram,
             map_base: if self.has(lcdc::BG_MAP_HIGH) {
@@ -226,6 +256,7 @@ impl GbPpu {
                 vram::MAP_LOW
             },
             signed_tiles: !self.has(lcdc::TILE_DATA_LOW),
+            attributes,
         };
         let params = BackgroundParams::full_line(
             line as u32,
@@ -236,7 +267,7 @@ impl GbPpu {
         render_text_background(&map, vram, &params, &mut self.scanline);
     }
 
-    fn render_window(&mut self, line: u8, vram: &[u8]) {
+    fn render_window(&mut self, line: u8, vram: &[u8], attributes: bool) {
         if !self.has(lcdc::WINDOW_ENABLE) || line < self.wy {
             return;
         }
@@ -255,6 +286,7 @@ impl GbPpu {
                 vram::MAP_LOW
             },
             signed_tiles: !self.has(lcdc::TILE_DATA_LOW),
+            attributes,
         };
         let params = BackgroundParams {
             // The window scrolls with its own counter, not with LY or SCY.

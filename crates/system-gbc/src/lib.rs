@@ -24,11 +24,11 @@
 //!
 //! - Colour resolution is wired: `system-gb`'s PPU takes a
 //!   [`PaletteSource`](ppu_tile2d::PaletteSource) and a [`Model`], so handing it
-//!   [`CgbPalettes`] produces a colour picture. What is still missing is the *source* of the
-//!   per-pixel palette index — the PPU reads no attribute byte yet, so every background pixel
-//!   still resolves through palette 0.
-//! - `system-gb` already banks VRAM and WRAM, so [`TileAttributes`] has somewhere to be read
-//!   from; nothing reads it yet.
+//!   [`CgbPalettes`] produces a colour picture, with per-tile palettes, flips, and tile data
+//!   from either VRAM bank read out of the attribute map in bank 1.
+//! - Sprite-versus-background priority still uses the DMG rule. The CGB rule is written and
+//!   tested as [`background_wins`], but the sprite compositor does not consult it yet, so a
+//!   background tile that asks to be drawn over a sprite is currently ignored.
 //! - [`SpeedSwitch`] needs `STOP` in `system-gb` to consult it, and the CPU's cycle accounting
 //!   to apply [`SpeedSwitch::cpu_multiplier`].
 //! - [`Hdma`] decides what to copy and when, but nothing calls it: its general-purpose mode
@@ -39,15 +39,20 @@
 
 #![deny(unsafe_code)]
 
-pub mod attributes;
 pub mod hdma;
 pub mod palettes;
 pub mod speed;
 
-pub use attributes::{background_wins, TileAttributes};
 pub use hdma::Hdma;
+
 pub use palettes::{rgb555_to_rgba8, CgbPalettes};
 pub use speed::SpeedSwitch;
+/// Background tile attributes, and the sprite-priority rule they feed.
+///
+/// Re-exported for the same reason as [`Model`]: the only thing that reads an attribute byte
+/// is the PPU, and the PPU lives in `system-gb`. Defining the decode here would mean the
+/// renderer could not reach it without depending on this crate, which is backwards.
+pub use system_gb::{background_wins, TileAttributes};
 
 /// Which machine is being emulated.
 ///
@@ -183,5 +188,66 @@ mod integration_tests {
         assert!(m.uses_colour_palettes());
         assert!(!m.uses_tile_attributes());
         assert!(!m.bg_enable_blanks_background(), "it is CGB hardware");
+    }
+
+    #[test]
+    fn the_attribute_byte_picks_a_palette_per_tile() {
+        // Without this the whole background resolves through palette 0, which looks like
+        // colour is working right up until a game uses more than one palette on a line.
+        let (mut ppu, mut vram, oam) = ppu_showing_colour_one();
+        // Tile (1,0) also points at tile 1, so both cells draw identical pixels.
+        vram[0x1801] = 1;
+        // Bank 1, same offsets: cell 0 keeps palette 0, cell 1 takes palette 3.
+        vram[0x2000 + 0x1800] = 0;
+        vram[0x2000 + 0x1801] = 3;
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F); // palette 0 colour 1: red
+        palettes.set_colour(false, 3, 1, 0x7C00); // palette 3 colour 1: blue
+
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(ppu.framebuffer().pixel(0, 0).r, 0xFF, "first tile is red");
+        assert_eq!(ppu.framebuffer().pixel(8, 0).b, 0xFF, "second tile is blue");
+        assert_eq!(ppu.framebuffer().pixel(8, 0).r, 0x00);
+    }
+
+    #[test]
+    fn compatibility_mode_ignores_whatever_is_in_the_second_bank() {
+        // The reason CgbInDmgMode exists. A DMG cartridge never writes bank 1, so anything
+        // read from there is uninitialised memory — and decoding it as palette and flip bits
+        // would corrupt a picture that is otherwise correct.
+        let (mut ppu, mut vram, oam) = ppu_showing_colour_one();
+        vram[0x2000 + 0x1800] = 0xFF; // palette 7, bank 1, both flips, priority
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F);
+        palettes.set_colour(false, 7, 1, 0x7C00);
+
+        ppu.render_scanline_with(Model::CgbInDmgMode, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0).r,
+            0xFF,
+            "still palette 0, not the 7 the stale byte names"
+        );
+    }
+
+    #[test]
+    fn a_tile_can_take_its_pixels_from_the_second_bank() {
+        let (mut ppu, mut vram, oam) = ppu_showing_colour_one();
+        // Tile 2 in bank 1, colour index 1 everywhere.
+        for row in 0..8 {
+            vram[0x2000 + 0x20 + row * 2] = 0xFF;
+        }
+        vram[0x1800] = 2; // the map names tile 2
+        vram[0x2000 + 0x1800] = 0x08; // attribute: bank 1
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F);
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0).r,
+            0xFF,
+            "tile data came from bank 1"
+        );
     }
 }

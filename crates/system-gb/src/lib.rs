@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod apu;
+pub mod attributes;
 pub mod joypad;
 pub mod memory;
 pub mod ppu;
@@ -14,6 +15,7 @@ pub mod system;
 pub mod timing;
 
 pub use apu::GbApu;
+pub use attributes::{background_wins, TileAttributes};
 pub use joypad::Joypad;
 pub use memory::{GbBus, GbModel};
 pub use ppu::GbPpu;
