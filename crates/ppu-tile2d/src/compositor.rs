@@ -1,0 +1,742 @@
+//! Tile decode and scanline compositing.
+
+use crate::{BitDepth, IndexedPixel, PixelSource, ScanlineBuffer, TileRef};
+
+/// Decode one row of a tile into colour indices, leftmost pixel first.
+///
+/// `out` receives eight indices. `row_data` is the row's bytes, already sliced out by the
+/// caller — [`BitDepth::row_size`] long.
+///
+/// The 2bpp format is the odd one: rather than packing pixels into bytes, it stores two
+/// **bitplanes**, one byte each, and pixel `x` takes bit `7-x` from each. That is why a Game
+/// Boy tile cannot be read as a straightforward array of pixel values.
+#[inline]
+pub fn decode_tile_row(row_data: &[u8], depth: BitDepth, out: &mut [u8; 8]) {
+    match depth {
+        BitDepth::Two => {
+            let low = row_data.first().copied().unwrap_or(0);
+            let high = row_data.get(1).copied().unwrap_or(0);
+            for (x, pixel) in out.iter_mut().enumerate() {
+                let shift = 7 - x;
+                *pixel = ((low >> shift) & 1) | (((high >> shift) & 1) << 1);
+            }
+        }
+        BitDepth::Four => {
+            for (i, pair) in out.chunks_exact_mut(2).enumerate() {
+                let byte = row_data.get(i).copied().unwrap_or(0);
+                // The low nibble is the *left* pixel, which reads backwards but is correct.
+                pair[0] = byte & 0x0F;
+                pair[1] = byte >> 4;
+            }
+        }
+        BitDepth::Eight => {
+            for (x, pixel) in out.iter_mut().enumerate() {
+                *pixel = row_data.get(x).copied().unwrap_or(0);
+            }
+        }
+    }
+}
+
+/// Fetch the decoded row of a tile, honouring both flips.
+#[inline]
+fn tile_row_pixels(
+    tile: &TileRef,
+    tile_data: &[u8],
+    depth: BitDepth,
+    row_in_tile: u32,
+    out: &mut [u8; 8],
+) {
+    let row = if tile.flip_y {
+        7 - row_in_tile
+    } else {
+        row_in_tile
+    };
+    let offset = tile.data_offset + row as usize * depth.row_size();
+    let end = offset + depth.row_size();
+
+    if end <= tile_data.len() {
+        decode_tile_row(&tile_data[offset..end], depth, out);
+    } else {
+        // A tile pointing outside the region reads as transparent rather than panicking; a
+        // game with a mis-set base register should show garbage, not take the emulator down.
+        *out = [0; 8];
+    }
+
+    if tile.flip_x {
+        out.reverse();
+    }
+}
+
+/// Supplies tilemap cells for a text-mode background.
+///
+/// Implemented by each system, because the cell formats have nothing in common: one byte on
+/// the Game Boy, a byte plus an attribute byte in the second VRAM bank on the GBC, and a
+/// 16-bit word on the GBA.
+pub trait TilemapSource {
+    /// The cell at map coordinates `(tile_x, tile_y)`, which the caller has already wrapped
+    /// into the map's dimensions.
+    fn tile_at(&self, tile_x: u32, tile_y: u32) -> TileRef;
+}
+
+/// Everything a text-mode background scanline needs beyond its tilemap.
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundParams {
+    /// The screen line being drawn.
+    pub line: u32,
+    /// Scroll offsets, in pixels.
+    pub scroll_x: u32,
+    pub scroll_y: u32,
+    /// Map dimensions in tiles. The map wraps at these bounds.
+    pub map_width: u32,
+    pub map_height: u32,
+    pub depth: BitDepth,
+    /// Leftmost screen pixel to draw. Used by the Game Boy's window, which starts partway
+    /// across the line.
+    pub start_x: usize,
+    /// Screen-space offset subtracted before scrolling, again for the window.
+    pub origin_x: u32,
+}
+
+impl BackgroundParams {
+    /// A whole-line background with no window offset.
+    pub fn full_line(line: u32, scroll_x: u32, scroll_y: u32, depth: BitDepth) -> Self {
+        Self {
+            line,
+            scroll_x,
+            scroll_y,
+            map_width: 32,
+            map_height: 32,
+            depth,
+            start_x: 0,
+            origin_x: 0,
+        }
+    }
+}
+
+/// Composite one scanline of a text-mode (non-affine) background.
+///
+/// Writes every pixel it covers, including index 0 — a background has no transparency of its
+/// own, and index 0 must survive into the buffer because sprite priority is decided against
+/// it.
+pub fn render_text_background<M: TilemapSource>(
+    map: &M,
+    tile_data: &[u8],
+    params: &BackgroundParams,
+    out: &mut ScanlineBuffer,
+) {
+    let map_pixel_height = params.map_height * 8;
+    let map_pixel_width = params.map_width * 8;
+    if map_pixel_width == 0 || map_pixel_height == 0 {
+        return;
+    }
+
+    let source_y = (params.line.wrapping_add(params.scroll_y)) % map_pixel_height;
+    let tile_y = source_y / 8;
+    let row_in_tile = source_y % 8;
+
+    let mut pixels = [0u8; 8];
+    // Track which tile is loaded so a run of pixels inside one tile decodes its row once
+    // rather than eight times.
+    let mut loaded_tile_x = u32::MAX;
+    let mut tile = TileRef::default();
+
+    for x in params.start_x..out.width() {
+        let screen_x = x as u32 - params.origin_x.min(x as u32);
+        let source_x = (screen_x.wrapping_add(params.scroll_x)) % map_pixel_width;
+        let tile_x = source_x / 8;
+
+        if tile_x != loaded_tile_x {
+            tile = map.tile_at(tile_x, tile_y);
+            tile_row_pixels(&tile, tile_data, params.depth, row_in_tile, &mut pixels);
+            loaded_tile_x = tile_x;
+        }
+
+        out.set(
+            x,
+            IndexedPixel {
+                color: pixels[(source_x % 8) as usize],
+                palette: tile.palette,
+                priority: tile.priority,
+                source: PixelSource::Background,
+            },
+        );
+    }
+}
+
+/// One sprite, normalized out of whatever the system's OAM looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sprite {
+    /// Screen position of the top-left corner. Signed so a sprite can hang off either edge.
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Byte offset of the sprite's first tile within the tile-data slice.
+    pub tile_offset: usize,
+    pub palette: u8,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    /// Hidden wherever the background pixel is not index 0.
+    pub behind_background: bool,
+}
+
+/// Composite one scanline of sprites.
+///
+/// `sprites` must already be in priority order, front-most first, and already filtered to
+/// those on this line. Both are the system's job: the per-line sprite limit and the
+/// tie-breaking rule differ between them — a DMG breaks ties by X coordinate while a GBC uses
+/// OAM index — and neither belongs in shared code.
+///
+/// Colour index 0 is transparent and never written, which is what lets sprites overlap
+/// without punching holes in each other.
+pub fn render_sprites(
+    sprites: &[Sprite],
+    tile_data: &[u8],
+    depth: BitDepth,
+    line: u32,
+    out: &mut ScanlineBuffer,
+) {
+    // Remembers which pixels a nearer sprite already claimed, so a farther one cannot
+    // overwrite it even where the nearer sprite is opaque.
+    let mut claimed = vec![false; out.width()];
+    let mut pixels = [0u8; 8];
+
+    for sprite in sprites {
+        let row = line as i32 - sprite.y;
+        if row < 0 || row >= sprite.height as i32 {
+            continue;
+        }
+        let row = if sprite.flip_y {
+            sprite.height - 1 - row as u32
+        } else {
+            row as u32
+        };
+
+        // Tall sprites are stacked 8x8 tiles, so the row selects which tile as well as which
+        // row within it.
+        let tile_index_in_sprite = row / 8;
+        let row_in_tile = row % 8;
+
+        for tile_column in 0..(sprite.width / 8) {
+            // A horizontal flip reverses which tile column appears where, not just the
+            // pixels inside each one.
+            let source_column = if sprite.flip_x {
+                sprite.width / 8 - 1 - tile_column
+            } else {
+                tile_column
+            };
+            let tile = TileRef {
+                data_offset: sprite.tile_offset
+                    + (tile_index_in_sprite * (sprite.width / 8) + source_column) as usize
+                        * depth.tile_size(),
+                palette: sprite.palette,
+                flip_x: sprite.flip_x,
+                // The row was already flipped above, so the tile fetch must not flip again.
+                flip_y: false,
+                priority: 0,
+            };
+            tile_row_pixels(&tile, tile_data, depth, row_in_tile, &mut pixels);
+
+            for (pixel_x, &color) in pixels.iter().enumerate() {
+                if color == 0 {
+                    continue; // transparent
+                }
+                let screen_x = sprite.x + (tile_column * 8) as i32 + pixel_x as i32;
+                if screen_x < 0 || screen_x as usize >= out.width() {
+                    continue;
+                }
+                let screen_x = screen_x as usize;
+                if claimed[screen_x] {
+                    continue; // a nearer sprite already owns this pixel
+                }
+                claimed[screen_x] = true;
+
+                if sprite.behind_background && out.get(screen_x).hides_sprite_behind_it() {
+                    // The sprite loses to the background here, but it has still claimed the
+                    // pixel: a farther sprite does not get to show through instead.
+                    continue;
+                }
+
+                out.set(
+                    screen_x,
+                    IndexedPixel {
+                        color,
+                        palette: sprite.palette,
+                        priority: 0,
+                        source: PixelSource::Sprite,
+                    },
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2bpp tile whose eight rows read 0,1,2,3,0,1,2,3 across every column.
+    fn striped_2bpp_tile() -> Vec<u8> {
+        let mut tile = vec![0u8; 16];
+        for row in 0..8 {
+            // Columns 0-1 index 0, 2-3 index 1, 4-5 index 2, 6-7 index 3.
+            tile[row * 2] = 0b0011_0011; // low bitplane
+            tile[row * 2 + 1] = 0b0000_1111; // high bitplane
+        }
+        tile
+    }
+
+    #[test]
+    fn two_bpp_decodes_from_bitplanes_not_packed_pixels() {
+        let tile = striped_2bpp_tile();
+        let mut out = [0u8; 8];
+        decode_tile_row(&tile[0..2], BitDepth::Two, &mut out);
+        assert_eq!(out, [0, 0, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn two_bpp_takes_the_leftmost_pixel_from_the_high_bit() {
+        // A single set bit in the low plane at bit 7 is the *left* pixel.
+        let mut out = [0u8; 8];
+        decode_tile_row(&[0b1000_0000, 0x00], BitDepth::Two, &mut out);
+        assert_eq!(out, [1, 0, 0, 0, 0, 0, 0, 0]);
+
+        decode_tile_row(&[0x00, 0b0000_0001], BitDepth::Two, &mut out);
+        assert_eq!(out, [0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn four_bpp_puts_the_low_nibble_on_the_left() {
+        let mut out = [0u8; 8];
+        decode_tile_row(&[0x21, 0x43, 0x65, 0x87], BitDepth::Four, &mut out);
+        assert_eq!(out, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn eight_bpp_is_one_byte_per_pixel() {
+        let mut out = [0u8; 8];
+        decode_tile_row(&[1, 2, 3, 4, 5, 6, 7, 8], BitDepth::Eight, &mut out);
+        assert_eq!(out, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn a_short_row_decodes_as_transparent_rather_than_panicking() {
+        let mut out = [0u8; 8];
+        decode_tile_row(&[], BitDepth::Two, &mut out);
+        assert_eq!(out, [0; 8]);
+    }
+
+    // -- Backgrounds ---------------------------------------------------------
+
+    /// A tilemap where every cell points at tile 0, with configurable flips.
+    struct UniformMap {
+        tile: TileRef,
+    }
+
+    impl TilemapSource for UniformMap {
+        fn tile_at(&self, _tile_x: u32, _tile_y: u32) -> TileRef {
+            self.tile
+        }
+    }
+
+    /// A tilemap that returns a different tile per column, for testing scroll.
+    struct ColumnMap;
+
+    impl TilemapSource for ColumnMap {
+        fn tile_at(&self, tile_x: u32, _tile_y: u32) -> TileRef {
+            TileRef {
+                data_offset: (tile_x as usize % 2) * 16,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn colors_of(line: &ScanlineBuffer) -> Vec<u8> {
+        (0..line.width()).map(|x| line.get(x).color).collect()
+    }
+
+    #[test]
+    fn a_background_scanline_repeats_its_tile_across_the_line() {
+        let tile = striped_2bpp_tile();
+        let map = UniformMap {
+            tile: TileRef::default(),
+        };
+        let mut line = ScanlineBuffer::new(16);
+        render_text_background(
+            &map,
+            &tile,
+            &BackgroundParams::full_line(0, 0, 0, BitDepth::Two),
+            &mut line,
+        );
+        assert_eq!(
+            colors_of(&line),
+            vec![0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_shifts_the_line_within_the_tile() {
+        let tile = striped_2bpp_tile();
+        let map = UniformMap {
+            tile: TileRef::default(),
+        };
+        let mut line = ScanlineBuffer::new(8);
+        render_text_background(
+            &map,
+            &tile,
+            &BackgroundParams::full_line(0, 2, 0, BitDepth::Two),
+            &mut line,
+        );
+        // Scrolling right by two starts the line two pixels into the pattern.
+        assert_eq!(colors_of(&line), vec![1, 1, 2, 2, 3, 3, 0, 0]);
+    }
+
+    #[test]
+    fn the_background_wraps_at_the_map_edge() {
+        // Scrolling past the end of a 32-tile map comes back to the start rather than
+        // reading off the end.
+        let mut tiles = vec![0u8; 32];
+        tiles[0..16].copy_from_slice(&striped_2bpp_tile());
+        // Tile 1 is solid index 3.
+        for row in 0..8 {
+            tiles[16 + row * 2] = 0xFF;
+            tiles[16 + row * 2 + 1] = 0xFF;
+        }
+
+        let mut line = ScanlineBuffer::new(8);
+        let mut params = BackgroundParams::full_line(0, 0, 0, BitDepth::Two);
+        // Start one pixel before the map wraps: tile 31 then tile 0.
+        params.scroll_x = 32 * 8 - 4;
+        render_text_background(&ColumnMap, &tiles, &params, &mut line);
+
+        // Tile 31 is odd so it uses tile data 1 (solid), tile 0 is even (striped).
+        assert_eq!(colors_of(&line), vec![3, 3, 3, 3, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn vertical_scroll_selects_the_row_within_the_tile() {
+        // A tile whose rows each hold their own row number.
+        let mut tile = vec![0u8; 16];
+        for row in 0..8u8 {
+            tile[row as usize * 2] = if row & 1 != 0 { 0xFF } else { 0 };
+            tile[row as usize * 2 + 1] = if row & 2 != 0 { 0xFF } else { 0 };
+        }
+        let map = UniformMap {
+            tile: TileRef::default(),
+        };
+
+        for (scroll_y, expected) in [(0u32, 0u8), (1, 1), (2, 2), (3, 3), (4, 0)] {
+            let mut line = ScanlineBuffer::new(8);
+            render_text_background(
+                &map,
+                &tile,
+                &BackgroundParams::full_line(0, 0, scroll_y, BitDepth::Two),
+                &mut line,
+            );
+            assert_eq!(line.get(0).color, expected, "scroll_y {scroll_y}");
+        }
+    }
+
+    #[test]
+    fn tile_flips_mirror_the_fetched_row() {
+        let tile = striped_2bpp_tile();
+
+        let mut line = ScanlineBuffer::new(8);
+        render_text_background(
+            &UniformMap {
+                tile: TileRef {
+                    flip_x: true,
+                    ..Default::default()
+                },
+            },
+            &tile,
+            &BackgroundParams::full_line(0, 0, 0, BitDepth::Two),
+            &mut line,
+        );
+        assert_eq!(colors_of(&line), vec![3, 3, 2, 2, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_background_writes_index_zero_so_sprite_priority_can_see_it() {
+        let tile = striped_2bpp_tile();
+        let mut line = ScanlineBuffer::new(8);
+        render_text_background(
+            &UniformMap {
+                tile: TileRef::default(),
+            },
+            &tile,
+            &BackgroundParams::full_line(0, 0, 0, BitDepth::Two),
+            &mut line,
+        );
+        // Pixel 0 is colour index 0, but it is a Background pixel, not the backdrop.
+        assert_eq!(line.get(0).color, 0);
+        assert_eq!(line.get(0).source, PixelSource::Background);
+    }
+
+    #[test]
+    fn a_window_style_background_starts_partway_across_the_line() {
+        let tile = striped_2bpp_tile();
+        let mut line = ScanlineBuffer::new(16);
+        let mut params = BackgroundParams::full_line(0, 0, 0, BitDepth::Two);
+        params.start_x = 8;
+        params.origin_x = 8;
+        render_text_background(
+            &UniformMap {
+                tile: TileRef::default(),
+            },
+            &tile,
+            &params,
+            &mut line,
+        );
+
+        // Nothing before the start.
+        for x in 0..8 {
+            assert_eq!(line.get(x).source, PixelSource::Backdrop, "x {x}");
+        }
+        // And the pattern begins at its own origin rather than mid-tile.
+        assert_eq!(
+            colors_of(&line)[8..],
+            [0, 0, 1, 1, 2, 2, 3, 3],
+            "the window starts at the left of its own tile"
+        );
+    }
+
+    // -- Sprites -------------------------------------------------------------
+
+    /// An 8x8 tile that is solid colour index 1.
+    fn solid_tile(color: u8) -> Vec<u8> {
+        let mut tile = vec![0u8; 16];
+        for row in 0..8 {
+            tile[row * 2] = if color & 1 != 0 { 0xFF } else { 0 };
+            tile[row * 2 + 1] = if color & 2 != 0 { 0xFF } else { 0 };
+        }
+        tile
+    }
+
+    fn sprite_at(x: i32, y: i32) -> Sprite {
+        Sprite {
+            x,
+            y,
+            width: 8,
+            height: 8,
+            tile_offset: 0,
+            palette: 0,
+            flip_x: false,
+            flip_y: false,
+            behind_background: false,
+        }
+    }
+
+    #[test]
+    fn a_sprite_draws_only_where_it_covers_the_line() {
+        let tile = solid_tile(1);
+        let mut line = ScanlineBuffer::new(16);
+        render_sprites(&[sprite_at(4, 0)], &tile, BitDepth::Two, 0, &mut line);
+
+        for x in 0..4 {
+            assert_eq!(line.get(x).source, PixelSource::Backdrop);
+        }
+        for x in 4..12 {
+            assert_eq!(line.get(x).source, PixelSource::Sprite, "x {x}");
+            assert_eq!(line.get(x).color, 1);
+        }
+        for x in 12..16 {
+            assert_eq!(line.get(x).source, PixelSource::Backdrop);
+        }
+    }
+
+    #[test]
+    fn a_sprite_off_this_line_draws_nothing() {
+        let tile = solid_tile(1);
+        let mut line = ScanlineBuffer::new(16);
+        render_sprites(&[sprite_at(0, 8)], &tile, BitDepth::Two, 0, &mut line);
+        assert!((0..16).all(|x| line.get(x).source == PixelSource::Backdrop));
+    }
+
+    #[test]
+    fn a_sprite_hanging_off_the_edge_is_clipped_not_wrapped() {
+        let tile = solid_tile(1);
+        let mut line = ScanlineBuffer::new(16);
+        render_sprites(&[sprite_at(-4, 0)], &tile, BitDepth::Two, 0, &mut line);
+        for x in 0..4 {
+            assert_eq!(line.get(x).source, PixelSource::Sprite, "x {x}");
+        }
+        for x in 4..16 {
+            assert_eq!(line.get(x).source, PixelSource::Backdrop, "x {x}");
+        }
+    }
+
+    #[test]
+    fn transparent_sprite_pixels_leave_what_is_underneath() {
+        // Colour index 0 within a sprite is transparent, which is what lets sprites be any
+        // shape at all.
+        let tile = striped_2bpp_tile(); // columns 0-1 are index 0
+        let mut line = ScanlineBuffer::new(8);
+        render_sprites(&[sprite_at(0, 0)], &tile, BitDepth::Two, 0, &mut line);
+        assert_eq!(line.get(0).source, PixelSource::Backdrop);
+        assert_eq!(line.get(1).source, PixelSource::Backdrop);
+        assert_eq!(line.get(2).source, PixelSource::Sprite);
+    }
+
+    #[test]
+    fn the_first_sprite_in_the_list_wins_an_overlap() {
+        // Callers pass sprites front-most first, so a later one cannot paint over an earlier.
+        let mut tiles = solid_tile(1);
+        tiles.extend(solid_tile(3));
+
+        let front = Sprite {
+            palette: 0,
+            ..sprite_at(0, 0)
+        };
+        let behind = Sprite {
+            tile_offset: 16,
+            palette: 1,
+            ..sprite_at(4, 0)
+        };
+
+        let mut line = ScanlineBuffer::new(16);
+        render_sprites(&[front, behind], &tiles, BitDepth::Two, 0, &mut line);
+
+        // Where they overlap, the front sprite's colour and palette survive.
+        for x in 0..8 {
+            assert_eq!(line.get(x).color, 1, "x {x}");
+            assert_eq!(line.get(x).palette, 0, "x {x}");
+        }
+        // And the one behind still draws where it is not covered.
+        for x in 8..12 {
+            assert_eq!(line.get(x).color, 3, "x {x}");
+            assert_eq!(line.get(x).palette, 1, "x {x}");
+        }
+    }
+
+    #[test]
+    fn a_behind_background_sprite_shows_through_index_zero_only() {
+        let bg_tile = striped_2bpp_tile(); // columns 0-1 index 0, the rest non-zero
+        let sprite_tile = solid_tile(2);
+
+        let mut line = ScanlineBuffer::new(8);
+        render_text_background(
+            &UniformMap {
+                tile: TileRef::default(),
+            },
+            &bg_tile,
+            &BackgroundParams::full_line(0, 0, 0, BitDepth::Two),
+            &mut line,
+        );
+        render_sprites(
+            &[Sprite {
+                behind_background: true,
+                ..sprite_at(0, 0)
+            }],
+            &sprite_tile,
+            BitDepth::Two,
+            0,
+            &mut line,
+        );
+
+        // Shows through where the background is index 0.
+        assert_eq!(line.get(0).source, PixelSource::Sprite);
+        assert_eq!(line.get(1).source, PixelSource::Sprite);
+        // Hidden everywhere the background is opaque.
+        for x in 2..8 {
+            assert_eq!(line.get(x).source, PixelSource::Background, "x {x}");
+        }
+    }
+
+    #[test]
+    fn a_hidden_behind_background_sprite_still_blocks_the_one_behind_it() {
+        // The nearer sprite loses to the background but keeps the pixel: a farther sprite
+        // does not get to appear in the gap.
+        let bg_tile = solid_tile(3);
+        let mut tiles = solid_tile(1);
+        tiles.extend(solid_tile(2));
+
+        let mut line = ScanlineBuffer::new(8);
+        render_text_background(
+            &UniformMap {
+                tile: TileRef::default(),
+            },
+            &bg_tile,
+            &BackgroundParams::full_line(0, 0, 0, BitDepth::Two),
+            &mut line,
+        );
+        render_sprites(
+            &[
+                Sprite {
+                    behind_background: true,
+                    ..sprite_at(0, 0)
+                },
+                Sprite {
+                    tile_offset: 16,
+                    ..sprite_at(0, 0)
+                },
+            ],
+            &tiles,
+            BitDepth::Two,
+            0,
+            &mut line,
+        );
+
+        for x in 0..8 {
+            assert_eq!(
+                line.get(x).source,
+                PixelSource::Background,
+                "the background still shows at x {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tall_sprite_selects_its_second_tile_on_the_lower_half() {
+        let mut tiles = solid_tile(1);
+        tiles.extend(solid_tile(3));
+
+        let tall = Sprite {
+            height: 16,
+            ..sprite_at(0, 0)
+        };
+
+        let mut top = ScanlineBuffer::new(8);
+        render_sprites(&[tall], &tiles, BitDepth::Two, 3, &mut top);
+        assert_eq!(top.get(0).color, 1, "the upper tile");
+
+        let mut bottom = ScanlineBuffer::new(8);
+        render_sprites(&[tall], &tiles, BitDepth::Two, 11, &mut bottom);
+        assert_eq!(bottom.get(0).color, 3, "the lower tile");
+    }
+
+    #[test]
+    fn flipping_a_tall_sprite_swaps_its_tiles_as_well_as_its_rows() {
+        let mut tiles = solid_tile(1);
+        tiles.extend(solid_tile(3));
+
+        let flipped = Sprite {
+            height: 16,
+            flip_y: true,
+            ..sprite_at(0, 0)
+        };
+
+        let mut top = ScanlineBuffer::new(8);
+        render_sprites(&[flipped], &tiles, BitDepth::Two, 3, &mut top);
+        assert_eq!(top.get(0).color, 3, "the lower tile is now on top");
+    }
+
+    #[test]
+    fn a_horizontally_flipped_wide_sprite_reverses_its_tile_columns() {
+        // Two 8x8 tiles side by side, distinguishable from each other.
+        let mut tiles = solid_tile(1);
+        tiles.extend(solid_tile(3));
+
+        let wide = Sprite {
+            width: 16,
+            flip_x: true,
+            ..sprite_at(0, 0)
+        };
+
+        let mut line = ScanlineBuffer::new(16);
+        render_sprites(&[wide], &tiles, BitDepth::Two, 0, &mut line);
+        // Unflipped this would be tile 0 then tile 1; flipped it is the other way round.
+        assert_eq!(line.get(0).color, 3);
+        assert_eq!(line.get(8).color, 1);
+    }
+}
