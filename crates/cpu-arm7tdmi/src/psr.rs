@@ -95,6 +95,11 @@ impl Psr {
     pub const Z: u32 = 1 << 30;
     pub const C: u32 = 1 << 29;
     pub const V: u32 = 1 << 28;
+    /// Sticky overflow, set by ARMv5TE saturating arithmetic and never cleared implicitly.
+    ///
+    /// Defined here rather than in `cpu-arm946e` because it lives in the same `CPSR` word;
+    /// the ARM7TDMI simply never sets it.
+    pub const Q: u32 = 1 << 27;
     /// IRQ disable.
     pub const I: u32 = 1 << 7;
     /// FIQ disable.
@@ -164,6 +169,10 @@ impl Psr {
     pub fn thumb(self) -> bool {
         self.get(Self::T)
     }
+    #[inline]
+    pub fn sticky_overflow(self) -> bool {
+        self.get(Self::Q)
+    }
 
     #[inline]
     pub fn set_negative(&mut self, on: bool) {
@@ -192,6 +201,10 @@ impl Psr {
     #[inline]
     pub fn set_thumb(&mut self, on: bool) {
         self.set(Self::T, on)
+    }
+    #[inline]
+    pub fn set_sticky_overflow(&mut self, on: bool) {
+        self.set(Self::Q, on)
     }
 
     /// Set N and Z from a 32-bit result. The two flags almost always move together.

@@ -18,7 +18,7 @@ and tested**, not what is planned. It is updated as work lands.
 | Game Boy (DMG) | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
-| Nintendo DS | ❌ | ❌ | ❌ | Not started — will be explicitly partial when it does begin |
+| Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **No system runs a ROM yet.** `cargo xtask dev` opens an empty window.
 
@@ -31,6 +31,7 @@ Component status:
 | `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
 | `cpu-sm83` — Game Boy CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
+| `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy

@@ -32,7 +32,9 @@ impl Arm7Tdmi {
         self.regs.pc().wrapping_add(PC_AHEAD) & !3
     }
 
-    fn execute_thumb<B: Bus + ?Sized>(&mut self, instr: u16, bus: &mut B) -> u32 {
+    /// Execute one already-fetched ARMv4T THUMB instruction. Public for the same reason as
+    /// [`Arm7Tdmi::execute_arm`].
+    pub fn execute_thumb<B: Bus + ?Sized>(&mut self, instr: u16, bus: &mut B) -> u32 {
         match instr >> 12 {
             0b0000 | 0b0001 => {
                 if instr & 0x1800 == 0x1800 {

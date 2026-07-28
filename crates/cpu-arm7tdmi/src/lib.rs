@@ -100,6 +100,12 @@ pub struct Arm7Tdmi {
     /// Reset state, retained so [`Cpu::reset`] can return here rather than to a hardcoded
     /// power-on state that would be wrong for one of the two consumers.
     boot: BootState,
+
+    /// Added to every exception vector.
+    ///
+    /// Zero on the ARM7TDMI, which has no high-vector option. `cpu-arm946e` sets it to
+    /// `0xFFFF_0000` when CP15 selects high vectors, which is how the DS's ARM9 runs.
+    pub(crate) exception_base: u32,
 }
 
 impl Default for Arm7Tdmi {
@@ -117,6 +123,7 @@ impl Arm7Tdmi {
             fiq_line: false,
             halted: false,
             boot,
+            exception_base: 0,
         };
         cpu.apply_boot_state();
         cpu
@@ -167,6 +174,22 @@ impl Arm7Tdmi {
         self.halted
     }
 
+    /// Leave the low-power wait state.
+    #[inline]
+    pub fn set_halted(&mut self, halted: bool) {
+        self.halted = halted;
+    }
+
+    #[inline]
+    pub fn irq_line(&self) -> bool {
+        self.irq_line
+    }
+
+    #[inline]
+    pub fn fiq_line(&self) -> bool {
+        self.fiq_line
+    }
+
     // -- Convenience ----------------------------------------------------------
 
     #[inline]
@@ -193,8 +216,27 @@ impl Arm7Tdmi {
     }
 
     /// Branch, switching instruction set from the low bit of `target` as `BX` does.
+    /// The base added to every exception vector. See the field's documentation.
     #[inline]
-    pub(crate) fn branch_exchange(&mut self, target: u32) {
+    pub fn set_exception_base(&mut self, base: u32) {
+        self.exception_base = base;
+    }
+
+    #[inline]
+    pub fn exception_base(&self) -> u32 {
+        self.exception_base
+    }
+
+    /// `R15` as an instruction operand: the pipeline has already advanced two instructions
+    /// past the one executing.
+    #[inline]
+    pub fn reg_operand(&self, index: usize) -> u32 {
+        self.reg_pc(index, if self.cpsr.thumb() { 2 } else { 4 })
+    }
+
+    /// Branch, switching instruction set from the low bit of `target` as `BX` does.
+    #[inline]
+    pub fn branch_exchange(&mut self, target: u32) {
         let thumb = target & 1 != 0;
         self.cpsr.set_thumb(thumb);
         self.regs
@@ -346,6 +388,7 @@ impl Savable for Arm7Tdmi {
         w.write_u32(self.boot.sp);
         w.write_bool(self.boot.irq_disabled);
         w.write_bool(self.boot.fiq_disabled);
+        w.write_u32(self.exception_base);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -362,6 +405,7 @@ impl Savable for Arm7Tdmi {
         self.boot.sp = r.read_u32()?;
         self.boot.irq_disabled = r.read_bool()?;
         self.boot.fiq_disabled = r.read_bool()?;
+        self.exception_base = r.read_u32()?;
         Ok(())
     }
 }

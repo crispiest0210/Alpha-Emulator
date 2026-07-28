@@ -91,7 +91,7 @@ impl Arm7Tdmi {
     ///
     /// Order matters: `SPSR` must capture `CPSR` *before* the mode changes, and `R14` must be
     /// written *after*, so it lands in the new mode's bank rather than the old one's.
-    pub(crate) fn enter_exception(&mut self, exception: Exception, lr: u32) {
+    pub fn enter_exception(&mut self, exception: Exception, lr: u32) {
         let saved_cpsr = self.cpsr;
         let new_mode = exception.mode();
 
@@ -107,7 +107,8 @@ impl Arm7Tdmi {
             self.cpsr.set_fiq_disabled(true);
         }
 
-        self.regs.set_pc(exception.vector());
+        self.regs
+            .set_pc(self.exception_base.wrapping_add(exception.vector()));
     }
 
     /// Raise an undefined-instruction exception for the instruction currently executing.
@@ -115,7 +116,7 @@ impl Arm7Tdmi {
     /// Coprocessor instructions land here: neither the GBA nor the DS's ARM7 has a
     /// coprocessor behind those opcodes, and the architecture specifies that an absent
     /// coprocessor traps rather than silently doing nothing.
-    pub(crate) fn undefined_instruction(&mut self) {
+    pub fn undefined_instruction(&mut self) {
         let lr = self.regs.pc();
         tracing::debug!(
             pc = format_args!("{:#010X}", lr),
@@ -126,7 +127,7 @@ impl Arm7Tdmi {
 
     /// Raise a software interrupt. `regs.pc` already points past the `SWI`, which is exactly
     /// the value `R14_svc` needs.
-    pub(crate) fn software_interrupt(&mut self) {
+    pub fn software_interrupt(&mut self) {
         let lr = self.regs.pc();
         self.enter_exception(Exception::SoftwareInterrupt, lr);
     }

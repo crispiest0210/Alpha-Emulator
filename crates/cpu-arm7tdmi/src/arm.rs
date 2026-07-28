@@ -37,7 +37,7 @@ impl Arm7Tdmi {
 
     /// Read a register, substituting the pipeline-adjusted value for `R15`.
     #[inline]
-    fn reg_pc(&self, index: usize, pc_offset: u32) -> u32 {
+    pub(crate) fn reg_pc(&self, index: usize, pc_offset: u32) -> u32 {
         if index == 15 {
             self.regs.pc().wrapping_add(pc_offset)
         } else {
@@ -45,7 +45,12 @@ impl Arm7Tdmi {
         }
     }
 
-    fn execute_arm<B: Bus + ?Sized>(&mut self, instr: u32, bus: &mut B) -> u32 {
+    /// Execute one already-fetched ARMv4T instruction, returning its cycle cost.
+    ///
+    /// Public so `cpu-arm946e` can compose rather than fork: the ARM9 tries its ARMv5TE
+    /// encodings first and falls through to here for everything the two architectures share,
+    /// which is the overwhelming majority of the instruction set.
+    pub fn execute_arm<B: Bus + ?Sized>(&mut self, instr: u32, bus: &mut B) -> u32 {
         // Decode order matters: several encodings are carve-outs from the data-processing
         // space and must be tested before it.
         if instr & 0x0FFF_FFF0 == 0x012F_FF10 {

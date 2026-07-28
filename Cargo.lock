@@ -656,6 +656,7 @@ dependencies = [
  "core-common",
  "cpu-arm7tdmi",
  "savestate",
+ "tracing",
 ]
 
 [[package]]
