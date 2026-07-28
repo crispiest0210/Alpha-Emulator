@@ -6,10 +6,12 @@
 
 #![deny(unsafe_code)]
 
+pub mod apu;
 pub mod memory;
 pub mod ppu;
 pub mod timing;
 
+pub use apu::GbApu;
 pub use memory::{GbBus, GbModel};
 pub use ppu::GbPpu;
 pub use timing::{GbEvent, GbTiming, PpuMode, TimingOutput};

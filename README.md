@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU, memory map, and timing done; no rendering or sound yet |
+| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU, memory, timing, PPU and APU all exist; not yet assembled into a `System` |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -39,6 +39,7 @@ Component status:
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 not yet run** |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; **Blargg dmg_sound not yet run** |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
+| `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound not yet run** |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy
