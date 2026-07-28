@@ -32,6 +32,8 @@ Component status:
 | `cpu-sm83` — Game Boy CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
+| `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
+| `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM); no PPU/APU/timer yet |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy

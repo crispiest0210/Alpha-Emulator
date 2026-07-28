@@ -1,9 +1,11 @@
 //! Game Boy (DMG) system assembly.
 //!
-// TODO(prompt11): implement. See docs/successor-emulator/11-*.md
+//! Currently this crate provides the memory map (see [`memory`]), which prompt 06 establishes
+//! as the reference pattern the GBC, GBA, and DS maps follow. The PPU, APU, timer, joypad,
+//! and the `System` implementation that ties them together arrive with prompt 11.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds() {}
-}
+#![deny(unsafe_code)]
+
+pub mod memory;
+
+pub use memory::{GbBus, GbModel};
