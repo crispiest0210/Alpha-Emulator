@@ -16,7 +16,7 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
+| Game Boy Color | ❌ | ❌ | ❌ | Colour palettes, double-speed switch, and tile attributes done and tested; not yet wired into the PPU |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
@@ -42,6 +42,7 @@ Component status:
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
+| `system-gbc` — CGB palette RAM, `KEY1` speed switch, tile attributes, model detection | units done and tested; **PPU/CPU wiring and HDMA not started** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | Everything else | not started |
 
