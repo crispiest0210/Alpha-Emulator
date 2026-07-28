@@ -15,13 +15,28 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ❌ | ❌ | ❌ | Not started |
-| Game Boy Color | ❌ | ❌ | ❌ | Not started |
-| Game Boy Advance | ❌ | ❌ | ❌ | Not started |
+| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
+| Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
+| Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Not started — will be explicitly partial when it does begin |
 
-**Nothing is emulated yet.** The current state is the workspace skeleton, developer
-automation (`xtask`), and CI. `cargo xtask dev` opens an empty window.
+**No system runs a ROM yet.** `cargo xtask dev` opens an empty window.
+
+Component status:
+
+| Component | Status |
+|---|---|
+| Workspace, `xtask`, CI, crate-boundary enforcement | done |
+| `core-common` — scheduler, bus, CPU/system traits | done |
+| `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
+| `cpu-sm83` — Game Boy CPU | complete, unit-tested; **accuracy ROMs not yet run** |
+| `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
+| Everything else | not started |
+
+The CPU cores pass their unit tests but have **not** been validated against the accuracy
+test-ROM suites (Blargg, Mooneye, arm7wrestler, gba-suite) that actually gate them — that
+harness arrives with prompt 17. Until then, treat them as unverified against real hardware
+behavior.
 
 ## Setup
 
