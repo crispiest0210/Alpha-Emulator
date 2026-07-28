@@ -25,7 +25,7 @@ use crate::memory::{self, GbModel};
 use core_common::{Framebuffer, Rgba8, Savable, StateError, StateReader, StateWriter};
 use ppu_tile2d::{
     render_sprites, render_text_background, BackgroundParams, BitDepth, MonochromePalette,
-    PaletteSource, ScanlineBuffer, Sprite, TileRef, TilemapSource, DMG_SHADES,
+    PaletteSource, ScanlineBuffer, Sprite, SpriteRule, TileRef, TilemapSource, DMG_SHADES,
 };
 
 pub const SCREEN_WIDTH: u32 = 160;
@@ -233,7 +233,15 @@ impl GbPpu {
             self.render_window(line, vram, attributes);
         }
         if self.has(lcdc::OBJ_ENABLE) {
-            self.render_sprites_for_line(line, vram, oam);
+            // A DMG has no background-priority bit to consult, so the sprite decides alone.
+            let rule = if model.uses_tile_attributes() {
+                SpriteRule::SpriteOrTileDecides {
+                    master_priority: self.has(lcdc::BG_ENABLE),
+                }
+            } else {
+                SpriteRule::SpriteDecides
+            };
+            self.render_sprites_for_line(line, vram, oam, rule);
         }
 
         // With the background blanked a DMG shows white, not the palette's colour 0: the layer
@@ -305,7 +313,7 @@ impl GbPpu {
         self.window_line = self.window_line.saturating_add(1);
     }
 
-    fn render_sprites_for_line(&mut self, line: u8, vram: &[u8], oam: &[u8]) {
+    fn render_sprites_for_line(&mut self, line: u8, vram: &[u8], oam: &[u8], rule: SpriteRule) {
         let height: u32 = if self.has(lcdc::OBJ_TALL) { 16 } else { 8 };
 
         // The OAM scan takes the first ten candidates in OAM order and stops. Which ten are
@@ -366,6 +374,7 @@ impl GbPpu {
             vram,
             BitDepth::Two,
             line as u32,
+            rule,
             &mut self.scanline,
         );
     }

@@ -189,11 +189,54 @@ pub struct Sprite {
 ///
 /// Colour index 0 is transparent and never written, which is what lets sprites overlap
 /// without punching holes in each other.
+/// How a sprite pixel competes with the background pixel underneath it.
+///
+/// The two machines disagree about who is allowed to enter the contest, not about how to
+/// resolve it, which is why this is a parameter rather than a second renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteRule {
+    /// The DMG's rule: only the sprite gets an opinion. It loses where its own "behind
+    /// background" bit is set and the background pixel is opaque.
+    SpriteDecides,
+    /// The CGB's rule: the background *tile* can also demand to be in front, and `LCDC` bit 0
+    /// can wave the whole contest away. `master_priority` is that bit — clearing it is how a
+    /// game forces every sprite to the front for a cutscene without editing its tile maps.
+    SpriteOrTileDecides { master_priority: bool },
+}
+
+/// Whether the background pixel covers the sprite pixel.
+///
+/// Split out from the compositing loop because it is the rule most easily got wrong and the
+/// most expensive to get wrong — it is the difference between a character walking behind
+/// scenery and through it — so it is worth testing on its own rather than only through a
+/// rendered scanline.
+///
+/// A background colour index of zero is always behind the sprite whatever any priority bit
+/// says: index zero is the transparent one, and no priority setting makes a hole opaque.
+#[inline]
+pub fn background_wins(
+    rule: SpriteRule,
+    tile_asks_for_priority: bool,
+    sprite_yields: bool,
+    background_colour: u8,
+) -> bool {
+    if background_colour == 0 {
+        return false;
+    }
+    match rule {
+        SpriteRule::SpriteDecides => sprite_yields,
+        SpriteRule::SpriteOrTileDecides { master_priority } => {
+            master_priority && (tile_asks_for_priority || sprite_yields)
+        }
+    }
+}
+
 pub fn render_sprites(
     sprites: &[Sprite],
     tile_data: &[u8],
     depth: BitDepth,
     line: u32,
+    rule: SpriteRule,
     out: &mut ScanlineBuffer,
 ) {
     // Remembers which pixels a nearer sprite already claimed, so a farther one cannot
@@ -251,7 +294,17 @@ pub fn render_sprites(
                 }
                 claimed[screen_x] = true;
 
-                if sprite.behind_background && out.get(screen_x).hides_sprite_behind_it() {
+                let background = out.get(screen_x);
+                let covered = background.source == PixelSource::Background
+                    && background_wins(
+                        rule,
+                        // `TileRef::priority` counts lower as nearer, so zero is the tile
+                        // asking to be drawn in front.
+                        background.priority == 0,
+                        sprite.behind_background,
+                        background.color,
+                    );
+                if covered {
                     // The sprite loses to the background here, but it has still claimed the
                     // pixel: a farther sprite does not get to show through instead.
                     continue;
@@ -531,7 +584,14 @@ mod tests {
     fn a_sprite_draws_only_where_it_covers_the_line() {
         let tile = solid_tile(1);
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(&[sprite_at(4, 0)], &tile, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[sprite_at(4, 0)],
+            &tile,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
 
         for x in 0..4 {
             assert_eq!(line.get(x).source, PixelSource::Backdrop);
@@ -549,7 +609,14 @@ mod tests {
     fn a_sprite_off_this_line_draws_nothing() {
         let tile = solid_tile(1);
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(&[sprite_at(0, 8)], &tile, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[sprite_at(0, 8)],
+            &tile,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
         assert!((0..16).all(|x| line.get(x).source == PixelSource::Backdrop));
     }
 
@@ -557,7 +624,14 @@ mod tests {
     fn a_sprite_hanging_off_the_edge_is_clipped_not_wrapped() {
         let tile = solid_tile(1);
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(&[sprite_at(-4, 0)], &tile, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[sprite_at(-4, 0)],
+            &tile,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
         for x in 0..4 {
             assert_eq!(line.get(x).source, PixelSource::Sprite, "x {x}");
         }
@@ -572,7 +646,14 @@ mod tests {
         // shape at all.
         let tile = striped_2bpp_tile(); // columns 0-1 are index 0
         let mut line = ScanlineBuffer::new(8);
-        render_sprites(&[sprite_at(0, 0)], &tile, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[sprite_at(0, 0)],
+            &tile,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
         assert_eq!(line.get(0).source, PixelSource::Backdrop);
         assert_eq!(line.get(1).source, PixelSource::Backdrop);
         assert_eq!(line.get(2).source, PixelSource::Sprite);
@@ -595,7 +676,14 @@ mod tests {
         };
 
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(&[front, behind], &tiles, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[front, behind],
+            &tiles,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
 
         // Where they overlap, the front sprite's colour and palette survive.
         for x in 0..8 {
@@ -631,6 +719,7 @@ mod tests {
             &sprite_tile,
             BitDepth::Two,
             0,
+            SpriteRule::SpriteDecides,
             &mut line,
         );
 
@@ -674,6 +763,7 @@ mod tests {
             &tiles,
             BitDepth::Two,
             0,
+            SpriteRule::SpriteDecides,
             &mut line,
         );
 
@@ -697,11 +787,25 @@ mod tests {
         };
 
         let mut top = ScanlineBuffer::new(8);
-        render_sprites(&[tall], &tiles, BitDepth::Two, 3, &mut top);
+        render_sprites(
+            &[tall],
+            &tiles,
+            BitDepth::Two,
+            3,
+            SpriteRule::SpriteDecides,
+            &mut top,
+        );
         assert_eq!(top.get(0).color, 1, "the upper tile");
 
         let mut bottom = ScanlineBuffer::new(8);
-        render_sprites(&[tall], &tiles, BitDepth::Two, 11, &mut bottom);
+        render_sprites(
+            &[tall],
+            &tiles,
+            BitDepth::Two,
+            11,
+            SpriteRule::SpriteDecides,
+            &mut bottom,
+        );
         assert_eq!(bottom.get(0).color, 3, "the lower tile");
     }
 
@@ -717,7 +821,14 @@ mod tests {
         };
 
         let mut top = ScanlineBuffer::new(8);
-        render_sprites(&[flipped], &tiles, BitDepth::Two, 3, &mut top);
+        render_sprites(
+            &[flipped],
+            &tiles,
+            BitDepth::Two,
+            3,
+            SpriteRule::SpriteDecides,
+            &mut top,
+        );
         assert_eq!(top.get(0).color, 3, "the lower tile is now on top");
     }
 
@@ -734,9 +845,81 @@ mod tests {
         };
 
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(&[wide], &tiles, BitDepth::Two, 0, &mut line);
+        render_sprites(
+            &[wide],
+            &tiles,
+            BitDepth::Two,
+            0,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
         // Unflipped this would be tile 0 then tile 1; flipped it is the other way round.
         assert_eq!(line.get(0).color, 3);
         assert_eq!(line.get(8).color, 1);
+    }
+
+    // -- The sprite/background priority rule -------------------------------
+
+    #[test]
+    fn a_transparent_background_pixel_never_covers_a_sprite() {
+        // Colour zero is the transparent index. No priority bit makes a hole opaque, so this
+        // holds under both machines' rules and for every combination of the other inputs.
+        for rule in [
+            SpriteRule::SpriteDecides,
+            SpriteRule::SpriteOrTileDecides {
+                master_priority: true,
+            },
+        ] {
+            for tile in [false, true] {
+                for sprite in [false, true] {
+                    assert!(
+                        !background_wins(rule, tile, sprite, 0),
+                        "colour 0 covered a sprite: {rule:?} tile={tile} sprite={sprite}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn under_the_dmg_rule_only_the_sprite_gets_an_opinion() {
+        let rule = SpriteRule::SpriteDecides;
+        assert!(background_wins(rule, false, true, 1), "the sprite yielded");
+        assert!(!background_wins(rule, false, false, 1));
+        // A tile asking for priority is ignored: a DMG tile map has nowhere to ask.
+        assert!(!background_wins(rule, true, false, 1));
+    }
+
+    #[test]
+    fn under_the_cgb_rule_either_side_can_put_the_background_in_front() {
+        let rule = SpriteRule::SpriteOrTileDecides {
+            master_priority: true,
+        };
+        assert!(background_wins(rule, true, false, 1), "the tile asked");
+        assert!(background_wins(rule, false, true, 1), "the sprite yielded");
+        assert!(background_wins(rule, true, true, 1), "both");
+        assert!(
+            !background_wins(rule, false, false, 1),
+            "neither, so the sprite is in front"
+        );
+    }
+
+    #[test]
+    fn clearing_master_priority_forces_every_sprite_to_the_front() {
+        // On a CGB, `LCDC` bit 0 keeps its position and changes its job. This is how a game
+        // puts sprites over everything for a cutscene without editing its tile maps.
+        let rule = SpriteRule::SpriteOrTileDecides {
+            master_priority: false,
+        };
+        for tile in [false, true] {
+            for sprite in [false, true] {
+                for colour in 1..4 {
+                    assert!(
+                        !background_wins(rule, tile, sprite, colour),
+                        "background won with master priority off"
+                    );
+                }
+            }
+        }
     }
 }

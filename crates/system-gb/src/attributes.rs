@@ -6,14 +6,11 @@
 //! implements; what does not exist yet is the meaning of that second byte, which is what this
 //! module is.
 //!
-//! # The priority rule is not "the sprite bit wins"
+//! # Only the bit layout is here
 //!
-//! Three inputs decide whether a sprite or the background is visible at a pixel: `LCDC` bit 0
-//! (which on a CGB stops meaning "background off" and starts meaning "background priority
-//! off"), the background tile's priority bit, and the sprite's own priority bit. Getting this
-//! wrong is not subtle — it is the difference between a character walking behind scenery and
-//! through it — so the rule lives in one function, [`background_wins`], with the truth table
-//! spelled out in its tests rather than scattered across the pixel loop.
+//! What the priority bit *means* — the three-way contest between `LCDC` bit 0, the tile, and
+//! the sprite — is [`ppu_tile2d::background_wins`], next to the compositor that applies it.
+//! This module decodes the byte; that one resolves it.
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
 
@@ -53,31 +50,6 @@ impl TileAttributes {
     }
 }
 
-/// Whether the background pixel covers the sprite pixel.
-///
-/// `master_priority` is `LCDC` bit 0, which changes meaning between models: on a DMG it blanks
-/// the background entirely, while on a CGB the background always draws and the bit instead
-/// decides whether background and tile priority are honoured at all. Clearing it is how a CGB
-/// game forces sprites to the front for a cutscene without touching its tile maps.
-///
-/// A background colour index of zero is always behind the sprite regardless of any priority
-/// bit — index zero is the transparent one, and no priority setting makes a hole opaque.
-#[inline]
-pub fn background_wins(
-    master_priority: bool,
-    tile_priority: bool,
-    sprite_behind: bool,
-    background_colour: u8,
-) -> bool {
-    if background_colour == 0 {
-        return false;
-    }
-    if !master_priority {
-        return false;
-    }
-    tile_priority || sprite_behind
-}
-
 impl Savable for TileAttributes {
     fn save(&self, w: &mut StateWriter) {
         w.write_u8(self.to_byte());
@@ -115,46 +87,6 @@ mod tests {
         assert!(a.flip_x);
         assert!(a.flip_y);
         assert!(a.priority);
-    }
-
-    #[test]
-    fn a_transparent_background_pixel_never_covers_a_sprite() {
-        // Colour zero is the transparent index; no priority bit makes a hole opaque.
-        for tile_priority in [false, true] {
-            for sprite_behind in [false, true] {
-                assert!(
-                    !background_wins(true, tile_priority, sprite_behind, 0),
-                    "colour 0 covered a sprite with tile={tile_priority} sprite={sprite_behind}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn clearing_lcdc_bit_zero_forces_every_sprite_to_the_front() {
-        // On a CGB this is the "master priority" bit, not a background switch — it is how a
-        // game puts sprites over everything for a cutscene without editing its tile maps.
-        for tile_priority in [false, true] {
-            for sprite_behind in [false, true] {
-                for colour in 1..4 {
-                    assert!(
-                        !background_wins(false, tile_priority, sprite_behind, colour),
-                        "background won with master priority off"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn either_priority_bit_puts_the_background_in_front() {
-        assert!(background_wins(true, true, false, 1), "the tile asked");
-        assert!(background_wins(true, false, true, 1), "the sprite yielded");
-        assert!(background_wins(true, true, true, 1), "both");
-        assert!(
-            !background_wins(true, false, false, 1),
-            "neither, so the sprite is in front"
-        );
     }
 
     #[test]

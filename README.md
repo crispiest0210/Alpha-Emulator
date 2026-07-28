@@ -16,7 +16,7 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ❌ | ❌ | ❌ | PPU renders in colour with per-tile palettes and banked tile data. Sprite priority, speed switch, and HDMA not yet driven |
+| Game Boy Color | ❌ | ❌ | ❌ | PPU renders in colour: per-tile palettes, banked tile data, CGB sprite priority. Speed switch and HDMA not yet driven; no `System` impl |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
@@ -38,14 +38,14 @@ Component status:
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
-| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats |
+| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
-| `system-gbc` — CGB palette RAM, `KEY1` speed switch, HDMA, model detection | units done and tested; PPU renders colour with per-tile attributes. **CGB sprite priority, speed switch, and HDMA not yet driven** |
+| `system-gbc` — CGB palette RAM, `KEY1` speed switch, HDMA, model detection | units done and tested; PPU renders full CGB colour. **Speed switch and HDMA not yet driven; no `System` impl** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | Everything else | not started |
 

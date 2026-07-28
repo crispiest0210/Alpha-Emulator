@@ -44,8 +44,8 @@ mod compositor;
 mod palette;
 
 pub use compositor::{
-    decode_tile_row, render_sprites, render_text_background, BackgroundParams, Sprite,
-    TilemapSource,
+    background_wins, decode_tile_row, render_sprites, render_text_background, BackgroundParams,
+    Sprite, SpriteRule, TilemapSource,
 };
 pub use palette::{Bgr555Palette, MonochromePalette, PaletteSource, DMG_SHADES};
 

@@ -26,9 +26,8 @@
 //!   [`PaletteSource`](ppu_tile2d::PaletteSource) and a [`Model`], so handing it
 //!   [`CgbPalettes`] produces a colour picture, with per-tile palettes, flips, and tile data
 //!   from either VRAM bank read out of the attribute map in bank 1.
-//! - Sprite-versus-background priority still uses the DMG rule. The CGB rule is written and
-//!   tested as [`background_wins`], but the sprite compositor does not consult it yet, so a
-//!   background tile that asks to be drawn over a sprite is currently ignored.
+//! - Sprite-versus-background priority follows the CGB rule, including `LCDC` bit 0's second
+//!   job of waving the contest away entirely.
 //! - [`SpeedSwitch`] needs `STOP` in `system-gb` to consult it, and the CPU's cycle accounting
 //!   to apply [`SpeedSwitch::cpu_multiplier`].
 //! - [`Hdma`] decides what to copy and when, but nothing calls it: its general-purpose mode
@@ -47,12 +46,14 @@ pub use hdma::Hdma;
 
 pub use palettes::{rgb555_to_rgba8, CgbPalettes};
 pub use speed::SpeedSwitch;
-/// Background tile attributes, and the sprite-priority rule they feed.
+/// Background tile attributes.
 ///
 /// Re-exported for the same reason as [`Model`]: the only thing that reads an attribute byte
 /// is the PPU, and the PPU lives in `system-gb`. Defining the decode here would mean the
-/// renderer could not reach it without depending on this crate, which is backwards.
-pub use system_gb::{background_wins, TileAttributes};
+/// renderer could not reach it without depending on this crate, which is backwards. The rule
+/// that *resolves* the priority bit lives further down still, in `ppu-tile2d` beside the
+/// compositor that applies it.
+pub use system_gb::TileAttributes;
 
 /// Which machine is being emulated.
 ///
@@ -248,6 +249,43 @@ mod integration_tests {
             ppu.framebuffer().pixel(0, 0).r,
             0xFF,
             "tile data came from bank 1"
+        );
+    }
+
+    #[test]
+    fn a_background_tile_can_demand_to_be_drawn_over_a_sprite() {
+        // End to end: the attribute byte's priority bit reaches the sprite compositor. The
+        // same scene under the DMG rule puts the sprite in front, because a DMG tile map has
+        // no way to ask.
+        let (mut ppu, mut vram, mut oam) = ppu_showing_colour_one();
+        vram[0x2000 + 0x1800] = 0x80; // background tile asks for priority
+
+        // A sprite at (0,0) using tile 1, which is opaque colour 1, and *not* marked as
+        // "behind background" — so only the tile's bit can put it behind.
+        oam[0] = 16; // y = 0
+        oam[1] = 8; // x = 0
+        oam[2] = 1;
+        oam[3] = 0x00;
+        ppu.lcdc |= 0x02; // sprites on
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F); // background red
+        palettes.set_colour(true, 0, 1, 0x03E0); // sprite green
+
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0).r,
+            0xFF,
+            "the tile's priority bit kept the background in front"
+        );
+
+        // Clearing LCDC bit 0 waves the contest away and the sprite comes forward.
+        ppu.lcdc &= !0x01;
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0).g,
+            0xFF,
+            "master priority off puts every sprite in front"
         );
     }
 }

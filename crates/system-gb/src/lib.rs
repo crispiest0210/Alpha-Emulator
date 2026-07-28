@@ -15,7 +15,7 @@ pub mod system;
 pub mod timing;
 
 pub use apu::GbApu;
-pub use attributes::{background_wins, TileAttributes};
+pub use attributes::TileAttributes;
 pub use joypad::Joypad;
 pub use memory::{GbBus, GbModel};
 pub use ppu::GbPpu;
