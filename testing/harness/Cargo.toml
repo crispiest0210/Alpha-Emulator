@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 core-common.workspace = true
 system-gb.workspace = true
+cart-common.workspace = true
 system-gbc.workspace = true
 system-gba.workspace = true
 system-nds.workspace = true

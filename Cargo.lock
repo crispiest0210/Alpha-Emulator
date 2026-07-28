@@ -1307,6 +1307,7 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cart-common",
  "core-common",
  "insta",
  "system-gb",

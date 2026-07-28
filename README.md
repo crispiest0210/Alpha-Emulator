@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ⚠️ | ❌ | Assembled and runs code, renders, and sounds. **No accuracy suite has been run**, and no real ROM has been played |
+| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes Blargg `instr_timing`; four other suites fail or are unvalidated — see below |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -29,25 +29,44 @@ Component status:
 | Workspace, `xtask`, CI, crate-boundary enforcement | done |
 | `core-common` — scheduler, bus, CPU/system traits | done |
 | `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
-| `cpu-sm83` — Game Boy CPU | complete, unit-tested; **accuracy ROMs not yet run** |
+| `cpu-sm83` — Game Boy CPU | complete, unit-tested; **known accuracy failures, see below** |
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats |
-| `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 not yet run** |
+| `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; **Blargg dmg_sound not yet run** |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
-| `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound not yet run** |
+| `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound does not run to completion** |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
+| `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | Everything else | not started |
 
-The CPU cores pass their unit tests but have **not** been validated against the accuracy
-test-ROM suites (Blargg, Mooneye, arm7wrestler, gba-suite) that actually gate them — that
-harness arrives with prompt 17. Until then, treat them as unverified against real hardware
-behavior.
+### Accuracy suite
+
+The harness is in place and the Game Boy suite runs. Fetch the ROMs with
+`cargo xtask fetch-test-roms`, then `cargo xtask test --accuracy`. Nothing is vendored; the
+corpus directory is gitignored and tests skip cleanly when it is empty.
+
+Current Game Boy results, honestly:
+
+| Test ROM | Result |
+|---|---|
+| Blargg `instr_timing` | **passes** |
+| Blargg `cpu_instrs` | sub-tests 01 and 02 pass, then hangs partway through 03 (`op sp,hl`) |
+| Blargg `mem_timing` | all three sub-tests fail — the CPU charges an instruction's cycles at its end instead of interleaving each memory access, so writes land at the wrong cycle |
+| Blargg `dmg_sound` | no serial output at all within the frame budget |
+| dmg-acid2 | renders, but the output has **not** been checked against the reference image, so this is unvalidated rather than passing |
+
+Those four are tracked as known failures in the corpus, so the suite stays green for
+*regressions* while the gaps are open — and fails loudly if a known-failing ROM starts
+passing, which means the marker needs removing.
+
+The ARM cores have not been run against anything: `arm7wrestler` and `gba-suite` are not in
+the corpus yet, and there is no GBA system to run them on.
 
 ## Setup
 
@@ -76,6 +95,7 @@ Linux, macOS, and Windows:
 | `cargo xtask build --release` | Build the workspace optimized |
 | `cargo xtask test` | `cargo test --workspace` (`--accuracy` adds the test-ROM suite) |
 | `cargo xtask bench` | Run benchmarks |
+| `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
 | `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
 
 ## Architecture

@@ -42,6 +42,12 @@ enum Task {
     },
     /// Run benchmarks.
     Bench,
+    /// Download the accuracy test-ROM corpus.
+    FetchTestRoms {
+        /// Re-download ROMs that are already present.
+        #[arg(long)]
+        force: bool,
+    },
     /// Run rustfmt and clippy exactly as CI does.
     Lint {
         /// Apply fixes instead of only checking.
@@ -57,6 +63,7 @@ fn main() -> Result<()> {
         Task::Build { release } => build(release),
         Task::Test { accuracy } => test(accuracy),
         Task::Bench => bench(),
+        Task::FetchTestRoms { force } => fetch_test_roms(force),
         Task::Lint { fix } => lint(fix),
     }
 }
@@ -218,14 +225,126 @@ fn build(release: bool) -> Result<()> {
 fn test(accuracy: bool) -> Result<()> {
     run(&cargo(), &["test", "--workspace"])?;
     if accuracy {
-        // TODO(prompt17): drive testing/harness against the fetched test-ROM corpus.
-        println!("accuracy suite: not implemented yet (prompt 17)");
+        // The suite lives in `testing/harness` and skips any ROM that has not been fetched,
+        // so this is safe to run on a fresh checkout.
+        run(&cargo(), &["test", "-p", "harness", "--", "--nocapture"])?;
     }
     Ok(())
 }
 
 fn bench() -> Result<()> {
     run(&cargo(), &["bench", "--workspace"])
+}
+
+// ---------------------------------------------------------------------------
+// Test ROMs
+// ---------------------------------------------------------------------------
+
+/// Download the accuracy corpus into `testing/test-roms/`.
+///
+/// That directory is gitignored and nothing in it is ever committed. The predecessor project
+/// checked test ROM binaries — and a commercial game ROM — into its repository; fetching is
+/// the only path here so that cannot happen by habit.
+///
+/// Uses `curl`, which ships with macOS, every Linux distribution worth supporting, and Windows
+/// 10 onward. Shelling out to it beats adding a TLS stack to the build for a step that runs
+/// once per checkout.
+fn fetch_test_roms(force: bool) -> Result<()> {
+    if !have("curl") {
+        bail!("curl is required to fetch test ROMs; install it and re-run");
+    }
+
+    let root = workspace_root()?;
+    let corpus = root.join("testing").join("test-roms");
+
+    let mut fetched = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = Vec::new();
+
+    for (path, url) in TEST_ROMS {
+        let target = corpus.join(path);
+        if target.is_file() && !force {
+            skipped += 1;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+
+        println!("fetching {path}");
+        let status = Command::new("curl")
+            .args([
+                "--location", // these are redirects to a CDN
+                "--fail",     // a 404 must not leave an HTML error page on disk
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "120",
+                "--output",
+            ])
+            .arg(&target)
+            .arg(url)
+            .status()
+            .with_context(|| format!("running curl for {path}"))?;
+
+        if status.success() {
+            fetched += 1;
+        } else {
+            // Leave nothing half-written behind: a truncated ROM would fail the suite in a
+            // way that looks like an emulator bug.
+            let _ = std::fs::remove_file(&target);
+            failed.push(*path);
+        }
+    }
+
+    println!(
+        "\n{fetched} fetched, {skipped} already present, {} failed",
+        failed.len()
+    );
+    if !failed.is_empty() {
+        for path in &failed {
+            println!("  failed: {path}");
+        }
+        bail!("some test ROMs could not be fetched; the accuracy suite will skip them");
+    }
+    println!("Run `cargo xtask test --accuracy` to use them.");
+    Ok(())
+}
+
+/// The corpus, mirroring `testing/harness`'s own list.
+///
+/// Duplicated rather than shared because `xtask` deliberately does not depend on the
+/// workspace's crates — it must build and run even when they do not.
+const TEST_ROMS: &[(&str, &str)] = &[
+    (
+        "gb/blargg/cpu_instrs.gb",
+        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/cpu_instrs.gb",
+    ),
+    (
+        "gb/blargg/instr_timing.gb",
+        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/instr_timing/instr_timing.gb",
+    ),
+    (
+        "gb/blargg/mem_timing.gb",
+        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/mem_timing/mem_timing.gb",
+    ),
+    (
+        "gb/blargg/dmg_sound.gb",
+        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/dmg_sound.gb",
+    ),
+    (
+        "gb/dmg-acid2.gb",
+        "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
+    ),
+];
+
+/// The workspace root, found from this crate rather than the current directory.
+fn workspace_root() -> Result<std::path::PathBuf> {
+    Ok(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask should live inside the workspace")?
+        .to_path_buf())
 }
 
 fn lint(fix: bool) -> Result<()> {

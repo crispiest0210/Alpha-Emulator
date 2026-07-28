@@ -50,7 +50,18 @@ pub struct GbSystemBus {
     pub ppu: GbPpu,
     pub apu: GbApu,
     pub joypad: Joypad,
+
+    /// Bytes the game has pushed out of the serial port.
+    ///
+    /// With no link cable attached this goes nowhere on hardware, but it is exactly how
+    /// Blargg's test ROMs report their results, so the harness reads it. Kept out of save
+    /// states: it is captured output, not machine state.
+    pub serial_output: Vec<u8>,
 }
+
+/// Serial data and control.
+const SERIAL_DATA: u16 = 0xFF01;
+const SERIAL_CONTROL: u16 = 0xFF02;
 
 /// `0xFF46`: writing a page number copies 160 bytes into OAM.
 const OAM_DMA: u16 = 0xFF46;
@@ -64,6 +75,7 @@ impl GbSystemBus {
             ppu: GbPpu::new(),
             apu: GbApu::new(),
             joypad: Joypad::new(),
+            serial_output: Vec::new(),
         }
     }
 
@@ -138,6 +150,17 @@ impl Bus for GbSystemBus {
         let addr16 = addr as u16;
         match addr16 {
             JOYP => self.joypad.write(value),
+            SERIAL_CONTROL => {
+                self.memory.write8(addr, value);
+                // Bit 7 starts a transfer. Nothing is listening, so it completes at once —
+                // which is what the test ROMs that use this as an output channel expect.
+                if value & 0x80 != 0 {
+                    let byte = self.memory.read8(SERIAL_DATA as u32);
+                    self.serial_output.push(byte);
+                    self.memory.write8(addr, value & 0x7F);
+                    self.memory.interrupt_flags |= interrupt::SERIAL;
+                }
+            }
             timing_reg::DIV..=timing_reg::TAC => {
                 if let Some(interrupts) = self.timing.write_register(addr16, value) {
                     self.memory.interrupt_flags |= interrupts;
@@ -326,6 +349,7 @@ impl System for GbSystem {
         self.bus.ppu.reset();
         self.bus.apu.reset();
         self.bus.joypad = Joypad::new();
+        self.bus.serial_output.clear();
         self.save_ram_dirty = false;
         self.apply_startup_state();
     }
