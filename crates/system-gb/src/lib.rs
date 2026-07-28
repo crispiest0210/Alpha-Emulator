@@ -7,5 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod memory;
+pub mod timing;
 
 pub use memory::{GbBus, GbModel};
+pub use timing::{GbEvent, GbTiming, PpuMode, TimingOutput};

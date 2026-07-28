@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
+| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU, memory map, and timing done; no rendering or sound yet |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -33,7 +33,8 @@ Component status:
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
-| `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM); no PPU/APU/timer yet |
+| `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
+| `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy

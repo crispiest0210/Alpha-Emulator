@@ -31,6 +31,14 @@ use std::collections::BinaryHeap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventHandle(u64);
 
+/// Defaults to [`EventHandle::NONE`], so a subsystem struct holding a handle can derive
+/// `Default` and start out with nothing scheduled.
+impl Default for EventHandle {
+    fn default() -> Self {
+        EventHandle::NONE
+    }
+}
+
 impl EventHandle {
     /// A handle that never matches a live event. Useful as a "nothing pending" placeholder
     /// in subsystem structs, so they don't need `Option<EventHandle>` everywhere.
@@ -39,6 +47,16 @@ impl EventHandle {
     #[inline]
     pub const fn raw(self) -> u64 {
         self.0
+    }
+
+    /// Rebuild a handle from [`EventHandle::raw`], for restoring a save state.
+    ///
+    /// Sound only because the scheduler serializes its sequence counter alongside its
+    /// entries: a handle saved before the state and reloaded after still refers to the same
+    /// event, and cannot collide with one issued later.
+    #[inline]
+    pub const fn from_raw(raw: u64) -> Self {
+        EventHandle(raw)
     }
 }
 
