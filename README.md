@@ -35,6 +35,8 @@ Component status:
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
+| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats |
+| `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 not yet run** |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy
