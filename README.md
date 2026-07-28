@@ -40,6 +40,7 @@ Component status:
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; **Blargg dmg_sound not yet run** |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
 | `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound not yet run** |
+| `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy
