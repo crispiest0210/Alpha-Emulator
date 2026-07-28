@@ -600,3 +600,45 @@ fn mbc1_banking_reaches_every_bank_of_a_real_rom() {
         );
     }
 }
+
+/// Print every Blargg sound sub-test's result code and message.
+///
+/// Not an assertion — a diagnostic. Blargg's memory protocol carries the *reason* a test
+/// failed ("Exiting negate mode after calculation disables channel"), and that string is what
+/// turns a red line in the suite into something fixable. `#[ignore]`d because it needs the
+/// fetched corpus and prints rather than checks.
+///
+/// Run with: `cargo test -p harness --release -- --ignored --nocapture dmg_sound_results`
+#[test]
+#[ignore = "diagnostic; needs the fetched ROM corpus"]
+fn dmg_sound_results() {
+    use core_common::{InputState, System};
+    let dir = crate::corpus::corpus_dir().join("gb/blargg/dmg_sound");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        eprintln!("no corpus at {}", dir.display());
+        return;
+    };
+    let mut names: Vec<_> = entries
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+
+    for name in names {
+        let rom = std::fs::read(dir.join(&name)).unwrap();
+        let mut gb = system_gb::GbSystem::new(rom, None).unwrap();
+        for _ in 0..4000 {
+            gb.step_frame(InputState::default());
+            if gb.read_byte(0xA001) == 0xDE && gb.read_byte(0xA000) != 0x80 {
+                break;
+            }
+        }
+        let mut text = String::new();
+        for addr in 0xA004u32..0xA200 {
+            match gb.read_byte(addr) {
+                0 => break,
+                byte => text.push(byte as char),
+            }
+        }
+        println!("=== {name} -> {}\n{}", gb.read_byte(0xA000), text.trim());
+    }
+}

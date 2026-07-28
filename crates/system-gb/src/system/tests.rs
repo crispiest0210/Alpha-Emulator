@@ -479,3 +479,86 @@ fn two_identical_runs_produce_identical_output() {
 
     assert_eq!(run(), run());
 }
+
+// ---------------------------------------------------------------------------
+// STOP
+// ---------------------------------------------------------------------------
+
+/// `10 00` is STOP, `3C` is INC A, `18 FE` spins.
+const STOP_PROGRAM: &[u8] = &[0x10, 0x00, 0x3C, 0x18, 0xFE];
+
+#[test]
+fn a_button_press_releases_stop() {
+    let mut gb = system(STOP_PROGRAM);
+    write(&mut gb, 0xFF00, 0b1101_1111); // select the action buttons
+    write(&mut gb, 0xFFFF, 0x00); // every interrupt disabled
+
+    gb.step_frame(InputState::default());
+    assert!(gb.cpu.is_stopped(), "the CPU entered low-power mode");
+
+    gb.step_frame(InputState {
+        buttons: Buttons::A,
+        ..InputState::default()
+    });
+    assert!(
+        !gb.cpu.is_stopped(),
+        "a joypad line going low releases STOP even with the interrupt disabled"
+    );
+}
+
+#[test]
+fn stop_persists_while_nothing_is_pressed() {
+    let mut gb = system(STOP_PROGRAM);
+    write(&mut gb, 0xFFFF, 0x00);
+    for _ in 0..4 {
+        gb.step_frame(InputState::default());
+    }
+    assert!(gb.cpu.is_stopped());
+}
+
+// ---------------------------------------------------------------------------
+// The APU, seen through the assembled system
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_frame_sequencer_reaches_the_apu_over_real_time() {
+    // Blargg's sound tests all spin waiting on channel state, so the first thing worth
+    // establishing is that the 512 Hz sequencer actually reaches the APU once the system is
+    // assembled. The units are tested in isolation; the wiring between them was not.
+    let mut gb = system(SPIN_PROGRAM);
+
+    write(&mut gb, 0xFF26, 0x80); // power the APU on
+    write(&mut gb, 0xFF12, 0xF0); // full volume, no envelope decay
+    write(&mut gb, 0xFF11, 0x3D); // a length of three 256 Hz steps
+    write(&mut gb, 0xFF14, 0xC0); // trigger with the length counter enabled
+    assert_eq!(read(&mut gb, 0xFF26) & 0x01, 0x01, "the channel started");
+
+    // Length clocks at 256 Hz, so three steps is about 12 ms — inside two frames even if the
+    // first-half quirk shaves one step off.
+    gb.step_frame(InputState::default());
+    gb.step_frame(InputState::default());
+    assert_eq!(
+        read(&mut gb, 0xFF26) & 0x01,
+        0,
+        "the length counter expired and NR52 reports the channel as off"
+    );
+}
+
+#[test]
+fn a_channel_with_its_length_counter_disabled_plays_indefinitely() {
+    let mut gb = system(SPIN_PROGRAM);
+    write(&mut gb, 0xFF26, 0x80);
+    assert_eq!(read(&mut gb, 0xFF26) & 0x0F, 0, "nothing playing yet");
+
+    write(&mut gb, 0xFF12, 0xF0);
+    write(&mut gb, 0xFF11, 0x3F);
+    write(&mut gb, 0xFF14, 0x80); // trigger, length counter *disabled*
+    for _ in 0..3 {
+        gb.step_frame(InputState::default());
+    }
+    assert_eq!(
+        read(&mut gb, 0xFF26) & 0x01,
+        0x01,
+        "nothing clocks the length counter, so the channel never expires"
+    );
+}

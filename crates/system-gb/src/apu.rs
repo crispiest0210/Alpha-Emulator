@@ -11,7 +11,7 @@
 //! generated at a third rate entirely. Conflating any two of those produces audio that is
 //! subtly the wrong speed.
 
-use apu_shared::{Mixer, NoiseChannel, SquareChannel, WaveChannel, WAVE_RAM_BYTES};
+use apu_shared::{LengthCounter, Mixer, NoiseChannel, SquareChannel, WaveChannel, WAVE_RAM_BYTES};
 use core_common::{AudioSample, Savable, StateError, StateReader, StateWriter, AUDIO_SAMPLE_RATE};
 
 use crate::timing::{TimingOutput, CLOCK_HZ};
@@ -212,7 +212,7 @@ impl GbApu {
         Some(stored | read_mask(addr))
     }
 
-    pub fn write_register(&mut self, addr: u16, value: u8) -> Option<()> {
+    pub fn write_register(&mut self, addr: u16, value: u8, seq_step: u8) -> Option<()> {
         if !Self::owns(addr) {
             return None;
         }
@@ -229,16 +229,31 @@ impl GbApu {
             return Some(());
         }
 
-        // With the APU off, every other register write is discarded.
+        // With the APU off, register writes are discarded — except, on a DMG, for the length
+        // halves of `NRx1`. Those go through, and only those: the duty bits sharing `NR11` and
+        // `NR21` are still dropped, so the write has to be split rather than passed along.
         if !self.powered {
+            match addr {
+                reg::NR11 => self.ch1.length.write_length((value & 0x3F) as u16),
+                reg::NR21 => self.ch2.length.write_length((value & 0x3F) as u16),
+                reg::NR31 => self.ch3.length.write_length(value as u16),
+                reg::NR41 => self.ch4.length.write_length((value & 0x3F) as u16),
+                _ => {}
+            }
             return Some(());
         }
         self.written[(addr - reg::RANGE_START) as usize] = value;
 
+        // Length counters clock on the even sequencer steps, so if the step that just ran was
+        // even the next one will not clock them. That is the window the `NRx4` quirks key off.
+        let first_half = seq_step.is_multiple_of(2);
+
         match addr {
             reg::NR10 => {
                 if let Some(sweep) = &mut self.ch1.sweep {
-                    sweep.write_register(value);
+                    if !sweep.write_register(value) {
+                        self.ch1.enabled = false;
+                    }
                 }
             }
             reg::NR11 => {
@@ -251,9 +266,16 @@ impl GbApu {
             }
             reg::NR14 => {
                 self.ch1.frequency = (self.ch1.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
-                self.ch1.length.enabled = value & 0x40 != 0;
-                if value & 0x80 != 0 {
+                let trigger = value & 0x80 != 0;
+                if length_enable_edge(&mut self.ch1.length, value & 0x40 != 0, first_half)
+                    && !trigger
+                {
+                    self.ch1.enabled = false;
+                }
+                if trigger {
+                    let reloaded = self.ch1.length.counter == 0;
                     self.ch1.trigger();
+                    length_trigger_edge(&mut self.ch1.length, reloaded, first_half);
                 }
             }
 
@@ -267,9 +289,16 @@ impl GbApu {
             }
             reg::NR24 => {
                 self.ch2.frequency = (self.ch2.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
-                self.ch2.length.enabled = value & 0x40 != 0;
-                if value & 0x80 != 0 {
+                let trigger = value & 0x80 != 0;
+                if length_enable_edge(&mut self.ch2.length, value & 0x40 != 0, first_half)
+                    && !trigger
+                {
+                    self.ch2.enabled = false;
+                }
+                if trigger {
+                    let reloaded = self.ch2.length.counter == 0;
                     self.ch2.trigger();
+                    length_trigger_edge(&mut self.ch2.length, reloaded, first_half);
                 }
             }
 
@@ -288,9 +317,16 @@ impl GbApu {
             }
             reg::NR34 => {
                 self.ch3.frequency = (self.ch3.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
-                self.ch3.length.enabled = value & 0x40 != 0;
-                if value & 0x80 != 0 {
+                let trigger = value & 0x80 != 0;
+                if length_enable_edge(&mut self.ch3.length, value & 0x40 != 0, first_half)
+                    && !trigger
+                {
+                    self.ch3.enabled = false;
+                }
+                if trigger {
+                    let reloaded = self.ch3.length.counter == 0;
                     self.ch3.trigger();
+                    length_trigger_edge(&mut self.ch3.length, reloaded, first_half);
                 }
             }
 
@@ -302,9 +338,16 @@ impl GbApu {
                 self.ch4.divisor_code = value & 0x07;
             }
             reg::NR44 => {
-                self.ch4.length.enabled = value & 0x40 != 0;
-                if value & 0x80 != 0 {
+                let trigger = value & 0x80 != 0;
+                if length_enable_edge(&mut self.ch4.length, value & 0x40 != 0, first_half)
+                    && !trigger
+                {
+                    self.ch4.enabled = false;
+                }
+                if trigger {
+                    let reloaded = self.ch4.length.counter == 0;
                     self.ch4.trigger();
+                    length_trigger_edge(&mut self.ch4.length, reloaded, first_half);
                 }
             }
 
@@ -329,6 +372,16 @@ impl GbApu {
             return;
         }
 
+        // On a DMG the length *counters* survive a power cycle even though every other bit of
+        // channel state is cleared. Games rely on it: they load a length with the APU off and
+        // switch on afterwards. Only the counters carry over — the enable flags do not, which
+        // is why the whole channel is rebuilt and the counts are put back afterwards.
+        let lengths = [
+            self.ch1.length.counter,
+            self.ch2.length.counter,
+            self.ch3.length.counter,
+            self.ch4.length.counter,
+        ];
         let wave_ram = self.ch3.wave_ram;
         self.ch1 = SquareChannel::with_sweep();
         self.ch2 = SquareChannel::new();
@@ -337,6 +390,30 @@ impl GbApu {
         self.ch4 = NoiseChannel::new();
         self.mixer = Mixer::default();
         self.written = [0; 0x30];
+        self.ch1.length.counter = lengths[0];
+        self.ch2.length.counter = lengths[1];
+        self.ch3.length.counter = lengths[2];
+        self.ch4.length.counter = lengths[3];
+    }
+}
+
+/// An `NRx4` length-enable edge. Returns true when the counter ran out as a result.
+///
+/// `first_half` means the next sequencer step will not clock length. Enabling the counter
+/// there clocks it once immediately: the counter is gated by the enable line and the
+/// sequencer's low bit together, so raising the enable while that bit is already high creates
+/// the same edge the sequencer would have created on its own.
+fn length_enable_edge(length: &mut LengthCounter, enable: bool, first_half: bool) -> bool {
+    let was_enabled = length.enabled;
+    length.enabled = enable;
+    first_half && !was_enabled && enable && length.clock()
+}
+
+/// The same window, seen by a trigger: a counter reloaded to its maximum in the first half of
+/// a length period immediately loses one step.
+fn length_trigger_edge(length: &mut LengthCounter, reloaded: bool, first_half: bool) {
+    if reloaded && first_half && length.enabled && length.counter > 0 {
+        length.counter -= 1;
     }
 }
 
@@ -382,9 +459,9 @@ mod tests {
 
     /// Start channel 1 at full volume with a short period.
     fn start_ch1(apu: &mut GbApu) {
-        apu.write_register(reg::NR12, 0xF0); // full volume, no envelope movement
-        apu.write_register(reg::NR13, 0xFF);
-        apu.write_register(reg::NR14, 0x87); // trigger, frequency high bits
+        apu.write_register(reg::NR12, 0xF0, 1); // full volume, no envelope movement
+        apu.write_register(reg::NR13, 0xFF, 1);
+        apu.write_register(reg::NR14, 0x87, 1); // trigger, frequency high bits
     }
 
     #[test]
@@ -401,44 +478,44 @@ mod tests {
     fn write_only_bits_read_back_as_ones() {
         // Games do read these back, so returning the raw value is a visible difference.
         let mut a = apu();
-        a.write_register(reg::NR11, 0x00);
+        a.write_register(reg::NR11, 0x00, 1);
         assert_eq!(
             a.read_register(reg::NR11),
             Some(0x3F),
             "only the duty bits are readable"
         );
 
-        a.write_register(reg::NR13, 0x55);
+        a.write_register(reg::NR13, 0x55, 1);
         assert_eq!(a.read_register(reg::NR13), Some(0xFF), "wholly write-only");
 
-        a.write_register(reg::NR12, 0xA5);
+        a.write_register(reg::NR12, 0xA5, 1);
         assert_eq!(a.read_register(reg::NR12), Some(0xA5), "fully readable");
     }
 
     #[test]
     fn the_frequency_is_assembled_from_two_registers() {
         let mut a = apu();
-        a.write_register(reg::NR13, 0x34);
-        a.write_register(reg::NR14, 0x05);
+        a.write_register(reg::NR13, 0x34, 1);
+        a.write_register(reg::NR14, 0x05, 1);
         assert_eq!(a.ch1.frequency, 0x534);
 
         // Writing the low byte must not disturb the high bits.
-        a.write_register(reg::NR13, 0x78);
+        a.write_register(reg::NR13, 0x78, 1);
         assert_eq!(a.ch1.frequency, 0x578);
     }
 
     #[test]
     fn each_channels_registers_reach_the_right_channel() {
         let mut a = apu();
-        a.write_register(reg::NR11, 0xC0); // duty 3
-        a.write_register(reg::NR21, 0x40); // duty 1
+        a.write_register(reg::NR11, 0xC0, 1); // duty 3
+        a.write_register(reg::NR21, 0x40, 1); // duty 1
         assert_eq!(a.ch1.duty, 3);
         assert_eq!(a.ch2.duty, 1);
 
-        a.write_register(reg::NR32, 0x40); // volume shift 2
+        a.write_register(reg::NR32, 0x40, 1); // volume shift 2
         assert_eq!(a.ch3.volume_shift, 2);
 
-        a.write_register(reg::NR43, 0x5B); // shift 5, short mode, divisor 3
+        a.write_register(reg::NR43, 0x5B, 1); // shift 5, short mode, divisor 3
         assert_eq!(a.ch4.clock_shift, 5);
         assert!(a.ch4.short_mode);
         assert_eq!(a.ch4.divisor_code, 3);
@@ -455,12 +532,12 @@ mod tests {
     fn the_wave_channel_dac_has_its_own_bit() {
         // It has no envelope, so the usual "zero volume counting down" rule cannot apply.
         let mut a = apu();
-        a.write_register(reg::NR30, 0x80);
+        a.write_register(reg::NR30, 0x80, 1);
         assert!(a.ch3.dac_enabled);
-        a.write_register(reg::NR34, 0x80); // trigger
+        a.write_register(reg::NR34, 0x80, 1); // trigger
         assert!(a.ch3.enabled);
 
-        a.write_register(reg::NR30, 0x00);
+        a.write_register(reg::NR30, 0x00, 1);
         assert!(!a.ch3.enabled, "clearing the DAC bit silences it at once");
     }
 
@@ -468,19 +545,19 @@ mod tests {
     fn powering_down_clears_the_registers_and_ignores_writes() {
         let mut a = apu();
         start_ch1(&mut a);
-        a.write_register(reg::NR50, 0x77);
+        a.write_register(reg::NR50, 0x77, 1);
 
-        a.write_register(reg::NR52, 0x00);
+        a.write_register(reg::NR52, 0x00, 1);
         assert!(!a.is_powered());
         assert!(!a.ch1.enabled);
         assert_eq!(a.read_register(reg::NR50), Some(0x00), "registers cleared");
 
         // Writes are discarded while powered down.
-        a.write_register(reg::NR12, 0xF0);
-        a.write_register(reg::NR14, 0x80);
+        a.write_register(reg::NR12, 0xF0, 1);
+        a.write_register(reg::NR14, 0x80, 1);
         assert!(!a.ch1.enabled);
 
-        a.write_register(reg::NR52, 0x80);
+        a.write_register(reg::NR52, 0x80, 1);
         assert!(a.is_powered());
     }
 
@@ -488,13 +565,13 @@ mod tests {
     fn wave_ram_survives_a_power_cycle() {
         // Which is why games load a waveform before switching the APU on.
         let mut a = apu();
-        a.write_register(reg::WAVE_RAM_START, 0xAB);
-        a.write_register(reg::NR52, 0x00);
+        a.write_register(reg::WAVE_RAM_START, 0xAB, 1);
+        a.write_register(reg::NR52, 0x00, 1);
         assert_eq!(a.read_register(reg::WAVE_RAM_START), Some(0xAB));
 
         // And it is writable while powered down.
-        a.write_register(reg::WAVE_RAM_START + 1, 0xCD);
-        a.write_register(reg::NR52, 0x80);
+        a.write_register(reg::WAVE_RAM_START + 1, 0xCD, 1);
+        a.write_register(reg::NR52, 0x80, 1);
         assert_eq!(a.read_register(reg::WAVE_RAM_START + 1), Some(0xCD));
     }
 
@@ -502,12 +579,12 @@ mod tests {
     fn a_powered_down_apu_produces_silence() {
         let mut a = apu();
         start_ch1(&mut a);
-        a.write_register(reg::NR50, 0x77);
-        a.write_register(reg::NR51, 0xFF);
+        a.write_register(reg::NR50, 0x77, 1);
+        a.write_register(reg::NR51, 0xFF, 1);
         a.tick(1000);
         assert!(a.take_samples().iter().any(|s| s.left != 0.0));
 
-        a.write_register(reg::NR52, 0x00);
+        a.write_register(reg::NR52, 0x00, 1);
         a.tick(1000);
         assert!(a
             .take_samples()
@@ -553,8 +630,8 @@ mod tests {
     #[test]
     fn the_sequencer_clocks_reach_the_units_that_have_them() {
         let mut a = apu();
-        a.write_register(reg::NR12, 0xF1); // volume 15, decreasing, period 1
-        a.write_register(reg::NR14, 0x80);
+        a.write_register(reg::NR12, 0xF1, 1); // volume 15, decreasing, period 1
+        a.write_register(reg::NR14, 0x80, 1);
         assert_eq!(a.ch1.envelope.volume, 15);
 
         a.apply_sequencer(&TimingOutput {
@@ -574,9 +651,9 @@ mod tests {
     #[test]
     fn a_length_clock_can_silence_a_channel() {
         let mut a = apu();
-        a.write_register(reg::NR12, 0xF0);
-        a.write_register(reg::NR11, 0x3F); // one step of length remains
-        a.write_register(reg::NR14, 0xC0); // trigger with length enabled
+        a.write_register(reg::NR12, 0xF0, 1);
+        a.write_register(reg::NR11, 0x3F, 1); // one step of length remains
+        a.write_register(reg::NR14, 0xC0, 1); // trigger with length enabled
         assert!(a.ch1.enabled);
 
         a.apply_sequencer(&TimingOutput {
@@ -590,10 +667,10 @@ mod tests {
     #[test]
     fn only_channel_one_receives_sweep_clocks() {
         let mut a = apu();
-        a.write_register(reg::NR10, 0x11); // period 1, increasing, shift 1
-        a.write_register(reg::NR12, 0xF0);
-        a.write_register(reg::NR13, 0x00);
-        a.write_register(reg::NR14, 0x82); // trigger, frequency 0x200
+        a.write_register(reg::NR10, 0x11, 1); // period 1, increasing, shift 1
+        a.write_register(reg::NR12, 0xF0, 1);
+        a.write_register(reg::NR13, 0x00, 1);
+        a.write_register(reg::NR14, 0x82, 1); // trigger, frequency 0x200
         let before = a.ch1.frequency;
 
         a.apply_sequencer(&TimingOutput {
@@ -607,7 +684,7 @@ mod tests {
     fn addresses_outside_the_apu_are_not_claimed() {
         let mut a = apu();
         assert_eq!(a.read_register(0xFF0F), None);
-        assert_eq!(a.write_register(0xFF40, 0), None);
+        assert_eq!(a.write_register(0xFF40, 0, 1), None);
         assert!(GbApu::owns(reg::NR10));
         assert!(GbApu::owns(reg::WAVE_RAM_END));
         assert!(!GbApu::owns(0xFF0F));
@@ -618,9 +695,9 @@ mod tests {
     fn apu_state_round_trips_and_resumes_identically() {
         let mut a = apu();
         start_ch1(&mut a);
-        a.write_register(reg::NR50, 0x57);
-        a.write_register(reg::NR51, 0xF3);
-        a.write_register(reg::WAVE_RAM_START, 0x9C);
+        a.write_register(reg::NR50, 0x57, 1);
+        a.write_register(reg::NR51, 0xF3, 1);
+        a.write_register(reg::WAVE_RAM_START, 0x9C, 1);
         a.tick(5_000);
         a.take_samples();
 

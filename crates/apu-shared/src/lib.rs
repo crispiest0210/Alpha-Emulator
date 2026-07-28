@@ -209,13 +209,30 @@ pub struct Sweep {
     /// The sweep's own copy of the frequency, taken at trigger.
     shadow_frequency: u16,
     active: bool,
+    /// Set once a frequency calculation has run with [`Sweep::decreasing`] set, and cleared
+    /// only at trigger. Leaving negate mode after that point kills the channel — see
+    /// [`Sweep::write_register`].
+    negate_calculated: bool,
 }
 
 impl Sweep {
-    pub fn write_register(&mut self, value: u8) {
+    /// A `NR10` write. Returns false when the channel must be switched off.
+    ///
+    /// Clearing the negate bit after at least one calculation has been made in negate mode
+    /// disables the channel. The sweep hardware subtracts by adding the one's complement, and
+    /// leaving negate mode strands the borrow: the unit latches a state it cannot recover
+    /// from, so the channel goes quiet until it is triggered again.
+    pub fn write_register(&mut self, value: u8) -> bool {
+        let was_decreasing = self.decreasing;
         self.period = (value >> 4) & 0x07;
         self.decreasing = value & 0x08 != 0;
         self.shift = value & 0x07;
+
+        if was_decreasing && !self.decreasing && self.negate_calculated {
+            self.negate_calculated = false;
+            return false;
+        }
+        true
     }
 
     pub fn read_register(&self) -> u8 {
@@ -231,11 +248,21 @@ impl Sweep {
         self.shadow_frequency = frequency;
         self.timer = if self.period == 0 { 8 } else { self.period };
         self.active = self.period != 0 || self.shift != 0;
+        self.negate_calculated = false;
 
         if self.shift != 0 {
-            return self.next_frequency() <= 2047;
+            return self.calculate() <= 2047;
         }
         true
+    }
+
+    /// Run a frequency calculation, recording that one happened in negate mode.
+    ///
+    /// Every calculation goes through here rather than through [`Sweep::next_frequency`]
+    /// directly, because *having calculated* is the state the negate-exit quirk keys off.
+    fn calculate(&mut self) -> u16 {
+        self.negate_calculated |= self.decreasing;
+        self.next_frequency()
     }
 
     /// The frequency one sweep step away, which may exceed the 11-bit field.
@@ -271,7 +298,7 @@ impl Sweep {
             return (None, true);
         }
 
-        let new_frequency = self.next_frequency();
+        let new_frequency = self.calculate();
         if new_frequency > 2047 {
             return (None, false);
         }
@@ -296,6 +323,7 @@ impl Savable for Sweep {
         w.write_u8(self.timer);
         w.write_u16(self.shadow_frequency);
         w.write_bool(self.active);
+        w.write_bool(self.negate_calculated);
     }
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.period = r.read_u8()?;
@@ -304,6 +332,7 @@ impl Savable for Sweep {
         self.timer = r.read_u8()?;
         self.shadow_frequency = r.read_u16()?;
         self.active = r.read_bool()?;
+        self.negate_calculated = r.read_bool()?;
         Ok(())
     }
 }
@@ -658,7 +687,7 @@ mod tests {
         assert_eq!(restored, envelope);
 
         let mut sweep = Sweep::default();
-        sweep.write_register(0x33);
+        assert!(sweep.write_register(0x33));
         sweep.trigger(700);
         sweep.clock();
         let mut w = StateWriter::new();

@@ -516,7 +516,7 @@ mod tests {
         ch.write_envelope(0xF0);
         ch.frequency = 1000;
         if let Some(sweep) = &mut ch.sweep {
-            sweep.write_register(0x11); // period 1, increasing, shift 1
+            assert!(sweep.write_register(0x11)); // period 1, increasing, shift 1
         }
         ch.trigger();
 
@@ -530,7 +530,7 @@ mod tests {
         ch.write_envelope(0xF0);
         ch.frequency = 2000;
         if let Some(sweep) = &mut ch.sweep {
-            sweep.write_register(0x11);
+            assert!(sweep.write_register(0x11));
         }
         ch.trigger();
         assert!(!ch.enabled, "the trigger-time check already killed it");

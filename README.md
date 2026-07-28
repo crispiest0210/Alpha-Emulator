@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, and `mem_timing`; three gaps remain — see below |
+| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 8 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -37,9 +37,9 @@ Component status:
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
-| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; **Blargg dmg_sound not yet run** |
+| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 8 of 12 Blargg `dmg_sound` sub-tests pass |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
-| `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound does not run to completion** |
+| `system-gb` APU — NR10-NR52 register layer | done; **DMG wave-RAM access window not modelled** |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
@@ -58,23 +58,30 @@ Current Game Boy results:
 | Blargg `cpu_instrs`, all 11 sub-tests individually | **pass** |
 | Blargg `instr_timing` | **passes** |
 | Blargg `mem_timing` | **passes** |
+| Blargg `dmg_sound` sub-tests 02–08, 11 | **pass** |
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
-| Blargg `dmg_sound`, all 12 sub-tests | fail — see below |
+| Blargg `dmg_sound` sub-tests 01, 09, 10, 12 | fail — see below |
 | dmg-acid2 | renders and completes, but unvalidated — see below |
 
-The harness prints the CPU's state when a ROM times out, which turned "no output" into three
-different diagnoses:
+Open gaps, each tracked with the specific reason:
 
 - **Combined `cpu_instrs`** executes `STOP` inside the runner it copies into work RAM. Not an
   instruction bug — all eleven sub-tests pass standalone and MBC1 bank reads are verified
-  against that exact ROM by a dedicated test. Either something earlier goes wrong and `STOP`
-  is collateral, or `STOP` itself is mishandled (a DMG resumes when a joypad line goes low).
-- **`dmg_sound`** spins in a wait loop in work RAM, neither halted nor locked, on all twelve
-  sub-tests. The APU is not producing a state transition the tests wait on — most likely a
-  length-counter or `NR52` status bit. This is the largest open gap.
+  against that exact ROM by a dedicated test. `STOP` now releases correctly when a joypad line
+  goes low, so this ROM reaches `STOP` for some earlier reason still to be found.
+- **`dmg_sound` 01** fails check #2 of its register read/write sweep: some register does not
+  read back with the right bits forced high. The eight passing sub-tests narrow this to the
+  read masks rather than to channel behaviour.
+- **`dmg_sound` 09, 10, 12** all exercise wave RAM while channel 3 is playing. A DMG only lets
+  the CPU see that memory during the couple of cycles around the channel's own access and
+  returns `0xFF` otherwise; this core lets the CPU read and write it freely.
 - **dmg-acid2** renders and then halts waiting for interrupts, which is how it signals it has
   finished. The picture is probably correct; it stays unvalidated only because nobody has
   compared it against the published reference image.
+
+Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
+they leave there names the exact rule that failed. `cargo test -p harness --release --
+--ignored --nocapture dmg_sound_results` prints all twelve.
 
 All are tracked as known failures in the corpus, so the suite stays green for *regressions*
 while they are open — and fails loudly if one starts passing, which means the marker needs

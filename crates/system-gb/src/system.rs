@@ -179,7 +179,12 @@ impl Bus for GbSystemBus {
                 }
             }
             _ if GbApu::owns(addr16) => {
-                self.apu.write_register(addr16, value);
+                let was_powered = self.apu.is_powered();
+                self.apu
+                    .write_register(addr16, value, self.timing.sequencer_step());
+                if !was_powered && self.apu.is_powered() {
+                    self.timing.reset_sequencer();
+                }
             }
             OAM_DMA => {
                 self.memory.write8(addr, value);
@@ -391,6 +396,10 @@ impl System for GbSystem {
     fn step_frame(&mut self, input: InputState) -> FrameOutput {
         if self.bus.joypad.set_input(input) {
             self.bus.memory.interrupt_flags |= interrupt::JOYPAD;
+            // A joypad line going low is also what releases `STOP`. That happens whether or not
+            // the joypad interrupt is enabled — low-power mode ends because the hardware line
+            // itself went low, not because an interrupt got serviced.
+            self.cpu.clear_stop();
         }
 
         let start = self.bus.timing.now();

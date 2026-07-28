@@ -666,6 +666,26 @@ impl GbTiming {
         );
     }
 
+    /// The step the frame sequencer has most recently run, 0–7.
+    ///
+    /// The APU needs this at register-write time, not just when a step fires: whether a length
+    /// enable clocks the counter an extra time depends on where in the eight-step sequence the
+    /// write lands.
+    pub fn sequencer_step(&self) -> u8 {
+        self.apu.step
+    }
+
+    /// Restart the eight-step sequence, as powering the APU on does.
+    ///
+    /// Only the step *index* resets. The 512 Hz clock itself is a divider bit and keeps
+    /// running, so the next step still lands on the same 8192-cycle grid — which is precisely
+    /// what `07-len sweep period sync` checks.
+    pub fn reset_sequencer(&mut self) {
+        // Seven, not zero: the sequencer increments before it reads, so this makes the next
+        // step the zeroth one.
+        self.apu.step = 7;
+    }
+
     fn advance_sequencer(&mut self, out: &mut TimingOutput) {
         self.apu.step = (self.apu.step + 1) % 8;
         let clocks = ApuSequencer::clocks_for(self.apu.step);

@@ -186,13 +186,11 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         name: "dmg_sound_01_registers",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/01-registers.gb",
         path: "gb/blargg/dmg_sound/01-registers.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
+            "fails check #2 of \"NR10-NR51 and wave RAM write/read\": a register does not read back with the right bits forced high. The remaining eleven sub-tests below narrow it to the read masks rather than to channel behaviour",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -200,111 +198,81 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         name: "dmg_sound_02_len_ctr",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/02-len%20ctr.gb",
         path: "gb/blargg/dmg_sound/02-len_ctr.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_03_trigger",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/03-trigger.gb",
         path: "gb/blargg/dmg_sound/03-trigger.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_04_sweep",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/04-sweep.gb",
         path: "gb/blargg/dmg_sound/04-sweep.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_05_sweep_details",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/05-sweep%20details.gb",
         path: "gb/blargg/dmg_sound/05-sweep_details.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_06_overflow_on_trigger",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/06-overflow%20on%20trigger.gb",
         path: "gb/blargg/dmg_sound/06-overflow_on_trigger.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_07_len_sweep_period_sync",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/07-len%20sweep%20period%20sync.gb",
         path: "gb/blargg/dmg_sound/07-len_sweep_period_sync.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_08_len_ctr_during_power",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/08-len%20ctr%20during%20power.gb",
         path: "gb/blargg/dmg_sound/08-len_ctr_during_power.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_09_wave_read_while_on",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/09-wave%20read%20while%20on.gb",
         path: "gb/blargg/dmg_sound/09-wave_read_while_on.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
+            "reads wave RAM while channel 3 is playing. A DMG returns the byte the channel is reading at that instant, and only during the couple of cycles around its own access; every other read returns 0xFF. This core lets the CPU read wave RAM freely",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -312,13 +280,11 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         name: "dmg_sound_10_wave_trigger_while_on",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/10-wave%20trigger%20while%20on.gb",
         path: "gb/blargg/dmg_sound/10-wave_trigger_while_on.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
+            "triggering channel 3 while it plays corrupts the first bytes of wave RAM on a DMG. That corruption is not modelled",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -326,27 +292,21 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         name: "dmg_sound_11_regs_after_power",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/11-regs%20after%20power.gb",
         path: "gb/blargg/dmg_sound/11-regs_after_power.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
         name: "dmg_sound_12_wave_write_while_on",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/12-wave%20write%20while%20on.gb",
         path: "gb/blargg/dmg_sound/12-wave_write_while_on.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "spins in a wait loop in work RAM without ever reporting. The CPU is neither \
-             halted nor locked, so the APU is failing to produce a state transition the test \
-             is waiting on — most likely a length-counter or NR52 status bit",
+            "the write half of the same DMG wave-RAM access window as 09",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -399,11 +359,11 @@ pub const GB_ROMS: &[TestRom] = &[
         name: "blargg_dmg_sound",
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/dmg_sound.gb",
         path: "gb/blargg/dmg_sound.gb",
-        convention: Convention::BlarggSerial,
+        convention: Convention::BlarggMemory,
         max_frames: 6000,
         expected_hash: None,
         expected_failure: Some(
-            "no output; the same wait-loop stall as the individual sound tests below",
+            "the combined ROM stops at the first sub-test that fails; see 01 and 09-12 below",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
