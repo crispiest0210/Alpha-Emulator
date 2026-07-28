@@ -37,6 +37,8 @@ Component status:
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 not yet run** |
+| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; **Blargg dmg_sound not yet run** |
+| `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy
