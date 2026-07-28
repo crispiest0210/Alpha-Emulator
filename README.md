@@ -47,6 +47,7 @@ Component status:
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | `system-gbc` — CGB palette RAM, `KEY1` speed switch, HDMA, model detection | units done and tested; PPU renders full CGB colour. **Speed switch and HDMA not yet driven; no `System` impl** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
+| `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
 | Everything else | not started |
 
 ### Accuracy suite
@@ -122,6 +123,24 @@ Linux, macOS, and Windows:
 | `cargo xtask bench` | Run benchmarks |
 | `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
 | `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
+
+### Running a ROM without a GUI
+
+The native frontend is not wired up yet, but the core is. `frontend-headless` runs a ROM with
+no window, no audio device, and no GPU:
+
+```sh
+cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
+cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
+cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
+```
+
+`run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
+printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N
+frames, which is how you locate the frame where two builds diverge rather than just learning
+that they did. `check-determinism` runs the same ROM twice from a fresh machine and compares:
+determinism is what save states, rewind, and replay all rest on, and it is cheap to check and
+easy to lose.
 
 ## Architecture
 
