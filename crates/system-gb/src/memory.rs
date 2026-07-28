@@ -45,21 +45,34 @@ pub const OAM_SIZE: usize = 0xA0;
 pub const HRAM_SIZE: usize = 0x7F;
 pub const IO_SIZE: usize = 0x80;
 
-/// Which machine the memory map is configured for.
+/// Which machine is being emulated.
 ///
 /// The CGB adds a second VRAM bank and seven extra WRAM banks. Both are the same map with
-/// more banks, so one type covers both rather than `system-gbc` duplicating it.
+/// more banks, so one type covers both rather than `system-gbc` duplicating it — and the same
+/// reasoning extends past the memory map, which is why the palette and attribute questions
+/// below are answered here too rather than by a parallel enum in that crate.
+///
+/// Three variants, not two: a CGB running a DMG cartridge is its own machine. It has the
+/// CGB's banked memory and speed switch, but the boot ROM has recoloured a game that never
+/// asked to be recoloured. Collapsing it into `Dmg` would lose the banking; collapsing it into
+/// `Cgb` would have the PPU read an attribute map that was never written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GbModel {
+    /// Original hardware.
     Dmg,
+    /// CGB hardware running a CGB-aware cartridge.
     Cgb,
+    /// CGB hardware running an unmodified DMG cartridge.
+    CgbInDmgMode,
 }
 
 impl GbModel {
     pub const fn vram_banks(self) -> usize {
         match self {
             GbModel::Dmg => 1,
-            GbModel::Cgb => 2,
+            // Compatibility mode included: the second bank is physically there, and the boot
+            // ROM uses it even when the game does not.
+            GbModel::Cgb | GbModel::CgbInDmgMode => 2,
         }
     }
 
@@ -67,7 +80,54 @@ impl GbModel {
     pub const fn wram_banks(self) -> usize {
         match self {
             GbModel::Dmg => 2,
-            GbModel::Cgb => 8,
+            GbModel::Cgb | GbModel::CgbInDmgMode => 8,
+        }
+    }
+
+    /// Whether the CGB register blocks respond at all.
+    ///
+    /// True in compatibility mode as well: the hardware is present and the registers answer,
+    /// which is how the boot ROM installs its compatibility palette in the first place. What
+    /// differs there is that the *game* never touches them.
+    pub const fn has_cgb_hardware(self) -> bool {
+        matches!(self, GbModel::Cgb | GbModel::CgbInDmgMode)
+    }
+
+    /// Whether the picture comes from CGB palette RAM rather than `BGP`/`OBP0`/`OBP1`.
+    pub const fn uses_colour_palettes(self) -> bool {
+        matches!(self, GbModel::Cgb | GbModel::CgbInDmgMode)
+    }
+
+    /// Whether the background map has a second attribute byte in VRAM bank 1.
+    ///
+    /// False in compatibility mode: the game writes a DMG tile map and leaves bank 1 alone, so
+    /// reading attributes there would decode uninitialised memory as palette and flip bits.
+    pub const fn uses_tile_attributes(self) -> bool {
+        matches!(self, GbModel::Cgb)
+    }
+
+    /// Whether `LCDC` bit 0 blanks the background.
+    ///
+    /// It does on a DMG. On a CGB the bit keeps its position but changes its job: the
+    /// background always draws, and clearing the bit instead drops background priority so
+    /// every sprite comes to the front. A game uses that for a cutscene without editing its
+    /// tile maps — and treating it as a blank would black out the screen instead.
+    pub const fn bg_enable_blanks_background(self) -> bool {
+        matches!(self, GbModel::Dmg)
+    }
+
+    /// Pick the model for a cartridge, from the CGB flag at `0x0143` of its header.
+    ///
+    /// `0x80` means "enhanced for CGB but still runs on a DMG" and `0xC0` means "CGB only";
+    /// both run in full CGB mode on CGB hardware. Anything else is a DMG cartridge, which on
+    /// CGB hardware means compatibility mode.
+    pub const fn for_cartridge(cgb_flag: u8, on_cgb_hardware: bool) -> Self {
+        if !on_cgb_hardware {
+            return GbModel::Dmg;
+        }
+        match cgb_flag {
+            0x80 | 0xC0 => GbModel::Cgb,
+            _ => GbModel::CgbInDmgMode,
         }
     }
 }
@@ -168,7 +228,9 @@ impl GbBus {
         }
         match self.model {
             GbModel::Dmg => (addr as usize) < rom.len().min(0x100),
-            GbModel::Cgb => {
+            // Compatibility mode runs the same physical CGB boot ROM — it is the boot ROM that
+            // *decides* the machine is in compatibility mode, so it is mapped either way.
+            GbModel::Cgb | GbModel::CgbInDmgMode => {
                 (addr < 0x0100 || (0x0200..0x0900).contains(&addr)) && (addr as usize) < rom.len()
             }
         }

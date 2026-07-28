@@ -20,6 +20,7 @@
 //! write to both. That is deliberate duplication of a *read*, not of state: neither module
 //! stores the other's fields.
 
+use crate::memory::GbModel;
 use core_common::{Framebuffer, Rgba8, Savable, StateError, StateReader, StateWriter};
 use ppu_tile2d::{
     render_sprites, render_text_background, BackgroundParams, BitDepth, MonochromePalette,
@@ -166,12 +167,38 @@ impl GbPpu {
     /// the CPU bus, which is what the hardware does — and it is why the CPU is locked out of
     /// both during mode 3.
     pub fn render_scanline(&mut self, line: u8, vram: &[u8], oam: &[u8]) {
+        let palette = self.palette;
+        self.render_scanline_with(GbModel::Dmg, line, vram, oam, &palette);
+    }
+
+    /// Composite one scanline, looking colour up somewhere other than this PPU's own
+    /// monochrome registers.
+    ///
+    /// The CGB resolves the same indexed pixels through its palette RAM, which lives in
+    /// `system-gbc` — a crate that depends on this one, so this PPU cannot name the type. It
+    /// does not need to: prompt 08 made [`ScanlineBuffer`] hold palette *indices* until the
+    /// line is complete precisely so the lookup could be swapped, and
+    /// [`PaletteSource`] is the swap point. Everything before it — tile fetch, window line
+    /// counter, sprite priority — is identical on both machines and is not duplicated.
+    ///
+    /// `model` is separate from the palette because one thing genuinely differs earlier than
+    /// the lookup: see [`GbModel::bg_enable_blanks_background`].
+    pub fn render_scanline_with(
+        &mut self,
+        model: GbModel,
+        line: u8,
+        vram: &[u8],
+        oam: &[u8],
+        palettes: &dyn PaletteSource,
+    ) {
         if line as u32 >= SCREEN_HEIGHT {
             return;
         }
         self.scanline.clear();
 
-        if self.has(lcdc::BG_ENABLE) {
+        // On a CGB the background always draws; `LCDC` bit 0 only drops its priority.
+        let draw_background = self.has(lcdc::BG_ENABLE) || !model.bg_enable_blanks_background();
+        if draw_background {
             self.render_background(line, vram);
             self.render_window(line, vram);
         }
@@ -179,15 +206,15 @@ impl GbPpu {
             self.render_sprites_for_line(line, vram, oam);
         }
 
-        // With the background disabled the DMG shows white, not the palette's colour 0: the
-        // layer is off, so `BGP` does not apply to it at all.
-        let backdrop = if self.has(lcdc::BG_ENABLE) {
-            self.palette.lookup_bg(0, 0)
+        // With the background blanked a DMG shows white, not the palette's colour 0: the layer
+        // is off, so `BGP` does not apply to it at all.
+        let backdrop = if draw_background {
+            palettes.lookup_bg(0, 0)
         } else {
             DMG_SHADES[0]
         };
         let row = self.framebuffer.row_mut(line as u32);
-        self.scanline.resolve_into(&self.palette, backdrop, row);
+        self.scanline.resolve_into(palettes, backdrop, row);
     }
 
     fn render_background(&mut self, line: u8, vram: &[u8]) {

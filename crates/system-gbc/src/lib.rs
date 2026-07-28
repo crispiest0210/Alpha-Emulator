@@ -22,9 +22,11 @@
 //! The additive units in this crate are complete and tested. What remains is that
 //! parameterisation and the `System` implementation that assembles the two:
 //!
-//! - `ppu-tile2d`'s compositor already takes a [`PaletteSource`](ppu_tile2d::PaletteSource),
-//!   which [`CgbPalettes`] implements — but `system-gb`'s PPU hardcodes the monochrome one and
-//!   reads no attribute byte.
+//! - Colour resolution is wired: `system-gb`'s PPU takes a
+//!   [`PaletteSource`](ppu_tile2d::PaletteSource) and a [`Model`], so handing it
+//!   [`CgbPalettes`] produces a colour picture. What is still missing is the *source* of the
+//!   per-pixel palette index — the PPU reads no attribute byte yet, so every background pixel
+//!   still resolves through palette 0.
 //! - `system-gb` already banks VRAM and WRAM, so [`TileAttributes`] has somewhere to be read
 //!   from; nothing reads it yet.
 //! - [`SpeedSwitch`] needs `STOP` in `system-gb` to consult it, and the CPU's cycle accounting
@@ -47,63 +49,14 @@ pub use hdma::Hdma;
 pub use palettes::{rgb555_to_rgba8, CgbPalettes};
 pub use speed::SpeedSwitch;
 
-/// Which hardware a cartridge is running on.
+/// Which machine is being emulated.
 ///
-/// Three states, not two: a CGB running a DMG cartridge is its own mode. It has the CGB's
-/// double-speed switch and banked memory available, but the boot ROM has installed a
-/// compatibility palette and the game addresses the machine as if it were a DMG. Collapsing
-/// that into "DMG" would lose the banking; collapsing it into "CGB" would recolour games that
-/// never asked to be recoloured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Model {
-    /// Original hardware.
-    #[default]
-    Dmg,
-    /// CGB hardware running a CGB-aware cartridge.
-    Cgb,
-    /// CGB hardware running an unmodified DMG cartridge.
-    CgbInDmgMode,
-}
-
-impl Model {
-    /// Whether the CGB register blocks respond at all.
-    ///
-    /// True in DMG-compatibility mode as well: the hardware is present and the registers
-    /// answer, which is how the boot ROM installs its compatibility palette in the first
-    /// place. What differs in that mode is that the *game* never touches them.
-    pub fn has_cgb_hardware(self) -> bool {
-        matches!(self, Model::Cgb | Model::CgbInDmgMode)
-    }
-
-    /// Whether the picture comes from CGB palette RAM rather than the DMG's `BGP`/`OBP`.
-    pub fn uses_colour_palettes(self) -> bool {
-        matches!(self, Model::Cgb | Model::CgbInDmgMode)
-    }
-
-    /// Whether the background map has a second attribute byte in VRAM bank 1.
-    ///
-    /// False in DMG-compatibility mode: the boot ROM leaves bank 1 alone and the game writes a
-    /// DMG tile map, so reading attributes there would decode uninitialised memory as palette
-    /// and flip bits.
-    pub fn uses_tile_attributes(self) -> bool {
-        matches!(self, Model::Cgb)
-    }
-
-    /// Pick the model for a cartridge, from the CGB flag at `0x0143` of its header.
-    ///
-    /// `0x80` means "enhanced for CGB but still runs on a DMG" and `0xC0` means "CGB only";
-    /// both run in full CGB mode on CGB hardware. Anything else is a DMG cartridge, which on
-    /// CGB hardware means compatibility mode.
-    pub fn for_cartridge(cgb_flag: u8, on_cgb_hardware: bool) -> Self {
-        if !on_cgb_hardware {
-            return Model::Dmg;
-        }
-        match cgb_flag {
-            0x80 | 0xC0 => Model::Cgb,
-            _ => Model::CgbInDmgMode,
-        }
-    }
-}
+/// Re-exported rather than redefined. `system-gb` already had this enum for its memory map —
+/// the CGB's extra VRAM and WRAM banks are the same map with more banks — and the palette and
+/// attribute questions the CGB adds are the same question about the same machine. A parallel
+/// enum here would be two types that must agree forever, which is the duplication prompt 11
+/// asks this crate to avoid.
+pub use system_gb::GbModel as Model;
 
 #[cfg(test)]
 mod tests {
@@ -146,5 +99,89 @@ mod tests {
         assert!(!m.has_cgb_hardware());
         assert!(!m.uses_colour_palettes());
         assert!(!m.uses_tile_attributes());
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use core_common::Rgba8;
+    use system_gb::GbPpu;
+
+    /// A tile map cell pointing at tile 1, with tile 1 filled with colour index 1.
+    fn ppu_showing_colour_one() -> (GbPpu, Vec<u8>, Vec<u8>) {
+        let mut vram = vec![0u8; 0x4000];
+        // Tile 1's pixel data: every pixel colour index 1 (low bitplane set, high clear).
+        for row in 0..8 {
+            vram[0x10 + row * 2] = 0xFF;
+        }
+        // Tile map entry (0,0) -> tile 1.
+        vram[0x1800] = 1;
+
+        let mut ppu = GbPpu::new();
+        // LCD on, background on, tile data at 0x8000.
+        ppu.lcdc = 0x91;
+        (ppu, vram, vec![0u8; 0xA0])
+    }
+
+    #[test]
+    fn the_same_pixels_resolve_to_grey_on_a_dmg_and_to_colour_through_cgb_palette_ram() {
+        // This is the whole point of keeping the scanline buffer indexed until the line is
+        // done: one renderer, two lookups. If the PPU had resolved to RGBA during the fetch,
+        // colour would have meant a second renderer.
+        let (mut ppu, vram, oam) = ppu_showing_colour_one();
+
+        ppu.render_scanline(0, &vram, &oam);
+        let dmg = ppu.framebuffer().pixel(0, 0);
+        assert_eq!(dmg.r, dmg.g, "a DMG pixel is grey");
+        assert_eq!(dmg.g, dmg.b);
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F); // background palette 0, colour 1: red
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0),
+            Rgba8 {
+                r: 0xFF,
+                g: 0,
+                b: 0,
+                a: 0xFF
+            },
+            "the same indexed pixel came out red through CGB palette RAM"
+        );
+    }
+
+    #[test]
+    fn clearing_lcdc_bit_zero_blanks_a_dmg_but_not_a_cgb() {
+        // The bit keeps its position across the two machines and changes its job. Treating the
+        // CGB case as a blank would black out the screen instead of merely reordering layers.
+        let (mut ppu, vram, oam) = ppu_showing_colour_one();
+        ppu.lcdc = 0x90; // background bit cleared
+
+        ppu.render_scanline(0, &vram, &oam);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0),
+            ppu_tile2d::DMG_SHADES[0],
+            "a DMG blanks to white"
+        );
+
+        let mut palettes = CgbPalettes::new();
+        palettes.set_colour(false, 0, 1, 0x001F);
+        ppu.render_scanline_with(Model::Cgb, 0, &vram, &oam, &palettes);
+        assert_eq!(
+            ppu.framebuffer().pixel(0, 0).r,
+            0xFF,
+            "a CGB still draws the background"
+        );
+    }
+
+    #[test]
+    fn compatibility_mode_draws_through_palette_ram_but_reads_no_attributes() {
+        // The combination that makes the third variant necessary: a recoloured picture from a
+        // tile map that never had an attribute byte written beside it.
+        let m = Model::CgbInDmgMode;
+        assert!(m.uses_colour_palettes());
+        assert!(!m.uses_tile_attributes());
+        assert!(!m.bg_enable_blanks_background(), "it is CGB hardware");
     }
 }
