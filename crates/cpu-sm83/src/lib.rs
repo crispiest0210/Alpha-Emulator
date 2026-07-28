@@ -182,6 +182,11 @@ pub struct Sm83 {
     /// An undefined opcode was executed. Hardware hangs until reset, and so does this — the
     /// CPU stops fetching and services no interrupts.
     pub(crate) locked: bool,
+
+    /// Cycles already reported to the bus during the instruction in flight.
+    ///
+    /// Scratch, always zero at an instruction boundary, so it is deliberately not serialized.
+    pub(crate) ticked: u32,
 }
 
 impl Default for Sm83 {
@@ -209,6 +214,7 @@ impl Sm83 {
             stopped: false,
             halt_bug: false,
             locked: false,
+            ticked: 0,
         }
     }
 
@@ -355,13 +361,48 @@ impl Sm83 {
 
     // -- Memory helpers -------------------------------------------------------
 
+    /// Perform one machine cycle's read.
+    ///
+    /// The bus is told the time first and the access happens second, because on hardware the
+    /// data is latched at the *end* of the machine cycle. A timer that ticks over during this
+    /// cycle is therefore already updated when the read lands, which is exactly the behaviour
+    /// `mem_timing` measures.
+    #[inline]
+    pub(crate) fn bus_read<B: Bus + ?Sized>(&mut self, bus: &mut B, addr: u32) -> u8 {
+        bus.tick(Cycles(4));
+        self.ticked += 4;
+        bus.read8(addr)
+    }
+
+    #[inline]
+    pub(crate) fn bus_write<B: Bus + ?Sized>(&mut self, bus: &mut B, addr: u32, value: u8) {
+        bus.tick(Cycles(4));
+        self.ticked += 4;
+        bus.write8(addr, value);
+    }
+
+    /// Report the cycles this instruction spent on internal work rather than on the bus.
+    ///
+    /// Called once the instruction's total is known, so the sum reaching the bus always
+    /// matches what `step` returns no matter how the instruction split its time.
+    #[inline]
+    fn tick_remaining<B: Bus + ?Sized>(&mut self, bus: &mut B, total: u32) {
+        if total > self.ticked {
+            bus.tick(Cycles((total - self.ticked) as u64));
+        }
+        // Settling the instruction also clears the counter, so the "always zero at an
+        // instruction boundary" invariant is enforced here rather than merely asserted in a
+        // comment — which matters because the field participates in equality and save states.
+        self.ticked = 0;
+    }
+
     /// Fetch the next opcode.
     ///
     /// This is the one place the HALT bug is observable: when armed, the byte is read but PC
     /// is left alone, so the very next fetch reads the same byte again.
     #[inline]
     pub(crate) fn fetch_opcode<B: Bus + ?Sized>(&mut self, bus: &mut B) -> u8 {
-        let op = bus.read8(self.pc as u32);
+        let op = self.bus_read(bus, self.pc as u32);
         if self.halt_bug {
             self.halt_bug = false;
         } else {
@@ -372,7 +413,7 @@ impl Sm83 {
 
     #[inline]
     pub(crate) fn fetch8<B: Bus + ?Sized>(&mut self, bus: &mut B) -> u8 {
-        let v = bus.read8(self.pc as u32);
+        let v = self.bus_read(bus, self.pc as u32);
         self.pc = self.pc.wrapping_add(1);
         v
     }
@@ -388,16 +429,16 @@ impl Sm83 {
     pub(crate) fn push16<B: Bus + ?Sized>(&mut self, bus: &mut B, value: u16) {
         let [lo, hi] = value.to_le_bytes();
         self.sp = self.sp.wrapping_sub(1);
-        bus.write8(self.sp as u32, hi);
+        self.bus_write(bus, self.sp as u32, hi);
         self.sp = self.sp.wrapping_sub(1);
-        bus.write8(self.sp as u32, lo);
+        self.bus_write(bus, self.sp as u32, lo);
     }
 
     #[inline]
     pub(crate) fn pop16<B: Bus + ?Sized>(&mut self, bus: &mut B) -> u16 {
-        let lo = bus.read8(self.sp as u32);
+        let lo = self.bus_read(bus, self.sp as u32);
         self.sp = self.sp.wrapping_add(1);
-        let hi = bus.read8(self.sp as u32);
+        let hi = self.bus_read(bus, self.sp as u32);
         self.sp = self.sp.wrapping_add(1);
         u16::from_le_bytes([lo, hi])
     }
@@ -407,6 +448,8 @@ impl Sm83 {
     /// Interrupts that are both requested and enabled.
     #[inline]
     fn pending_interrupts<B: Bus + ?Sized>(&self, bus: &mut B) -> u8 {
+        // Deliberately not through `bus_read`: sampling the interrupt lines is internal to the
+        // CPU and does not occupy a machine cycle on the external bus.
         bus.read8(IF_ADDR) & bus.read8(IE_ADDR) & 0x1F
     }
 
@@ -435,6 +478,7 @@ impl<B: Bus + ?Sized> Cpu<B> for Sm83 {
         if self.locked {
             // An undefined opcode hung the CPU. It fetches nothing and services no
             // interrupts; only a reset recovers.
+            bus.tick(Cycles(4));
             return Cycles(4);
         }
 
@@ -457,18 +501,25 @@ impl<B: Bus + ?Sized> Cpu<B> for Sm83 {
             self.stopped = false;
 
             if self.ime && !dispatch_inhibited {
-                return Cycles(self.dispatch_interrupt(bus, pending) as u64);
+                self.ticked = 0;
+                let total = self.dispatch_interrupt(bus, pending);
+                self.tick_remaining(bus, total);
+                return Cycles(total as u64);
             }
         }
 
         if self.halted || self.stopped {
             // Idling still consumes time. Returning zero here would spin `step_frame`
             // forever, which is exactly what the `Cpu` trait's contract warns about.
+            bus.tick(Cycles(4));
             return Cycles(4);
         }
 
+        self.ticked = 0;
         let opcode = self.fetch_opcode(bus);
-        Cycles(self.execute(opcode, bus) as u64)
+        let total = self.execute(opcode, bus);
+        self.tick_remaining(bus, total);
+        Cycles(total as u64)
     }
 
     fn reset(&mut self) {

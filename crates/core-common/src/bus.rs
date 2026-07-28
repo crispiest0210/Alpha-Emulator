@@ -47,6 +47,22 @@ pub trait Bus: Savable {
     fn read8(&mut self, addr: Addr) -> u8;
     fn write8(&mut self, addr: Addr, value: u8);
 
+    /// Account for time passing inside an instruction.
+    ///
+    /// A CPU calls this as each memory access happens, *before* performing it, so the rest of
+    /// the machine observes the access at the right moment rather than at the end of whatever
+    /// instruction contained it.
+    ///
+    /// That distinction is measurable. A Game Boy instruction that reads a timer register
+    /// takes several machine cycles, and which cycle the read lands on decides what value
+    /// comes back — Blargg's `mem_timing` suite exists specifically to catch emulators that
+    /// charge an instruction's cycles in one lump at its end.
+    ///
+    /// The default does nothing, which is right for a bus with nothing else running against
+    /// it: a test harness, or a system whose subsystems are advanced by the caller instead.
+    #[inline]
+    fn tick(&mut self, _cycles: crate::Cycles) {}
+
     /// What a read of unmapped address space returns on this system.
     ///
     /// Required, not defaulted: see the module docs. `&self` because determining the open-bus

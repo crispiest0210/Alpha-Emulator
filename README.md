@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes Blargg `instr_timing`; four other suites fail or are unvalidated — see below |
+| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, and `mem_timing`; three gaps remain — see below |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -29,7 +29,7 @@ Component status:
 | Workspace, `xtask`, CI, crate-boundary enforcement | done |
 | `core-common` — scheduler, bus, CPU/system traits | done |
 | `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
-| `cpu-sm83` — Game Boy CPU | complete, unit-tested; **known accuracy failures, see below** |
+| `cpu-sm83` — Game Boy CPU | complete; passes all Blargg CPU and timing suites |
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
@@ -51,18 +51,23 @@ The harness is in place and the Game Boy suite runs. Fetch the ROMs with
 `cargo xtask fetch-test-roms`, then `cargo xtask test --accuracy`. Nothing is vendored; the
 corpus directory is gitignored and tests skip cleanly when it is empty.
 
-Current Game Boy results, honestly:
+Current Game Boy results:
 
 | Test ROM | Result |
 |---|---|
+| Blargg `cpu_instrs`, all 11 sub-tests individually | **pass** |
 | Blargg `instr_timing` | **passes** |
-| Blargg `cpu_instrs` | sub-tests 01 and 02 pass, then hangs partway through 03 (`op sp,hl`) |
-| Blargg `mem_timing` | all three sub-tests fail — the CPU charges an instruction's cycles at its end instead of interleaving each memory access, so writes land at the wrong cycle |
+| Blargg `mem_timing` | **passes** |
+| Blargg `cpu_instrs` (combined ROM) | hangs after printing sub-test 03's name — see below |
 | Blargg `dmg_sound` | no serial output at all within the frame budget |
-| dmg-acid2 | renders, but the output has **not** been checked against the reference image, so this is unvalidated rather than passing |
+| dmg-acid2 | renders, but the output has **not** been checked against the reference image, so it is unvalidated rather than passing |
 
-Those four are tracked as known failures in the corpus, so the suite stays green for
-*regressions* while the gaps are open — and fails loudly if a known-failing ROM starts
+The combined `cpu_instrs` ROM is **not** a CPU bug: every one of its eleven sub-tests passes
+standalone, and MBC1 bank reads are verified against that exact ROM by a dedicated test. The
+cause is somewhere in the combined ROM's own sequencing between sub-tests and is still open.
+
+The three remaining gaps are tracked as known failures in the corpus, so the suite stays green
+for *regressions* while they are open — and fails loudly if a known-failing ROM starts
 passing, which means the marker needs removing.
 
 The ARM cores have not been run against anything: `arm7wrestler` and `gba-suite` are not in

@@ -5,7 +5,7 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{Convention, TestRom, GB_ROMS};
+use crate::corpus::{Convention, TestRom, GB_CPU_INSTRS_SUBTESTS, GB_ROMS};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -500,18 +500,24 @@ fn gb_accuracy_suite() {
     let mut known_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
 
-    for rom in GB_ROMS {
+    for rom in GB_ROMS.iter().chain(GB_CPU_INSTRS_SUBTESTS) {
         let Some(outcome) = run_gb_rom(rom) else {
             report.skip(rom.name);
             continue;
         };
         eprintln!(
-            "{:<22} {:>8}  {} frames  {}",
+            "{:<22} {:>4}  {} frames",
             rom.name,
             if outcome.passed() { "PASS" } else { "FAIL" },
-            outcome.frames(),
-            outcome.report().lines().next().unwrap_or("").trim()
+            outcome.frames()
         );
+        // The whole report, not just its first line: these suites name the sub-test that
+        // broke, and that is the entire diagnostic value of running them.
+        if !outcome.passed() {
+            for line in outcome.report().lines() {
+                eprintln!("      | {}", line.trim_end());
+            }
+        }
 
         match (rom.expected_failure, outcome.passed()) {
             (Some(reason), false) => known_failures.push(format!("{}: {reason}", rom.name)),
@@ -540,4 +546,47 @@ fn gb_accuracy_suite() {
         "these ROMs are marked as expected failures but passed; remove the marker: {unexpected_passes:?}"
     );
     assert!(report.is_success(), "{summary}");
+}
+
+// ---------------------------------------------------------------------------
+// Banking
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mbc1_banking_reaches_every_bank_of_a_real_rom() {
+    use core_common::Bus;
+    // The combined cpu_instrs ROM hangs where every one of its sub-tests passes standalone,
+    // which points at banking rather than at any instruction. This checks the mapper against
+    // a real multi-bank cartridge directly.
+    let Some(bytes) = GB_ROMS
+        .iter()
+        .find(|r| r.name == "blargg_cpu_instrs")
+        .and_then(|r| r.load())
+    else {
+        return;
+    };
+    let banks = bytes.len() / 0x4000;
+    assert!(banks >= 4, "expected a multi-bank ROM");
+
+    let mut gb = system_gb::GbSystem::new(bytes.clone(), None).unwrap();
+    for bank in 1..banks {
+        gb.bus_mut().write8(0x2000, bank as u8);
+        for offset in [0u16, 0x100, 0x1234, 0x3FFF] {
+            let got = gb.bus_mut().read8(0x4000 + offset as u32);
+            let want = bytes[bank * 0x4000 + offset as usize];
+            assert_eq!(
+                got, want,
+                "bank {bank} offset {offset:#06X}: mapper returned {got:#04X}, ROM has {want:#04X}"
+            );
+        }
+    }
+
+    // And the fixed low window always shows bank 0.
+    for offset in [0x100u16, 0x2000, 0x3FFF] {
+        assert_eq!(
+            gb.bus_mut().read8(offset as u32),
+            bytes[offset as usize],
+            "the low window must stay on bank 0"
+        );
+    }
 }

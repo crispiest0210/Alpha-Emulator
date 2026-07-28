@@ -64,7 +64,9 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Unit tests
         run: cargo test --workspace
+      - name: Fetch accuracy test ROMs
+        # Nothing is vendored, so CI fetches. Without this the suite would skip silently,
+        # which is the one place skipping must not happen.
+        run: cargo xtask fetch-test-roms
       - name: Accuracy suite
-        # Wired for real in prompt 17. Until then this is a no-op that still proves
-        # the xtask entrypoint works identically on all three OSes.
         run: cargo xtask test --accuracy

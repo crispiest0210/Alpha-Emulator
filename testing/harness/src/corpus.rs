@@ -58,6 +58,125 @@ pub struct TestRom {
     pub licence: &'static str,
 }
 
+/// Blargg's `cpu_instrs`, one ROM per sub-test.
+///
+/// The combined ROM is also in the corpus, but a single aggregate result is a poor diagnostic:
+/// when one sub-test hangs, the run stops and the other ten are neither confirmed nor denied.
+/// Per-sub-test ROMs name exactly which instruction group is broken, and a hang in one does
+/// not hide the rest.
+pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
+    TestRom {
+        name: "cpu_instrs_01_special",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/01-special.gb",
+        path: "gb/blargg/cpu_instrs/01-special.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_02_interrupts",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/02-interrupts.gb",
+        path: "gb/blargg/cpu_instrs/02-interrupts.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_03_op_sp_hl",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/03-op%20sp,hl.gb",
+        path: "gb/blargg/cpu_instrs/03-op_sp_hl.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_04_op_r_imm",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/04-op%20r,imm.gb",
+        path: "gb/blargg/cpu_instrs/04-op_r_imm.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_05_op_rp",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/05-op%20rp.gb",
+        path: "gb/blargg/cpu_instrs/05-op_rp.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_06_ld_r_r",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/06-ld%20r,r.gb",
+        path: "gb/blargg/cpu_instrs/06-ld_r_r.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_07_jr_jp_call_ret_rst",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb",
+        path: "gb/blargg/cpu_instrs/07-jr_jp_call_ret_rst.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_08_misc_instrs",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/08-misc%20instrs.gb",
+        path: "gb/blargg/cpu_instrs/08-misc_instrs.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_09_op_r_r",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/09-op%20r,r.gb",
+        path: "gb/blargg/cpu_instrs/09-op_r_r.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_10_bit_ops",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/10-bit%20ops.gb",
+        path: "gb/blargg/cpu_instrs/10-bit_ops.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+    TestRom {
+        name: "cpu_instrs_11_op_a_hl",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/11-op%20a,(hl).gb",
+        path: "gb/blargg/cpu_instrs/11-op_a_hl.gb",
+        convention: Convention::BlarggSerial,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
+    },
+];
+
 /// The Game Boy corpus.
 ///
 /// Deliberately small and end-to-end rather than exhaustive: these four are what prompts 03,
@@ -69,11 +188,14 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/cpu_instrs.gb",
         path: "gb/blargg/cpu_instrs.gb",
         convention: Convention::BlarggSerial,
-        // The full suite is eleven sub-tests and takes a while.
-        max_frames: 4000,
+        // Eleven sub-tests back to back; the slowest alone needs several hundred frames.
+        max_frames: 20000,
         expected_hash: None,
         expected_failure: Some(
-            "hangs partway through sub-test 03 (op sp,hl); sub-tests 01 and 02 pass",
+            "hangs after printing sub-test 03's name. Not a CPU bug: all eleven sub-tests \
+             pass individually below, and MBC1 bank reads are verified against this exact \
+             ROM by `mbc1_banking_reaches_every_bank_of_a_real_rom`. Cause still unknown — \
+             something in the combined ROM's own sequencing between sub-tests",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -94,10 +216,7 @@ pub const GB_ROMS: &[TestRom] = &[
         convention: Convention::BlarggSerial,
         max_frames: 1200,
         expected_hash: None,
-        expected_failure: Some(
-            "all three sub-tests fail: the CPU charges an instruction's cycles at its end \
-             rather than interleaving each memory access, so writes land at the wrong cycle",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
@@ -160,7 +279,7 @@ impl TestRom {
 
 /// Every ROM across every system.
 pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
-    GB_ROMS.iter()
+    GB_ROMS.iter().chain(GB_CPU_INSTRS_SUBTESTS)
 }
 
 #[cfg(test)]

@@ -57,6 +57,12 @@ pub struct GbSystemBus {
     /// Blargg's test ROMs report their results, so the harness reads it. Kept out of save
     /// states: it is captured output, not machine state.
     pub serial_output: Vec<u8>,
+
+    /// Event results accumulated since the frame loop last collected them.
+    ///
+    /// Events now fire *during* an instruction, so a flag like `frame_ready` would be lost if
+    /// the loop only looked between instructions. It accumulates here instead.
+    pending: TimingOutput,
 }
 
 /// Serial data and control.
@@ -76,6 +82,7 @@ impl GbSystemBus {
             apu: GbApu::new(),
             joypad: Joypad::new(),
             serial_output: Vec::new(),
+            pending: TimingOutput::default(),
         }
     }
 
@@ -94,12 +101,17 @@ impl GbSystemBus {
     }
 
     /// Advance everything that runs on the clock.
-    fn advance(&mut self, cycles: Cycles) {
+    pub fn advance(&mut self, cycles: Cycles) {
         let now = self.timing.now() + cycles;
         self.timing.set_now(now);
         self.apu.tick(cycles.get());
         // The cartridge may hold an RTC, which counts emulated seconds rather than host ones.
         self.memory.mapper.tick(cycles.get(), CLOCK_HZ);
+    }
+
+    /// Collect what the events have reported since the last call.
+    fn take_pending(&mut self) -> TimingOutput {
+        std::mem::take(&mut self.pending)
     }
 
     /// Fire every due event and apply its consequences.
@@ -192,6 +204,22 @@ impl Bus for GbSystemBus {
                 }
             }
         }
+    }
+
+    /// The CPU reports each machine cycle here as it happens.
+    ///
+    /// Advancing the clock is only half of it: the due events have to *fire* too. A timer
+    /// that overflows during an instruction must have overflowed by the time that same
+    /// instruction reads `TIMA` a cycle later, and moving the clock without draining the
+    /// scheduler would leave the read seeing a stale value — which is worse than the lump-sum
+    /// accounting this replaced, not better.
+    ///
+    /// Charging an instruction's cost at its end is what Blargg's `mem_timing` suite detects;
+    /// draining here is what makes the fix real rather than cosmetic.
+    fn tick(&mut self, cycles: Cycles) {
+        self.advance(cycles);
+        let out = self.service_events();
+        self.pending.frame_ready |= out.frame_ready;
     }
 
     fn open_bus8(&self, addr: u32) -> u8 {
@@ -368,19 +396,16 @@ impl System for GbSystem {
         let start = self.bus.timing.now();
         self.save_ram_dirty = false;
 
-        // A frame is bounded in case the PPU is switched off and never reaches VBlank; a
-        // frontend must always get a frame back rather than hanging.
+        // Bounded in case the PPU is switched off and never reaches VBlank: a frontend must
+        // always get a frame back rather than hanging.
         let deadline = start + Cycles(crate::timing::FRAME_CYCLES * 2);
-        loop {
-            let slice = self.bus.timing.cycles_until_next_event();
-            let target = self.bus.timing.now() + slice;
-            while self.bus.timing.now() < target {
-                let consumed = self.cpu.step(&mut self.bus);
-                self.bus.advance(consumed);
-            }
 
-            let out = self.bus.service_events();
-            if out.frame_ready || self.bus.timing.now() >= deadline {
+        // No slicing. Events fire from inside `Bus::tick` as the CPU runs, so there is nothing
+        // to bound the CPU against — running an instruction can no longer overshoot past an
+        // event that should have interrupted it.
+        loop {
+            self.cpu.step(&mut self.bus);
+            if self.bus.take_pending().frame_ready || self.bus.timing.now() >= deadline {
                 break;
             }
         }

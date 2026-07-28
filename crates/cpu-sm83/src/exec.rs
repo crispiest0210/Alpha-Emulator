@@ -27,7 +27,7 @@ impl Sm83 {
             3 => self.e,
             4 => self.h,
             5 => self.l,
-            R_HL_INDIRECT => bus.read8(self.hl() as u32),
+            R_HL_INDIRECT => self.bus_read(bus, self.hl() as u32),
             _ => self.a,
         }
     }
@@ -41,7 +41,7 @@ impl Sm83 {
             3 => self.e = value,
             4 => self.h = value,
             5 => self.l = value,
-            R_HL_INDIRECT => bus.write8(self.hl() as u32, value),
+            R_HL_INDIRECT => self.bus_write(bus, self.hl() as u32, value),
             _ => self.a = value,
         }
     }
@@ -268,6 +268,7 @@ impl Sm83 {
     /// dispatch is delayed), so by the time `HALT` runs, IME is set and this takes the normal
     /// path.
     fn halt<B: Bus + ?Sized>(&mut self, bus: &mut B) {
+        // An internal check, not a bus cycle.
         let pending = bus.read8(crate::IF_ADDR) & bus.read8(crate::IE_ADDR) & 0x1F;
         if !self.ime() && pending != 0 {
             self.halt_bug = true;
@@ -302,36 +303,36 @@ impl Sm83 {
                 }
             }
 
-            0x02 => bus.write8(self.bc() as u32, self.a),
-            0x12 => bus.write8(self.de() as u32, self.a),
+            0x02 => self.bus_write(bus, self.bc() as u32, self.a),
+            0x12 => self.bus_write(bus, self.de() as u32, self.a),
             0x22 => {
                 let hl = self.hl();
-                bus.write8(hl as u32, self.a);
+                self.bus_write(bus, hl as u32, self.a);
                 self.set_hl(hl.wrapping_add(1));
             }
             0x32 => {
                 let hl = self.hl();
-                bus.write8(hl as u32, self.a);
+                self.bus_write(bus, hl as u32, self.a);
                 self.set_hl(hl.wrapping_sub(1));
             }
-            0x0A => self.a = bus.read8(self.bc() as u32),
-            0x1A => self.a = bus.read8(self.de() as u32),
+            0x0A => self.a = self.bus_read(bus, self.bc() as u32),
+            0x1A => self.a = self.bus_read(bus, self.de() as u32),
             0x2A => {
                 let hl = self.hl();
-                self.a = bus.read8(hl as u32);
+                self.a = self.bus_read(bus, hl as u32);
                 self.set_hl(hl.wrapping_add(1));
             }
             0x3A => {
                 let hl = self.hl();
-                self.a = bus.read8(hl as u32);
+                self.a = self.bus_read(bus, hl as u32);
                 self.set_hl(hl.wrapping_sub(1));
             }
 
             0x08 => {
                 let addr = self.fetch16(bus) as u32;
                 let [lo, hi] = self.sp.to_le_bytes();
-                bus.write8(addr, lo);
-                bus.write8(addr.wrapping_add(1), hi);
+                self.bus_write(bus, addr, lo);
+                self.bus_write(bus, addr.wrapping_add(1), hi);
             }
 
             0x03 => self.set_bc(self.bc().wrapping_add(1)),
@@ -505,21 +506,21 @@ impl Sm83 {
 
             0xE0 => {
                 let offset = self.fetch8(bus) as u32;
-                bus.write8(0xFF00 + offset, self.a);
+                self.bus_write(bus, 0xFF00 + offset, self.a);
             }
             0xF0 => {
                 let offset = self.fetch8(bus) as u32;
-                self.a = bus.read8(0xFF00 + offset);
+                self.a = self.bus_read(bus, 0xFF00 + offset);
             }
-            0xE2 => bus.write8(0xFF00 + self.c as u32, self.a),
-            0xF2 => self.a = bus.read8(0xFF00 + self.c as u32),
+            0xE2 => self.bus_write(bus, 0xFF00 + self.c as u32, self.a),
+            0xF2 => self.a = self.bus_read(bus, 0xFF00 + self.c as u32),
             0xEA => {
                 let addr = self.fetch16(bus) as u32;
-                bus.write8(addr, self.a);
+                self.bus_write(bus, addr, self.a);
             }
             0xFA => {
                 let addr = self.fetch16(bus) as u32;
-                self.a = bus.read8(addr);
+                self.a = self.bus_read(bus, addr);
             }
 
             0xE8 => {
