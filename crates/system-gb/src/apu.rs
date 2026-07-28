@@ -62,7 +62,10 @@ fn read_mask(addr: u16) -> u8 {
         reg::NR30 => 0x7F,
         reg::NR32 => 0x9F,
         reg::NR52 => 0x70,
-        _ => 0x00,
+        // The gaps in the block — 0xFF15, 0xFF1F, and 0xFF27-0xFF2F — decode to nothing and
+        // read back as all ones. They are not "registers that happen to be zero": a read finds
+        // no driver on the bus at all.
+        _ => 0xFF,
     }
 }
 
@@ -198,7 +201,11 @@ impl GbApu {
             return None;
         }
         if (reg::WAVE_RAM_START..=reg::WAVE_RAM_END).contains(&addr) {
-            return Some(self.ch3.wave_ram[(addr - reg::WAVE_RAM_START) as usize]);
+            let requested = (addr - reg::WAVE_RAM_START) as usize;
+            return Some(match self.ch3.wave_ram_access(requested) {
+                Some(index) => self.ch3.wave_ram[index],
+                None => 0xFF,
+            });
         }
         if addr == reg::NR52 {
             // The low four bits report which channels are still sounding, and are read-only.
@@ -217,9 +224,13 @@ impl GbApu {
             return None;
         }
 
-        // Wave RAM stays accessible with the APU powered down, unlike everything else.
+        // Wave RAM stays accessible with the APU powered down, unlike everything else — but
+        // not while channel 3 is using it.
         if (reg::WAVE_RAM_START..=reg::WAVE_RAM_END).contains(&addr) {
-            self.ch3.wave_ram[(addr - reg::WAVE_RAM_START) as usize] = value;
+            let requested = (addr - reg::WAVE_RAM_START) as usize;
+            if let Some(index) = self.ch3.wave_ram_access(requested) {
+                self.ch3.wave_ram[index] = value;
+            }
             return Some(());
         }
 

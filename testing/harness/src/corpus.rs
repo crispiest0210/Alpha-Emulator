@@ -189,9 +189,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         convention: Convention::BlarggMemory,
         max_frames: 4000,
         expected_hash: None,
-        expected_failure: Some(
-            "fails check #2 of \"NR10-NR51 and wave RAM write/read\": a register does not read back with the right bits forced high. The remaining eleven sub-tests below narrow it to the read masks rather than to channel behaviour",
-        ),
+        expected_failure: None,
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
     TestRom {
@@ -272,7 +270,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "reads wave RAM while channel 3 is playing. A DMG returns the byte the channel is reading at that instant, and only during the couple of cycles around its own access; every other read returns 0xFF. This core lets the CPU read wave RAM freely",
+            "the DMG wave-RAM access window is modelled but only to M-cycle resolution: the CPU sees the byte when channel 3 advanced during the same machine cycle, and 0xFF otherwise. This ROM resolves the window to single t-cycles, so closing it needs the APU stepped at finer than M-cycle granularity",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -306,7 +304,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
-            "the write half of the same DMG wave-RAM access window as 09",
+            "the write half of the same M-cycle-resolution limit as 09",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },
@@ -363,7 +361,7 @@ pub const GB_ROMS: &[TestRom] = &[
         max_frames: 6000,
         expected_hash: None,
         expected_failure: Some(
-            "the combined ROM stops at the first sub-test that fails; see 01 and 09-12 below",
+            "the combined ROM stops at the first sub-test that fails; see 09, 10, and 12 below",
         ),
         licence: "Blargg's test ROMs, published for emulator authors; freely circulated.",
     },

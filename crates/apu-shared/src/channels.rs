@@ -194,6 +194,11 @@ pub struct WaveChannel {
     pub wave_ram: [u8; WAVE_RAM_BYTES],
     position: u8,
     timer: i32,
+    /// T-cycles since the channel last advanced onto a new sample.
+    ///
+    /// Only interesting because of who else wants that memory: see
+    /// [`WaveChannel::wave_ram_access`].
+    since_fetch: u32,
     pub length: LengthCounter,
 }
 
@@ -213,6 +218,7 @@ impl WaveChannel {
             wave_ram: [0; WAVE_RAM_BYTES],
             position: 0,
             timer: 1,
+            since_fetch: 0,
             length: LengthCounter::new(256),
         }
     }
@@ -226,16 +232,33 @@ impl WaveChannel {
 
     pub fn tick(&mut self, cycles: u32) {
         self.timer -= cycles as i32;
+        self.since_fetch = self.since_fetch.saturating_add(cycles);
         while self.timer <= 0 {
             self.timer += self.period();
             self.position = (self.position + 1) % 32;
+            self.since_fetch = 0;
         }
+    }
+
+    /// Which wave-RAM byte the CPU may touch right now, given the one it asked for.
+    ///
+    /// A stopped channel leaves the memory to the CPU. A playing one does not share it: the
+    /// CPU only gets in during the couple of cycles around the channel's own fetch, and then
+    /// it sees whichever byte the *channel* just read rather than the one it addressed. Every
+    /// other moment reads as 0xFF and swallows writes, which is why games load a waveform with
+    /// the channel switched off.
+    pub fn wave_ram_access(&self, requested: usize) -> Option<usize> {
+        if !self.enabled {
+            return Some(requested);
+        }
+        (self.since_fetch < 4).then_some((self.position >> 1) as usize)
     }
 
     pub fn trigger(&mut self) {
         self.enabled = self.dac_enabled;
         self.timer = self.period();
         self.position = 0;
+        self.since_fetch = 0;
         self.length.trigger();
     }
 
@@ -280,6 +303,7 @@ impl Savable for WaveChannel {
         w.write_bytes(&self.wave_ram);
         w.write_u8(self.position);
         w.write_i32(self.timer);
+        w.write_u32(self.since_fetch);
         self.length.save(w);
     }
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -290,6 +314,7 @@ impl Savable for WaveChannel {
         r.read_bytes(&mut self.wave_ram)?;
         self.position = r.read_u8()?;
         self.timer = r.read_i32()?;
+        self.since_fetch = r.read_u32()?;
         self.length.load(r)?;
         Ok(())
     }
