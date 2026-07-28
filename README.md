@@ -16,11 +16,14 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ❌ | ❌ | ❌ | Colour palettes, double-speed switch, and tile attributes done and tested; not yet wired into the PPU |
+| Game Boy Color | ❌ | ❌ | ❌ | Colour palettes, `KEY1` speed switch, tile attributes, and VRAM DMA done and tested; none of it wired into the PPU yet |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
-**No system runs a ROM yet.** `cargo xtask dev` opens an empty window.
+**The Game Boy core runs ROMs; the GUI does not yet.** The emulation core boots cartridges,
+renders frames, and produces audio — that is what the accuracy suite below drives it through.
+What is missing is the frontend that connects it to a window: `cargo xtask dev` still opens an
+empty one. Wiring the two together is prompt 14.
 
 Component status:
 

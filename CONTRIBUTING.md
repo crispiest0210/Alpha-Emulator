@@ -58,6 +58,31 @@ touching serialization will be asked to fix that before anything else.
 - Adding a new accuracy test ROM: register it with the harness rather than adding a bespoke test
   binary, so it participates in the CI suite and per-system status reporting automatically.
 
+### Known failures are tracked, not silenced
+
+A ROM that does not pass yet carries an `expected_failure` note in `testing/harness/src/corpus.rs`.
+The suite then stays green for *regressions* while that gap is open — and **fails loudly if the
+ROM starts passing**, because a stale marker is a lie about what works.
+
+Two rules follow, and both matter:
+
+- **The note says why, specifically.** "Fails" is useless. The note should name the rule that is
+  broken and what has been ruled out — the existing entries quote the failing check verbatim
+  ("Exiting negate mode after calculation disables channel") or state the limit that blocks it
+  ("the window resolves to one machine cycle here, and this ROM resolves it to single t-cycles").
+  A future reader should be able to start fixing it without re-deriving the diagnosis.
+- **If your change makes a ROM pass, delete its marker in the same PR.** The suite will tell
+  you: an unexpected pass is a failure.
+
+Do not add a marker to make a red suite go green without a diagnosis behind it. A marker is a
+record of understood, deferred work, not a mute button.
+
+Blargg's ROMs report in two different ways and the harness has a convention for each —
+`BlarggSerial` writes to the link port, `BlarggMemory` writes a result code and message to
+cartridge RAM. Picking the wrong one makes a ROM look like it hangs when it has actually
+finished and reported. `cargo test -p harness --release -- --ignored --nocapture
+dmg_sound_results` prints what the memory-protocol ROMs actually said.
+
 ## Pull requests
 
 - `cargo xtask lint` and `cargo xtask test` must pass locally.
