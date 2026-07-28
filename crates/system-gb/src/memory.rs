@@ -195,6 +195,31 @@ impl GbBus {
         }
     }
 
+    /// VRAM and OAM together, for the PPU, which reads both while compositing a line.
+    ///
+    /// Returned as one borrow so the renderer does not have to take two overlapping ones.
+    pub fn vram_and_oam(&self) -> (&[u8], &[u8]) {
+        (&self.vram, &self.oam)
+    }
+
+    /// Return the board to power-on state, keeping the cartridge in the slot.
+    ///
+    /// The mapper is deliberately untouched: resetting a console does not eject the game, and
+    /// it certainly does not wipe battery-backed save RAM.
+    pub fn reset(&mut self) {
+        self.vram.fill(0);
+        self.wram.fill(0);
+        self.oam.fill(0);
+        self.hram.fill(0);
+        self.io.fill(0);
+        self.vram_bank = 0;
+        self.wram_bank = 1;
+        self.interrupt_flags = 0;
+        self.interrupt_enable = 0;
+        self.boot_rom_enabled = self.boot_rom.is_some();
+        self.last_bus_value = 0xFF;
+    }
+
     /// Direct access for the PPU, which reads VRAM and OAM without going through the CPU bus.
     pub fn vram(&self) -> &[u8] {
         &self.vram

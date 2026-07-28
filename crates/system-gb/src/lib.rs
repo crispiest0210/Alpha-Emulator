@@ -7,11 +7,15 @@
 #![deny(unsafe_code)]
 
 pub mod apu;
+pub mod joypad;
 pub mod memory;
 pub mod ppu;
+pub mod system;
 pub mod timing;
 
 pub use apu::GbApu;
+pub use joypad::Joypad;
 pub use memory::{GbBus, GbModel};
 pub use ppu::GbPpu;
+pub use system::{GbSystem, GbSystemBus};
 pub use timing::{GbEvent, GbTiming, PpuMode, TimingOutput};

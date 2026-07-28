@@ -153,6 +153,13 @@ pub struct TimingOutput {
     pub interrupts: u8,
     /// The PPU entered VBlank, so the frame is complete.
     pub frame_ready: bool,
+    /// The PPU finished drawing this visible line, which is when it must be composited.
+    ///
+    /// Reported per line rather than left for the renderer to infer, because "when is a line
+    /// done" is a timing question and this module is the one that knows.
+    pub scanline_ready: Option<u8>,
+    /// `LY` wrapped back to zero, so a new frame's rendering state begins.
+    pub frame_started: bool,
     /// Frame-sequencer clocks that fired, as counts rather than flags so a caller that
     /// advances by a long jump still applies each one.
     pub apu_length_clocks: u8,
@@ -405,6 +412,9 @@ pub struct GbTiming {
     pub ppu: PpuTiming,
     pub apu: ApuSequencer,
 
+    /// Set when the LCD is switched back on, so the renderer can restart its frame state.
+    lcd_restarted: bool,
+
     /// Optional `(cycle, event)` log.
     ///
     /// Off by default and never serialized. Two runs from identical state must produce
@@ -427,6 +437,7 @@ impl GbTiming {
             timer: Timer::default(),
             ppu: PpuTiming::default(),
             apu: ApuSequencer::default(),
+            lcd_restarted: false,
             trace: None,
         };
         timing.reset();
@@ -444,6 +455,7 @@ impl GbTiming {
             ..Default::default()
         };
         self.apu = ApuSequencer::default();
+        self.lcd_restarted = false;
         if let Some(trace) = &mut self.trace {
             trace.clear();
         }
@@ -570,6 +582,9 @@ impl GbTiming {
             }
             PpuMode::Drawing => {
                 self.ppu.mode = PpuMode::HBlank;
+                // Drawing has ended, so this line's pixels are final. Anything the game
+                // writes to the scroll registers from here affects the *next* line.
+                out.scanline_ready = Some(self.ppu.ly);
                 self.schedule_ppu(when, HBLANK_CYCLES);
             }
             PpuMode::HBlank => {
@@ -590,6 +605,7 @@ impl GbTiming {
                 if self.ppu.ly >= TOTAL_LINES {
                     self.ppu.ly = 0;
                     self.ppu.mode = PpuMode::OamScan;
+                    out.frame_started = true;
                     self.schedule_ppu(when, OAM_SCAN_CYCLES);
                 } else {
                     self.schedule_ppu(when, LINE_CYCLES);
@@ -600,6 +616,11 @@ impl GbTiming {
         if self.ppu.update_stat_line() {
             out.interrupts |= interrupt::LCD_STAT;
         }
+    }
+
+    /// Whether the LCD was re-enabled since the last check, which restarts rendering.
+    pub fn take_lcd_restarted(&mut self) -> bool {
+        std::mem::take(&mut self.lcd_restarted)
     }
 
     fn set_lcd_enabled(&mut self, enabled: bool) {
@@ -615,6 +636,7 @@ impl GbTiming {
             self.ppu.ly = 0;
             self.ppu.mode = PpuMode::OamScan;
             self.ppu.stat_line = false;
+            self.lcd_restarted = true;
             let now = self.now;
             self.schedule_ppu(now, OAM_SCAN_CYCLES);
         } else {

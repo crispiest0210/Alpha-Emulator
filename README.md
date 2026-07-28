@@ -15,7 +15,7 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ❌ | ❌ | ❌ | CPU, memory, timing, PPU and APU all exist; not yet assembled into a `System` |
+| Game Boy (DMG) | ✅ | ⚠️ | ❌ | Assembled and runs code, renders, and sounds. **No accuracy suite has been run**, and no real ROM has been played |
 | Game Boy Color | ❌ | ❌ | ❌ | Shares the CPU core; nothing else started |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
@@ -41,6 +41,7 @@ Component status:
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
 | `system-gb` APU — NR10-NR52 register layer | done; **Blargg dmg_sound not yet run** |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
+| `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | Everything else | not started |
 
 The CPU cores pass their unit tests but have **not** been validated against the accuracy
