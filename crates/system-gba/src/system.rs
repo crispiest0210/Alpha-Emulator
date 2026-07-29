@@ -33,6 +33,7 @@ use crate::bios;
 use crate::cartridge::Cartridge;
 use crate::compositor::{self, Frame};
 use crate::dma::DmaController;
+use crate::effects::Effects;
 use crate::fifo::DirectSound;
 use crate::irq::{self, InterruptController};
 use crate::keypad::Keypad;
@@ -66,6 +67,7 @@ pub struct GbaSystemBus {
     pub affine: [AffineBackground; 2],
     pub timers: Timers,
     pub dma: DmaController,
+    pub effects: Effects,
     pub irq: InterruptController,
     pub keypad: Keypad,
     pub sound: DirectSound,
@@ -90,6 +92,7 @@ impl GbaSystemBus {
             affine: [AffineBackground::new(); 2],
             timers: Timers::new(),
             dma: DmaController::new(),
+            effects: Effects::new(),
             irq: InterruptController::new(),
             keypad: Keypad::new(),
             sound: DirectSound::new(),
@@ -218,6 +221,9 @@ impl GbaSystemBus {
         if let Some(value) = self.dma.read16(addr) {
             return Some(value);
         }
+        if let Some(value) = self.effects.read16(addr) {
+            return Some(value);
+        }
         if let Some(value) = self.irq.read16(addr) {
             return Some(value);
         }
@@ -242,6 +248,7 @@ impl GbaSystemBus {
             || self.backgrounds.write16(addr, value).is_some()
             || self.timers.write16(addr, value).is_some()
             || self.dma.write16(addr, value).is_some()
+            || self.effects.write16(addr, value).is_some()
             || self.irq.write16(addr, value).is_some()
             || self.keypad.write16(addr, value).is_some()
             || self.sound.write16(addr, value).is_some()
@@ -622,6 +629,7 @@ impl Savable for GbaSystemBus {
         }
         self.timers.save(w);
         self.dma.save(w);
+        self.effects.save(w);
         self.irq.save(w);
         self.keypad.save(w);
         self.sound.save(w);
@@ -639,6 +647,7 @@ impl Savable for GbaSystemBus {
         }
         self.timers.load(r)?;
         self.dma.load(r)?;
+        self.effects.load(r)?;
         self.irq.load(r)?;
         self.keypad.load(r)?;
         self.sound.load(r)?;

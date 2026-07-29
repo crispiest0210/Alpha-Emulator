@@ -17,8 +17,16 @@
 //!   than an untransformed approximation. Affine backgrounds are drawn.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access
 //!   currently costs what the ARM core says it does.
-//! - The four `apu-shared` PSG channels are not mixed in alongside the two FIFO channels.
-//! - Windows, colour blending, and mosaic are not implemented.
+//! - The four `apu-shared` PSG channels are not mixed alongside the two FIFO channels, and
+//!   doing it needs a decision first. Their *register* layer — `NR10`-`NR52` decode, read masks,
+//!   power-down semantics — is shared by the Game Boy, the Game Boy Color, and the GBA, but it
+//!   lives in `system-gb::apu` and this crate cannot reach it: `system-*` crates may not depend
+//!   on each other. Duplicating it is exactly the copy-paste this project avoids, so it wants
+//!   moving into `apu-shared` — and the obstacle is that three of its behaviours are gated on
+//!   `GbModel`, which would have to move too or be replaced by something narrower.
+//! - Windows and colour blending are implemented in [`effects`] and their registers are routed,
+//!   but the compositor does not consult them yet — the layer mask and the blend both need
+//!   applying per pixel as a line is resolved. Mosaic is not implemented at all.
 //! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
@@ -37,6 +45,7 @@ pub mod bitmap;
 pub mod cartridge;
 pub mod compositor;
 pub mod dma;
+pub mod effects;
 pub mod fifo;
 pub mod irq;
 pub mod keypad;
@@ -53,6 +62,7 @@ pub use bitmap::bgr555_to_rgba8;
 pub use cartridge::Cartridge;
 pub use compositor::{Frame, GbaPalette};
 pub use dma::DmaController;
+pub use effects::{BlendMode, Effects, Layer};
 pub use fifo::{DirectSound, SoundFifo};
 pub use irq::InterruptController;
 pub use keypad::Keypad;
