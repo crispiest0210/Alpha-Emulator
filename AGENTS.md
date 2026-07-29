@@ -159,35 +159,51 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 ## Where things stand
 
 `README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
-Advance all boot cartridges and run headlessly with real accuracy coverage; the DS has only its
-two CPU cores. Prompts 11 and 17 are complete, 12 is nearly so, and 13-16 and 18-19 are
-untouched.
+Advance all boot cartridges and run headlessly with real accuracy coverage, and every ROM in the
+corpus either passes or carries a written diagnosis. The Nintendo DS has only its two CPU cores.
 
-### The single most valuable open item
+- **Complete:** prompts 11 (GB/GBC), 12 (GBA), 16 (savestate and rewind), 17 (testing).
+- **Partly done:** prompt 15 — the breakpoint and watchpoint registry works and is driven from a
+  running machine. The `egui` panel, the GDB remote-serial-protocol subset, and execution
+  tracing are not started.
+- **Untouched:** prompts 13 (NDS), 14 (frontend), 18 (performance), 19 (packaging).
 
-**`gba-suite`'s `arm.gba` runs off into unmapped memory with the CPU in FIQ mode.** Its Thumb
-counterpart passes outright and `memory.gba` reaches and reports a specific sub-test, so the
-core is broadly sound — which makes this a narrow bug worth chasing, and the exception path the
-first place to look. `GbaSystem::step_instruction` exists precisely for tracing this; the
-diagnostic in `crates/system-gba/src/system/tests.rs` runs until the program counter leaves ROM
-and prints the twelve instructions before it, which is how the last two bugs here were found in
-minutes rather than by inspection.
+### The biggest gap
 
-`memory.gba`'s sub-test 3 is the other concrete one. Read `gba-tests/memory/memory.asm` for what
-check 3 is.
+**There is no GUI.** Three emulated systems run correctly and not one of them is playable,
+because `cargo xtask dev` still opens an empty window. `frontend-core` already has the lock-free
+audio ring, the resampler, and the keybind machinery; `frontend-native` has nothing but a window.
+Prompt 14 closes that, and it is the difference between a well-tested library and an emulator.
 
-### Also open on prompt 12
+It is also what several other prompts wait on: prompt 15's debugger panel needs its chrome, and
+prompt 18 has nothing to profile until something runs at speed.
 
-Affine layers and affine sprites are decoded and transformed but not composited. Wait states are
-computed but not charged to the CPU. The four `apu-shared` PSG channels are not mixed alongside
-the two FIFO channels. Windows, blending, and mosaic are not implemented, nor is keypad input or
-EEPROM. Each is noted in `crates/system-gba/src/lib.rs`'s status table.
+### Smaller, well-defined items
 
-### After that
+Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-Prompt 13 (Nintendo DS) is the next unstarted one and is by far the largest. Prompts 14-16 and
-18-19 are smaller and independent — the frontend, the debugger, rewind, performance, and
-packaging — and any of them is a reasonable session on its own if the DS looks too big to start.
+- **PSG mixing on the GBA** needs a design decision first. The `NR10`-`NR52` register layer is
+  shared by all three machines but lives in `system-gb::apu`, and `system-*` crates may not
+  depend on each other. It wants moving into `apu-shared`; the obstacle is that three of its
+  behaviours are gated on `GbModel`, which would have to move or be narrowed. Duplicating it is
+  the copy-paste this project exists to avoid.
+- **Alpha blending on the GBA** uses the backdrop as the lower layer, because the scanline buffer
+  keeps only the winning pixel. The general case needs a second buffer or a second pass.
+- **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
+- **dmg-acid2 and cgb-acid2** render and complete but have never been compared against their
+  published reference images. Recording those hashes is cheap, and it would make cgb-acid2 the
+  only end-to-end check of CGB tile attributes.
+- Mosaic, EEPROM saves, and the GBA's object window are not implemented.
+
+### Tools worth knowing about before you start
+
+- `GbSystem::step_instruction` and `GbaSystem::step_instruction` run exactly one instruction.
+- The `#[ignore]`d `trace_gba_suite_entry` in `crates/system-gba/src/system/tests.rs` runs until
+  the program counter leaves ROM and prints the instructions before it. It takes a `TRACE_ROM`
+  environment variable. Three separate bugs this session were found with it in minutes, after
+  reasoning about them had failed.
+- `dmg_sound_results` in `testing/harness/src/tests.rs` prints what the memory-protocol sound
+  ROMs actually reported, rather than just pass or fail.
 
 ## Commands
 
