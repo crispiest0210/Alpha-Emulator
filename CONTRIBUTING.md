@@ -77,6 +77,11 @@ Two rules follow, and both matter:
 Do not add a marker to make a red suite go green without a diagnosis behind it. A marker is a
 record of understood, deferred work, not a mute button.
 
+Test ROMs for the same subsystem on different machines can expect **opposite** behaviour. The
+DMG and CGB sound suites disagree on three APU rules, and "fixing" one silently regresses the
+other. If a change makes one suite pass, run both — and if they conflict, the answer is to gate
+the behaviour on the model, never to pick a side.
+
 Blargg's ROMs report in two different ways and the harness has a convention for each —
 `BlarggSerial` writes to the link port, `BlarggMemory` writes a result code and message to
 cartridge RAM. Picking the wrong one makes a ROM look like it hangs when it has actually

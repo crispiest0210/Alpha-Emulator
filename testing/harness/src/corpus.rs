@@ -28,7 +28,14 @@ pub enum Convention {
 }
 
 /// One fetchable ROM.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hardware {
+    /// Original Game Boy.
+    Dmg,
+    /// Game Boy Color. The cartridge header still decides colour versus compatibility mode.
+    Cgb,
+}
+
 pub struct TestRom {
     /// Stable identifier used in test names and snapshot keys.
     pub name: &'static str,
@@ -37,6 +44,12 @@ pub struct TestRom {
     /// Path under the corpus directory.
     pub path: &'static str,
     pub convention: Convention,
+    /// Which machine to run it on.
+    ///
+    /// Separate from the file extension because the extension is not authoritative: a `.gb`
+    /// file is often a CGB-enhanced cartridge, and several CGB test ROMs ship as `.gb`. What
+    /// decides is what the ROM is *testing*, which only the corpus knows.
+    pub hardware: Hardware,
     /// Frames to run before giving up.
     ///
     /// Generous: these suites are slow, and a timeout that is too tight reads as a failure
@@ -70,6 +83,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/01-special.gb",
         path: "gb/blargg/cpu_instrs/01-special.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -80,6 +94,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/02-interrupts.gb",
         path: "gb/blargg/cpu_instrs/02-interrupts.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -90,6 +105,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/03-op%20sp,hl.gb",
         path: "gb/blargg/cpu_instrs/03-op_sp_hl.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -100,6 +116,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/04-op%20r,imm.gb",
         path: "gb/blargg/cpu_instrs/04-op_r_imm.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -110,6 +127,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/05-op%20rp.gb",
         path: "gb/blargg/cpu_instrs/05-op_rp.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -120,6 +138,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/06-ld%20r,r.gb",
         path: "gb/blargg/cpu_instrs/06-ld_r_r.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -130,6 +149,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb",
         path: "gb/blargg/cpu_instrs/07-jr_jp_call_ret_rst.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -140,6 +160,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/08-misc%20instrs.gb",
         path: "gb/blargg/cpu_instrs/08-misc_instrs.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -150,6 +171,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/09-op%20r,r.gb",
         path: "gb/blargg/cpu_instrs/09-op_r_r.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -160,6 +182,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/10-bit%20ops.gb",
         path: "gb/blargg/cpu_instrs/10-bit_ops.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -170,6 +193,7 @@ pub const GB_CPU_INSTRS_SUBTESTS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/11-op%20a,(hl).gb",
         path: "gb/blargg/cpu_instrs/11-op_a_hl.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -187,6 +211,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/01-registers.gb",
         path: "gb/blargg/dmg_sound/01-registers.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -197,6 +222,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/02-len%20ctr.gb",
         path: "gb/blargg/dmg_sound/02-len_ctr.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -207,6 +233,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/03-trigger.gb",
         path: "gb/blargg/dmg_sound/03-trigger.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -217,6 +244,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/04-sweep.gb",
         path: "gb/blargg/dmg_sound/04-sweep.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -227,6 +255,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/05-sweep%20details.gb",
         path: "gb/blargg/dmg_sound/05-sweep_details.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -237,6 +266,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/06-overflow%20on%20trigger.gb",
         path: "gb/blargg/dmg_sound/06-overflow_on_trigger.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -247,6 +277,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/07-len%20sweep%20period%20sync.gb",
         path: "gb/blargg/dmg_sound/07-len_sweep_period_sync.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -257,6 +288,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/08-len%20ctr%20during%20power.gb",
         path: "gb/blargg/dmg_sound/08-len_ctr_during_power.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -267,6 +299,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/09-wave%20read%20while%20on.gb",
         path: "gb/blargg/dmg_sound/09-wave_read_while_on.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
@@ -279,6 +312,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/10-wave%20trigger%20while%20on.gb",
         path: "gb/blargg/dmg_sound/10-wave_trigger_while_on.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
@@ -291,6 +325,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/11-regs%20after%20power.gb",
         path: "gb/blargg/dmg_sound/11-regs_after_power.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: None,
@@ -301,6 +336,7 @@ pub const GB_DMG_SOUND_SINGLES: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/12-wave%20write%20while%20on.gb",
         path: "gb/blargg/dmg_sound/12-wave_write_while_on.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 4000,
         expected_hash: None,
         expected_failure: Some(
@@ -321,6 +357,7 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/cpu_instrs.gb",
         path: "gb/blargg/cpu_instrs.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         // Eleven sub-tests back to back; the slowest alone needs several hundred frames.
         max_frames: 20000,
         expected_hash: None,
@@ -338,6 +375,7 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/instr_timing/instr_timing.gb",
         path: "gb/blargg/instr_timing.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 1200,
         expected_hash: None,
         expected_failure: None,
@@ -348,6 +386,7 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/mem_timing/mem_timing.gb",
         path: "gb/blargg/mem_timing.gb",
         convention: Convention::BlarggSerial,
+        hardware: Hardware::Dmg,
         max_frames: 1200,
         expected_hash: None,
         expected_failure: None,
@@ -358,6 +397,7 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/dmg_sound.gb",
         path: "gb/blargg/dmg_sound.gb",
         convention: Convention::BlarggMemory,
+        hardware: Hardware::Dmg,
         max_frames: 6000,
         expected_hash: None,
         expected_failure: Some(
@@ -370,6 +410,7 @@ pub const GB_ROMS: &[TestRom] = &[
         url: "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
         path: "gb/dmg-acid2.gb",
         convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
         // It draws its face within a few frames.
         max_frames: 60,
         // Unvalidated: the emulator renders *something*, but nobody has checked it against
@@ -422,6 +463,53 @@ pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
 }
+
+/// Game Boy Color ROMs.
+///
+/// The CGB had no accuracy coverage at all until these landed, which made it the project's
+/// largest testing hole: colour rendering, the speed switch, and VRAM DMA were all checked
+/// against hardware documentation and unit tests rather than against a reference.
+///
+/// Blargg's `cgb_sound` is the same suite as `dmg_sound` rebuilt for colour hardware, so it
+/// exercises the APU *and* the CGB boot path that gets it there. `cgb-acid2` is the colour
+/// counterpart of `dmg-acid2` and is the only thing that checks tile attributes, the second
+/// VRAM bank, and CGB sprite priority end to end.
+pub const CGB_ROMS: &[TestRom] = &[
+    TestRom {
+        name: "cgb_acid2",
+        url: "https://github.com/mattcurrie/cgb-acid2/releases/download/v1.1/cgb-acid2.gbc",
+        path: "gbc/cgb-acid2.gbc",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Cgb,
+        max_frames: 60,
+        // Unvalidated for the same reason as dmg-acid2: rendering something is not rendering
+        // it correctly, and nobody has compared this against the published reference image.
+        expected_hash: None,
+        expected_failure: Some(
+            "renders a picture and reaches its end state, but the output has not been compared \
+             against the published reference image. Recording that comparison in expected_hash \
+             would make this the only end-to-end check of tile attributes, the second VRAM \
+             bank, and CGB sprite priority",
+        ),
+        licence: "MIT (Matt Currie)",
+    },
+    TestRom {
+        name: "cgb_sound",
+        url: "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cgb_sound/cgb_sound.gb",
+        path: "gbc/blargg/cgb_sound.gb",
+        convention: Convention::BlarggMemory,
+        hardware: Hardware::Cgb,
+        max_frames: 4000,
+        expected_hash: None,
+        expected_failure: Some(
+            "eleven of twelve sub-tests pass. Only 09 (wave read while on) fails, and for the \
+             same reason its DMG counterpart does: the wave-RAM access window is modelled to \
+             machine-cycle resolution and this ROM resolves it to single t-cycles. Closing it \
+             means stepping the APU finer than one machine cycle",
+        ),
+        licence: "public domain (Shay Green / blargg)",
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -485,6 +573,7 @@ mod tests {
             url: "https://example.invalid/nope.gb",
             path: "gb/definitely-not-here.gb",
             convention: Convention::BlarggSerial,
+            hardware: Hardware::Dmg,
             max_frames: 1,
             expected_hash: None,
             expected_failure: None,

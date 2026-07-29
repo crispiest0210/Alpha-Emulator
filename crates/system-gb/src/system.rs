@@ -85,7 +85,7 @@ impl GbSystemBus {
             memory: GbBus::new(model, mapper),
             timing: GbTiming::new(),
             ppu: GbPpu::new(),
-            apu: GbApu::new(),
+            apu: GbApu::for_model(model),
             joypad: Joypad::new(),
             cgb: CgbState::new(),
             serial_output: Vec::new(),

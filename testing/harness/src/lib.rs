@@ -525,3 +525,38 @@ impl TestableSystem for system_gb::GbSystem {
         self.bus_mut().read8(addr)
     }
 }
+
+/// The colour machine reports exactly as the monochrome one does — the test ROMs use the
+/// same serial port and the same cartridge-RAM protocol, because they are the same ROMs
+/// rebuilt.
+impl TestableSystem for system_gbc::GbcSystem {
+    fn serial_output(&self) -> &[u8] {
+        &self.inner().bus().serial_output
+    }
+
+    fn debug_state(&self) -> String {
+        use core_common::CpuIntrospect;
+        let cpu = self.inner().cpu();
+        format!(
+            "pc={:#06X} sp={:#06X} halted={} locked={} stopped={} ime={} lcdc={:#04X} ly={}",
+            cpu.program_counter(),
+            cpu.sp,
+            cpu.is_halted(),
+            cpu.is_locked(),
+            cpu.is_stopped(),
+            cpu.ime(),
+            self.inner().bus().ppu.lcdc,
+            self.inner().bus().timing.ppu.ly,
+        )
+    }
+
+    fn cpu_registers(&self) -> Vec<RegisterValue> {
+        use core_common::CpuIntrospect;
+        self.inner().cpu().registers()
+    }
+
+    fn read_byte(&mut self, addr: u32) -> u8 {
+        use core_common::Bus;
+        self.inner_mut().bus_mut().read8(addr)
+    }
+}

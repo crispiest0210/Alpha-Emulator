@@ -16,7 +16,7 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ✅ | ⚠️ | ❌ | Assembled and running: colour rendering, `KEY1` double speed, both VRAM DMA modes, DMG-compatibility mode. **No CGB accuracy ROMs run yet** |
+| Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
@@ -46,7 +46,7 @@ Component status:
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
-| `system-gbc` — `System` impl, model selection, compatibility boot | done; **no CGB accuracy ROMs in the corpus yet** |
+| `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
 | Everything else | not started |
@@ -65,9 +65,11 @@ Current Game Boy results:
 | Blargg `instr_timing` | **passes** |
 | Blargg `mem_timing` | **passes** |
 | Blargg `dmg_sound` sub-tests 01–08, 11 | **pass** |
+| Blargg `cgb_sound` sub-tests 01–08, 10–12 | **pass** |
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
-| dmg-acid2 | renders and completes, but unvalidated — see below |
+| Blargg `cgb_sound` sub-test 09 | fails — see below |
+| dmg-acid2, cgb-acid2 | render and complete, but unvalidated — see below |
 
 Open gaps, each tracked with the specific reason:
 
@@ -80,9 +82,16 @@ Open gaps, each tracked with the specific reason:
   other time — but only to machine-cycle resolution, and these ROMs resolve it to single
   t-cycles. Closing them means stepping the APU finer than one machine cycle. Test 10 also
   needs the wave-RAM corruption a mid-playback trigger causes, which is not modelled at all.
-- **dmg-acid2** renders and then halts waiting for interrupts, which is how it signals it has
-  finished. The picture is probably correct; it stays unvalidated only because nobody has
-  compared it against the published reference image.
+- **`cgb_sound` 09** fails for exactly the reason its DMG counterpart does, and the other
+  eleven pass. The two suites deliberately test *opposite* expectations for three behaviours —
+  whether powering off clears the length counters, whether `NRx1` length writes land while the
+  APU is off, and whether the CPU may reach wave RAM mid-playback — so each is gated on the
+  model rather than fixed one way.
+- **dmg-acid2 and cgb-acid2** render and then halt waiting for interrupts, which is how they
+  signal they have finished. The pictures are probably correct; they stay unvalidated only
+  because nobody has compared them against the published reference images. Doing so would make
+  cgb-acid2 the only end-to-end check of tile attributes, the second VRAM bank, and CGB sprite
+  priority.
 
 Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
 they leave there names the exact rule that failed. `cargo test -p harness --release --
@@ -92,10 +101,10 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-The Game Boy Color has no accuracy coverage at all yet: `cgb-acid2` and the Mooneye CGB suite
-are not in the corpus, so colour rendering, the speed switch, and VRAM DMA are checked against
-hardware documentation and unit tests rather than against a reference implementation. That is
-the single largest gap in the project's testing right now.
+The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
+hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU
+and the boot path, but validating cgb-acid2's output is what would cover the PPU. The Mooneye
+CGB suite is not in the corpus yet either.
 
 The ARM cores have not been run against anything either: `arm7wrestler` and `gba-suite` are not
 in the corpus yet, and there is no GBA system to run them on.

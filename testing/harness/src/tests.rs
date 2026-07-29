@@ -5,7 +5,9 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{Convention, TestRom, GB_CPU_INSTRS_SUBTESTS, GB_DMG_SOUND_SINGLES, GB_ROMS};
+use crate::corpus::{
+    Convention, Hardware, TestRom, CGB_ROMS, GB_CPU_INSTRS_SUBTESTS, GB_DMG_SOUND_SINGLES, GB_ROMS,
+};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -455,7 +457,23 @@ fn a_report_separates_skips_from_failures() {
 /// Run one corpus ROM, skipping if it has not been fetched.
 fn run_gb_rom(rom: &TestRom) -> Option<(TestOutcome, String)> {
     let bytes = rom.load()?;
-    let mut system = system_gb::GbSystem::new(bytes, None).expect("the ROM parses");
+    match rom.hardware {
+        Hardware::Dmg => {
+            let system = system_gb::GbSystem::new(bytes, None).expect("the ROM parses");
+            run_on(rom, system)
+        }
+        Hardware::Cgb => {
+            let system = system_gbc::GbcSystem::new(bytes, None).expect("the ROM parses");
+            run_on(rom, system)
+        }
+    }
+}
+
+/// Apply a ROM's reporting convention to an already-built machine.
+///
+/// Generic over the system rather than taking `Box<dyn TestableSystem>`: the two machines share
+/// every convention, and the only thing that differs is which one to construct.
+fn run_on<S: TestableSystem>(rom: &TestRom, mut system: S) -> Option<(TestOutcome, String)> {
     let outcome = match rom.convention {
         Convention::BlarggSerial => run_blargg_serial(&mut system, rom.max_frames),
         Convention::BlarggMemory => run_blargg_memory(&mut system, rom.max_frames),
@@ -486,7 +504,7 @@ fn run_gb_rom(rom: &TestRom) -> Option<(TestOutcome, String)> {
     Some((outcome, state))
 }
 
-/// The whole Game Boy suite as one test.
+/// The whole Game Boy and Game Boy Color suite as one test.
 ///
 /// One test rather than one per ROM so the output is a single report naming every failure,
 /// which is what someone debugging a regression actually wants — and so an unfetched corpus
@@ -506,6 +524,7 @@ fn gb_accuracy_suite() {
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(CGB_ROMS)
     {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);

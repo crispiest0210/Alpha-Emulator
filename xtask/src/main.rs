@@ -360,6 +360,15 @@ const TEST_ROMS: &[(&str, &str)] = &[
         "gb/dmg-acid2.gb",
         "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
     ),
+    // Game Boy Color.
+    (
+        "gbc/cgb-acid2.gbc",
+        "https://github.com/mattcurrie/cgb-acid2/releases/download/v1.1/cgb-acid2.gbc",
+    ),
+    (
+        "gbc/blargg/cgb_sound.gb",
+        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cgb_sound/cgb_sound.gb",
+    ),
 ];
 
 /// The workspace root, found from this crate rather than the current directory.

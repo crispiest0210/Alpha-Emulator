@@ -3,6 +3,14 @@
 //! The channels themselves live in `apu-shared`. This module is the register layer — decoding
 //! writes, applying the read masks, and generating output samples at a fixed rate.
 //!
+//! # The two machines disagree on purpose
+//!
+//! Three behaviours differ between the DMG and the CGB, and Blargg's two sound suites test
+//! *opposite* expectations for each: whether powering off clears the length counters, whether
+//! `NRx1` length writes land while the APU is off, and whether the CPU may reach wave RAM
+//! while channel 3 plays. None of them is a preference — either machine's rule is a failure on
+//! the other, so each is gated on [`GbModel`] rather than chosen.
+//!
 //! # Two clocks, deliberately separate
 //!
 //! Channel *waveforms* advance with the CPU clock, through [`GbApu::tick`]. The length,
@@ -14,6 +22,7 @@
 use apu_shared::{LengthCounter, Mixer, NoiseChannel, SquareChannel, WaveChannel, WAVE_RAM_BYTES};
 use core_common::{AudioSample, Savable, StateError, StateReader, StateWriter, AUDIO_SAMPLE_RATE};
 
+use crate::memory::GbModel;
 use crate::timing::{TimingOutput, CLOCK_HZ};
 
 /// APU register addresses.
@@ -77,6 +86,13 @@ pub struct GbApu {
     pub ch4: NoiseChannel,
     pub mixer: Mixer,
 
+    /// Which machine this APU is in.
+    ///
+    /// Three behaviours differ between the DMG and the CGB, and Blargg's two sound suites
+    /// disagree about all three on purpose — a fix for one is a regression for the other
+    /// unless it is gated here. See [`GbApu::set_power`] and [`GbApu::read_register`].
+    model: GbModel,
+
     /// `NR52` bit 7. Clearing it resets every other register and ignores writes to them.
     powered: bool,
 
@@ -102,7 +118,12 @@ impl Default for GbApu {
 
 impl GbApu {
     pub fn new() -> Self {
+        Self::for_model(GbModel::Dmg)
+    }
+
+    pub fn for_model(model: GbModel) -> Self {
         Self {
+            model,
             ch1: SquareChannel::with_sweep(),
             ch2: SquareChannel::new(),
             ch3: WaveChannel::new(),
@@ -119,7 +140,7 @@ impl GbApu {
     pub fn reset(&mut self) {
         let drained = std::mem::take(&mut self.drained);
         let samples = std::mem::take(&mut self.samples);
-        *self = Self::new();
+        *self = Self::for_model(self.model);
         self.drained = drained;
         self.samples = samples;
         self.drained.clear();
@@ -202,7 +223,8 @@ impl GbApu {
         }
         if (reg::WAVE_RAM_START..=reg::WAVE_RAM_END).contains(&addr) {
             let requested = (addr - reg::WAVE_RAM_START) as usize;
-            return Some(match self.ch3.wave_ram_access(requested) {
+            let open = self.model.uses_colour_palettes();
+            return Some(match self.ch3.wave_ram_access(requested, open) {
                 Some(index) => self.ch3.wave_ram[index],
                 None => 0xFF,
             });
@@ -228,7 +250,8 @@ impl GbApu {
         // not while channel 3 is using it.
         if (reg::WAVE_RAM_START..=reg::WAVE_RAM_END).contains(&addr) {
             let requested = (addr - reg::WAVE_RAM_START) as usize;
-            if let Some(index) = self.ch3.wave_ram_access(requested) {
+            let open = self.model.uses_colour_palettes();
+            if let Some(index) = self.ch3.wave_ram_access(requested, open) {
                 self.ch3.wave_ram[index] = value;
             }
             return Some(());
@@ -243,7 +266,13 @@ impl GbApu {
         // With the APU off, register writes are discarded — except, on a DMG, for the length
         // halves of `NRx1`. Those go through, and only those: the duty bits sharing `NR11` and
         // `NR21` are still dropped, so the write has to be split rather than passed along.
+        //
+        // A CGB drops them too. Same divergence as the power-off rule above, tested by the
+        // same pair of suites.
         if !self.powered {
+            if self.model.uses_colour_palettes() {
+                return Some(());
+            }
             match addr {
                 reg::NR11 => self.ch1.length.write_length((value & 0x3F) as u16),
                 reg::NR21 => self.ch2.length.write_length((value & 0x3F) as u16),
@@ -384,15 +413,23 @@ impl GbApu {
         }
 
         // On a DMG the length *counters* survive a power cycle even though every other bit of
-        // channel state is cleared. Games rely on it: they load a length with the APU off and
-        // switch on afterwards. Only the counters carry over — the enable flags do not, which
-        // is why the whole channel is rebuilt and the counts are put back afterwards.
-        let lengths = [
-            self.ch1.length.counter,
-            self.ch2.length.counter,
-            self.ch3.length.counter,
-            self.ch4.length.counter,
-        ];
+        // channel state is cleared; games load a length with the APU off and switch on
+        // afterwards. A CGB clears them like everything else. Blargg's two sound suites test
+        // opposite expectations here, so this is not a preference — either machine's rule is a
+        // failure on the other.
+        //
+        // Only the counters carry over on a DMG, never the enable flags, which is why the
+        // channel is rebuilt and the counts are put back rather than being left alone.
+        let lengths = if self.model.uses_colour_palettes() {
+            [0; 4]
+        } else {
+            [
+                self.ch1.length.counter,
+                self.ch2.length.counter,
+                self.ch3.length.counter,
+                self.ch4.length.counter,
+            ]
+        };
         let wave_ram = self.ch3.wave_ram;
         self.ch1 = SquareChannel::with_sweep();
         self.ch2 = SquareChannel::new();

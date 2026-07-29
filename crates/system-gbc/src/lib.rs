@@ -35,10 +35,13 @@
 //!
 //! The machine is assembled and runs: colour rendering with per-tile attributes and CGB sprite
 //! priority, the `KEY1` speed switch driven by `STOP`, both VRAM DMA modes, banked VRAM and
-//! WRAM, and a save state that survives a speed change. What is not verified is accuracy
-//! against CGB test ROMs — `cgb-acid2` and the Mooneye CGB suite are not in the corpus yet, so
-//! everything here is checked against hardware documentation and unit tests rather than
-//! against a reference implementation.
+//! WRAM, and a save state that survives a speed change.
+//!
+//! Eleven of Blargg's twelve `cgb_sound` sub-tests pass, which covers the APU and the boot
+//! path that reaches it. The PPU has no reference check yet: `cgb-acid2` renders and completes
+//! but its output has not been compared against the published image, and the Mooneye CGB suite
+//! is not in the corpus. Colour rendering, the speed switch, and VRAM DMA therefore rest on
+//! hardware documentation and unit tests rather than on a reference implementation.
 
 #![deny(unsafe_code)]
 

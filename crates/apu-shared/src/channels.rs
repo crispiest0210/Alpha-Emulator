@@ -245,11 +245,20 @@ impl WaveChannel {
     /// A stopped channel leaves the memory to the CPU. A playing one does not share it: the
     /// CPU only gets in during the couple of cycles around the channel's own fetch, and then
     /// it sees whichever byte the *channel* just read rather than the one it addressed. Every
-    /// other moment reads as 0xFF and swallows writes, which is why games load a waveform with
-    /// the channel switched off.
-    pub fn wave_ram_access(&self, requested: usize) -> Option<usize> {
+    /// other moment reads as 0xFF and swallows writes on a DMG, which is why games load a
+    /// waveform with the channel switched off.
+    ///
+    /// `always_open` selects the CGB's rule, where the access always succeeds.
+    pub fn wave_ram_access(&self, requested: usize, always_open: bool) -> Option<usize> {
         if !self.enabled {
             return Some(requested);
+        }
+        // A CGB never locks the CPU out — but it does not honour the address either. Both
+        // machines redirect to the byte the channel just fetched; they differ only in what
+        // happens outside that window, where a DMG refuses and a CGB serves the same byte
+        // anyway. Free access to the *requested* byte is neither machine's behaviour.
+        if always_open {
+            return Some((self.position >> 1) as usize);
         }
         (self.since_fetch < 4).then_some((self.position >> 1) as usize)
     }
