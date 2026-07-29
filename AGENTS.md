@@ -151,31 +151,36 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 
 ## Where things stand
 
-`README.md` has the authoritative status. In short: the Game Boy and Game Boy Color are
-assembled and running with real accuracy coverage; the GBA has every subsystem done as a tested
-unit but **nothing assembled**, so it does not run a ROM; the DS has only its two CPU cores.
+`README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
+Advance all boot cartridges and run headlessly with real accuracy coverage; the DS has only its
+two CPU cores. Prompts 11 and 17 are complete, 12 is nearly so, and 13-16 and 18-19 are
+untouched.
 
-Prompts 11 and 17 are complete. Prompt 12 is most of the way through. Prompts 13-16 and 18-19
-are untouched.
+### The single most valuable open item
 
-### Picking up prompt 12
+**`gba-suite`'s `arm.gba` runs off into unmapped memory with the CPU in FIQ mode.** Its Thumb
+counterpart passes outright and `memory.gba` reaches and reports a specific sub-test, so the
+core is broadly sound — which makes this a narrow bug worth chasing, and the exception path the
+first place to look. `GbaSystem::step_instruction` exists precisely for tracing this; the
+diagnostic in `crates/system-gba/src/system/tests.rs` runs until the program counter leaves ROM
+and prints the twelve instructions before it, which is how the last two bugs here were found in
+minutes rather than by inspection.
 
-What remains is one coherent piece: the assembly. Concretely, a `GbaSystem` that owns an
-`Arm7Tdmi` and a bus routing every I/O address to the module that owns it, driving the video
-timing to produce scanlines, feeding timer overflows to the direct-sound channels and DMA, and
-charging [`waitstates`] to the CPU. Follow `crates/system-gb/src/system.rs` — it is the proven
-shape. Cartridge wiring (the three ROM windows, the save chips in `cart-common`, GPIO) goes in
-at the same time.
+`memory.gba`'s sub-test 3 is the other concrete one. Read `gba-tests/memory/memory.asm` for what
+check 3 is.
 
-Two smaller things are also open and are noted in the crate docs: affine layers and affine
-sprites in the compositor, and mixing the four `apu-shared` PSG channels in alongside the two
-FIFO channels.
+### Also open on prompt 12
 
-The GBA is the system the *predecessor* targeted, so prompt 12 sets the bar at "at least as
-correct as the vendored core it replaces, with the test coverage that core never had".
-`gba-suite` and `arm7wrestler` are not in the corpus yet — worth adding once there is a machine
-to run them on, since they also exercise the ARM core, which has never been run against
-anything.
+Affine layers and affine sprites are decoded and transformed but not composited. Wait states are
+computed but not charged to the CPU. The four `apu-shared` PSG channels are not mixed alongside
+the two FIFO channels. Windows, blending, and mosaic are not implemented, nor is keypad input or
+EEPROM. Each is noted in `crates/system-gba/src/lib.rs`'s status table.
+
+### After that
+
+Prompt 13 (Nintendo DS) is the next unstarted one and is by far the largest. Prompts 14-16 and
+18-19 are smaller and independent — the frontend, the debugger, rewind, performance, and
+packaging — and any of them is a reasonable session on its own if the DS looks too big to start.
 
 ## Commands
 
