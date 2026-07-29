@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ✅ | ❌ | ⚠️ | Assembled and running. Passes `gba-suite`'s ARM and Thumb ROMs; `memory` fails one sub-test — see below |
+| Game Boy Advance | ✅ | ⚠️ | ✅ | Assembled and running; passes all three `gba-suite` ROMs. No affine compositing, PSG mixing, windows, blending, keypad, or EEPROM yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
@@ -81,8 +81,7 @@ Current Game Boy results:
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
-| `gba-suite` arm, thumb | **pass** |
-| `gba-suite` memory | fails sub-test 3 — see below |
+| `gba-suite` arm, thumb, memory | **pass** |
 | dmg-acid2, cgb-acid2 | render and complete, but unvalidated — see below |
 
 Open gaps, each tracked with the specific reason:
@@ -115,9 +114,10 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-**`gba-suite`'s ARM and Thumb ROMs both pass** — the whole instruction set, both states,
-validated against a reference. `memory.gba` fails sub-test 3 and reports cleanly, so that is a
-specific memory-access behaviour rather than anything structural.
+**All three `gba-suite` ROMs pass** — the whole instruction set in both states, and the memory
+suite. Between them they found two real bugs that no amount of unit testing would have caught:
+the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed into
+bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
 
 The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
 hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU

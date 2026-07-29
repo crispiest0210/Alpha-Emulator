@@ -12,8 +12,7 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **`gba-suite`'s ARM and Thumb ROMs pass.** `memory` fails sub-test 3 and reports cleanly,
-//!   so that is a specific memory-access behaviour rather than anything structural.
+//! - **All three `gba-suite` ROMs pass**: the instruction set in both states, and memory.
 //! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
 //!   show the backdrop rather than an untransformed approximation.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access

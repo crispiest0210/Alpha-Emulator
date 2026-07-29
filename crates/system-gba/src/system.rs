@@ -319,6 +319,24 @@ impl Bus for GbaSystemBus {
         }
     }
 
+    /// A 32-bit access is two halfword accesses, never four byte accesses.
+    ///
+    /// The default implementations decompose into bytes, which is catastrophic here: `write8`
+    /// implements the 16-bit bus quirk where a byte written to palette RAM or VRAM is doubled
+    /// across its halfword, so a word store would write each byte and then immediately overwrite
+    /// it with the next. Storing 1 landed as 0. `gba-suite`'s memory test caught it on the
+    /// third check; every 32-bit palette and VRAM write in every game would have been wrong.
+    fn read32(&mut self, addr: u32) -> u32 {
+        let addr = addr & !3;
+        (self.read16(addr) as u32) | ((self.read16(addr.wrapping_add(2)) as u32) << 16)
+    }
+
+    fn write32(&mut self, addr: u32, value: u32) {
+        let addr = addr & !3;
+        self.write16(addr, value as u16);
+        self.write16(addr.wrapping_add(2), (value >> 16) as u16);
+    }
+
     fn tick(&mut self, _cycles: Cycles) {
         // Deliberately empty. The ARM core reports an instruction's cost by returning it from
         // `step`, not by calling this — unlike the SM83, which reports each access as it

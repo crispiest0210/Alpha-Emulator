@@ -291,7 +291,8 @@ fn trace_gba_suite_entry() {
         .ancestors()
         .nth(2)
         .unwrap()
-        .join("testing/test-roms/gba/gba-suite/arm.gba");
+        .join("testing/test-roms")
+        .join(std::env::var("TRACE_ROM").unwrap_or_else(|_| "gba/gba-suite/arm.gba".into()));
     let Ok(rom) = std::fs::read(&path) else {
         eprintln!("no corpus at {}", path.display());
         return;
@@ -300,6 +301,13 @@ fn trace_gba_suite_entry() {
     let mut history: Vec<(u32, u32)> = Vec::new();
     for step in 0..4_000_000u32 {
         let pc = gba.cpu().regs.pc();
+        if step > 60 && history.len() == 12 && history[..4].iter().all(|h| h.0 == pc) {
+            eprintln!(
+                "settled at {pc:#010X} after {step} steps, r12={}",
+                gba.cpu().reg(12)
+            );
+            return;
+        }
         if !(0x0800_0000..0x0A00_0000).contains(&pc) {
             eprintln!("left ROM at step {step}: pc={pc:#010X}");
             for (p, op) in history.iter().rev().take(12).rev() {
@@ -320,4 +328,35 @@ fn trace_gba_suite_entry() {
         gba.step_instruction();
     }
     eprintln!("stayed in ROM for 4M instructions");
+}
+
+#[test]
+fn a_word_store_to_palette_ram_is_two_halfwords_and_not_four_bytes() {
+    // The default `Bus::write32` decomposes into bytes, and `write8` implements the 16-bit bus
+    // quirk where a byte written to palette RAM or VRAM is doubled across its halfword — so a
+    // word store wrote each byte and then immediately overwrote it with the next. Storing 1
+    // landed as 0. Every 32-bit palette and VRAM write in every game would have been wrong, and
+    // `gba-suite`'s memory test caught it on the third check.
+    let mut gba = system();
+    let bus = gba.bus_mut();
+
+    bus.write32(0x0500_0010, 1);
+    assert_eq!(bus.read32(0x0500_0010), 1);
+
+    bus.write32(0x0600_0000, 0xDEAD_BEEF);
+    assert_eq!(bus.read32(0x0600_0000), 0xDEAD_BEEF);
+
+    // And the byte quirk itself is still there for an actual byte write.
+    bus.write8(0x0500_0020, 0x5A);
+    assert_eq!(bus.read16(0x0500_0020), 0x5A5A);
+}
+
+#[test]
+fn palette_ram_mirrors_every_kilobyte() {
+    // What gba-suite's third memory check actually tests: write through one address, read back
+    // through its mirror.
+    let mut gba = system();
+    let bus = gba.bus_mut();
+    bus.write32(0x0500_0010, 1);
+    assert_eq!(bus.read32(0x0500_0410), 1);
 }

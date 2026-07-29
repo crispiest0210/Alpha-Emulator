@@ -553,9 +553,7 @@ pub const GBA_ROMS: &[TestRom] = &[
         hardware: Hardware::Gba,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "sub-test 3 fails. The suite reached it and reported cleanly, so this is a specific memory-access behaviour rather than anything structural — read gba-tests/memory/memory.asm for what check 3 is",
-        ),
+        expected_failure: None,
         licence: "MIT (Julian Smolka)",
     },
 ];
