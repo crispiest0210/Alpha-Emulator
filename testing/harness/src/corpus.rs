@@ -532,7 +532,7 @@ pub const GBA_ROMS: &[TestRom] = &[
         max_frames: 600,
         expected_hash: None,
         expected_failure: Some(
-            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
+            "runs off into unmapped memory with the CPU in FIQ mode, so the r12 value is garbage rather than a sub-test number. Its Thumb counterpart passes and memory reaches a real sub-test, so the ARM core is broadly sound — this is an ARM-only instruction, and entering FIQ unasked points at the exception path or at an instruction that decodes as one",
         ),
         licence: "MIT (Julian Smolka)",
     },
@@ -544,9 +544,7 @@ pub const GBA_ROMS: &[TestRom] = &[
         hardware: Hardware::Gba,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
-        ),
+        expected_failure: None,
         licence: "MIT (Julian Smolka)",
     },
     TestRom {
@@ -558,7 +556,7 @@ pub const GBA_ROMS: &[TestRom] = &[
         max_frames: 600,
         expected_hash: None,
         expected_failure: Some(
-            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
+            "sub-test 3 fails. The suite reached it and reported cleanly, so this is a specific memory-access behaviour rather than anything structural — read gba-tests/memory/memory.asm for what check 3 is",
         ),
         licence: "MIT (Julian Smolka)",
     },

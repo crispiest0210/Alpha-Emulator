@@ -28,6 +28,7 @@ use core_common::{
 };
 use cpu_arm7tdmi::{Arm7Tdmi, BootState, Exception, Mode};
 
+use crate::bios;
 use crate::cartridge::Cartridge;
 use crate::compositor::{self, Frame};
 use crate::dma::DmaController;
@@ -366,6 +367,58 @@ impl GbaSystem {
         &self.cpu
     }
 
+    /// Run exactly one instruction and report what it cost.
+    ///
+    /// Public because a debugger needs it and because tracing a machine that has run off into
+    /// unmapped memory is otherwise impossible from outside — `step_frame` is far too coarse to
+    /// see where a wrong branch was taken.
+    pub fn step_instruction(&mut self) -> Cycles {
+        self.service_interrupt();
+        if self.intercept_bios_call() {
+            // The call is answered without running the instruction, so it costs nothing beyond
+            // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
+            // against it, but a wrong non-zero figure is no better than this one.
+            self.bus.advance(1);
+            return Cycles(1);
+        }
+        let cycles = self.cpu.step(&mut self.bus).get().max(1);
+        self.bus.advance(cycles as u32);
+        Cycles(cycles)
+    }
+
+    /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
+    ///
+    /// Intercepted *before* the instruction executes rather than by trapping the exception
+    /// afterwards, so the CPU never enters Supervisor mode and never jumps to the empty vector
+    /// — which is exactly what it did before this existed, running off into unmapped memory
+    /// after 84,701 correct instructions of `gba-suite`.
+    ///
+    /// With a real BIOS supplied this does nothing and the exception is taken normally.
+    fn intercept_bios_call(&mut self) -> bool {
+        if self.bus.memory.has_bios() || self.cpu.is_thumb() {
+            // The Thumb form is `SWI imm8` at a different encoding; games use the ARM form for
+            // these calls, and guessing at the other one is worse than not handling it.
+            return false;
+        }
+        let pc = self.cpu.regs.pc();
+        let opcode = self.bus.read32(pc);
+        // `cond 1111 imm24`. Bits 24-27 identify the instruction; the 24 below them are the
+        // comment, so the mask must not reach into them. Only the always-condition is handled:
+        // a conditional `SWI` is vanishingly rare and would need the flag check duplicated here.
+        if opcode & 0x0F00_0000 != 0x0F00_0000 || opcode >> 28 != 0xE {
+            return false;
+        }
+
+        let comment = ((opcode >> 16) & 0xFF) as u8;
+        let effect = bios::dispatch(&mut self.cpu, &mut self.bus, comment);
+        if effect.halt {
+            self.cpu.halt();
+        }
+        // Step over the instruction the BIOS would have returned from.
+        self.cpu.regs.set_pc(pc.wrapping_add(4));
+        true
+    }
+
     /// Install the stacks the BIOS would have set up.
     ///
     /// Done even when a BIOS is present, because it is harmless there — the BIOS overwrites
@@ -446,11 +499,8 @@ impl System for GbaSystem {
         while !self.bus.frame_ready && elapsed < FRAME_CYCLES * 2 {
             self.service_interrupt();
             // The ARM core reports an instruction's cost by returning it rather than through
-            // `Bus::tick` the way the SM83 does, so the machine is advanced here. A minimum of
-            // one keeps a core that reports zero from stalling the frame loop forever.
-            let cycles = self.cpu.step(&mut self.bus).get().max(1);
-            self.bus.advance(cycles as u32);
-            elapsed += cycles;
+            // `Bus::tick` the way the SM83 does, so `step_instruction` advances the machine.
+            elapsed += self.step_instruction().get();
         }
 
         if let Some(save) = self.bus.cartridge.battery_save_mut() {

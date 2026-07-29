@@ -283,3 +283,41 @@ fn the_system_reports_its_own_identity() {
 fn a_malformed_cartridge_is_rejected_rather_than_panicking() {
     assert!(GbaSystem::new(vec![0u8; 8], None).is_err());
 }
+
+#[test]
+#[ignore = "diagnostic; needs the fetched corpus"]
+fn trace_gba_suite_entry() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("testing/test-roms/gba/gba-suite/arm.gba");
+    let Ok(rom) = std::fs::read(&path) else {
+        eprintln!("no corpus at {}", path.display());
+        return;
+    };
+    let mut gba = GbaSystem::new(rom, None).unwrap();
+    let mut history: Vec<(u32, u32)> = Vec::new();
+    for step in 0..4_000_000u32 {
+        let pc = gba.cpu().regs.pc();
+        if !(0x0800_0000..0x0A00_0000).contains(&pc) {
+            eprintln!("left ROM at step {step}: pc={pc:#010X}");
+            for (p, op) in history.iter().rev().take(12).rev() {
+                eprintln!("   {p:#010X}  {op:#010X}");
+            }
+            eprintln!(
+                "   cpsr thumb={} mode={:?}",
+                gba.cpu().is_thumb(),
+                gba.cpu().mode()
+            );
+            return;
+        }
+        let opcode = gba.bus_mut().read32(pc);
+        history.push((pc, opcode));
+        if history.len() > 12 {
+            history.remove(0);
+        }
+        gba.step_instruction();
+    }
+    eprintln!("stayed in ROM for 4M instructions");
+}

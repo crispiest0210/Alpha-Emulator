@@ -12,10 +12,9 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **All three `gba-suite` ROMs fail.** The CPU runs off into the OAM mirror around
-//!   `0x07F83000` and spins, so the reported sub-test number is garbage. This is the ARM7TDMI
-//!   core's first contact with a reference suite, so a genuine core bug is at least as likely
-//!   as a wiring problem. It is the most valuable open failure in the project.
+//! - **`gba-suite`'s Thumb ROM passes**; `memory` fails sub-test 3 and `arm` runs off into
+//!   unmapped memory in FIQ mode. Given the other two pass or report cleanly, `arm`'s failure
+//!   points at the exception path rather than at broad decoding.
 //! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
 //!   show the backdrop rather than an untransformed approximation.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access
@@ -24,6 +23,8 @@
 //! - Windows, colour blending, and mosaic are not implemented.
 //! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
 //! - Keypad input is not wired to `KEYINPUT`.
+//! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
+//!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -34,6 +35,7 @@
 
 pub mod affine;
 pub mod background;
+pub mod bios;
 pub mod bitmap;
 pub mod cartridge;
 pub mod compositor;
