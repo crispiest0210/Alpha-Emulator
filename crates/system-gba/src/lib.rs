@@ -20,6 +20,7 @@
 //! | [`background`] — the four text layers, map decode, draw order | |
 //! | [`objects`] — OAM decode, sizes, per-line selection, matrices | |
 //! | [`affine`] — the transform for rotated backgrounds and sprites | |
+//! | [`fifo`] — the two DMA-fed direct-sound channels | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -33,6 +34,7 @@ pub mod affine;
 pub mod background;
 pub mod bitmap;
 pub mod dma;
+pub mod fifo;
 pub mod irq;
 pub mod memory;
 pub mod objects;
@@ -43,6 +45,7 @@ pub use affine::AffineBackground;
 pub use background::{Backgrounds, GbaTilemap};
 pub use bitmap::bgr555_to_rgba8;
 pub use dma::DmaController;
+pub use fifo::{DirectSound, SoundFifo};
 pub use irq::InterruptController;
 pub use memory::{GbaBus, Region};
 pub use objects::{Object, ObjectAttributeMemory};

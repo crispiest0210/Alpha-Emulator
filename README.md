@@ -55,6 +55,7 @@ Component status:
 | `system-gba` text backgrounds — four layers, map decode, draw order | done and tested; not yet driven |
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; not yet driven |
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
+| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | Everything else | not started |
 
 ### Accuracy suite
