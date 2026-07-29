@@ -107,10 +107,14 @@ Open gaps, each tracked with the specific reason:
   APU is off, and whether the CPU may reach wave RAM mid-playback — so each is gated on the
   model rather than fixed one way.
 - **dmg-acid2 and cgb-acid2** render and then halt waiting for interrupts, which is how they
-  signal they have finished. The pictures are probably correct; they stay unvalidated only
-  because nobody has compared them against the published reference images. Doing so would make
-  cgb-acid2 the only end-to-end check of tile attributes, the second VRAM bank, and CGB sprite
-  priority.
+  signal they have finished. Both pictures have now been rendered and *inspected* — dmg-acid2
+  draws the expected face, text, and credit line, and cgb-acid2 draws it in colour with a
+  coloured banner, which a broken palette path or missing second VRAM bank would not produce at
+  all. They are still not recorded as passes: this ROM family is designed so each individual PPU
+  bug corrupts one small region, and eyeballing a 160x144 face cannot distinguish a correct
+  render from one with a two-pixel defect. What is left is a pixel comparison against the
+  published reference images, which have to be fetched. `frontend-headless run --save-frame`
+  writes the PNG to compare.
 
 Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
 they leave there names the exact rule that failed. `cargo test -p harness --release --
@@ -203,12 +207,18 @@ printed at startup.
 ```sh
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
+cargo run -p frontend-headless -- run path/to/rom.gb --frames 120 --save-frame out.png
 cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
+cargo run -p frontend-headless -- identify path/to/rom.gb
 ```
 
 A `.gb` file runs on Game Boy hardware and a `.gbc` file on Game Boy Color hardware; what the
 cartridge header says decides whether a colour machine runs in full colour or in
 DMG-compatibility mode.
+
+`--save-frame` writes the final framebuffer as a PNG, which is how a rendering test ROM gets
+*looked at* rather than reduced to a hash. `identify` runs the same probe the library importer
+does, so the title and content hash it prints are the ones that would be indexed.
 
 `run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
 printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N

@@ -26,9 +26,9 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::Audio;
 use crate::chrome::{Chrome, ChromeState, Message, UiAction};
+use crate::keymap;
 use crate::layout::{self, Layout};
 use crate::render::{self, Renderer};
-use crate::{keymap, screenshot};
 
 /// How long a notice stays on screen.
 const MESSAGE_LIFETIME: Duration = Duration::from_secs(6);
@@ -452,7 +452,11 @@ impl App {
             .as_ref()
             .map(|rom| rom.title.clone())
             .unwrap_or_else(|| "alpha".to_string());
-        match screenshot::save(&self.paths.screenshots_dir(), &title, &frame.buffer) {
+        match frontend_core::png::save_screenshot(
+            &self.paths.screenshots_dir(),
+            &title,
+            &frame.buffer,
+        ) {
             Ok(path) => self.note(format!("screenshot: {}", path.display()), false),
             Err(e) => self.note(format!("could not write the screenshot: {e}"), true),
         }

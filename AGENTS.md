@@ -247,9 +247,11 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
 - **Alpha blending on the GBA** uses the backdrop as the lower layer, because the scanline buffer
   keeps only the winning pixel. The general case needs a second buffer or a second pass.
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
-- **dmg-acid2 and cgb-acid2** render and complete but have never been compared against their
-  published reference images. Recording those hashes is cheap, and it would make cgb-acid2 the
-  only end-to-end check of CGB tile attributes. There is now a window to look at them in.
+- **dmg-acid2 and cgb-acid2** render and complete and have now been *inspected* — both draw the
+  expected scene, cgb-acid2 in colour — but neither has been compared pixel-for-pixel against its
+  published reference image, so neither is recorded as a pass. `frontend-headless run --frames 120
+  --save-frame out.png` writes the PNG; what remains is fetching the two reference images and
+  diffing. That would make cgb-acid2 the only end-to-end check of CGB tile attributes.
 - Mosaic, EEPROM saves, and the GBA's object window are not implemented.
 
 ### Tools worth knowing about before you start

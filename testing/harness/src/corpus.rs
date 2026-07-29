@@ -418,15 +418,24 @@ pub const GB_ROMS: &[TestRom] = &[
         hardware: Hardware::Dmg,
         // It draws its face within a few frames.
         max_frames: 60,
-        // Unvalidated: the emulator renders *something*, but nobody has checked it against
-        // the reference image. Filling this in requires comparing to dmg-acid2's published
-        // reference, and until then the harness must not claim this passes.
+        // Still unvalidated, but no longer unseen. The picture has been rendered and looked at:
+        // `cargo run -p frontend-headless -- run testing/test-roms/gb/dmg-acid2.gb --frames 120
+        // --save-frame /tmp/dmg-acid2.png`. It draws the expected scene — "HELLO WORLD!", the
+        // face with both eyes, nose, and mouth, and the "dmg-acid2 by Matt Currie" credit.
+        //
+        // That is evidence, not validation, and `expected_hash` stays `None` because of the
+        // difference. This ROM is designed so that each individual PPU bug corrupts one small
+        // region of the face, and "the face looks right at 160x144" cannot distinguish a correct
+        // render from one with a two-pixel window-position error. What is left is a pixel
+        // comparison against the published reference PNG, which has to be fetched.
         expected_hash: None,
         expected_failure: Some(
             "renders and then halts waiting for interrupts, which is how this ROM signals it \
-             has finished — so the picture is probably right. It stays unvalidated only \
-             because the output has not been compared against the published reference image; \
-             recording that comparison would turn this into a real pass",
+             has finished, and the picture has been inspected and shows the expected scene. It \
+             stays unvalidated because eyeballing a 160x144 face cannot distinguish a correct \
+             render from one with a small per-region defect, which is exactly what this ROM \
+             encodes. Fetch the published reference image and compare pixels; \
+             `frontend-headless run --save-frame` writes the PNG to compare against",
         ),
         licence: "MIT (Matt Currie).",
     },
@@ -487,14 +496,19 @@ pub const CGB_ROMS: &[TestRom] = &[
         convention: Convention::Framebuffer,
         hardware: Hardware::Cgb,
         max_frames: 60,
-        // Unvalidated for the same reason as dmg-acid2: rendering something is not rendering
-        // it correctly, and nobody has compared this against the published reference image.
+        // As with dmg-acid2: rendered, inspected, and still not validated. The colour output has
+        // been looked at — a yellow face with green eyes, a coloured banner behind "HELLO
+        // WORLD!", and the credit line — which is meaningful because a broken palette path or a
+        // missing second VRAM bank would not produce a plausible colour picture at all. It is
+        // still not a pixel comparison against the published reference.
         expected_hash: None,
         expected_failure: Some(
-            "renders a picture and reaches its end state, but the output has not been compared \
-             against the published reference image. Recording that comparison in expected_hash \
-             would make this the only end-to-end check of tile attributes, the second VRAM \
-             bank, and CGB sprite priority",
+            "renders a colour picture and reaches its end state, and the output has been \
+             inspected: the face, its palettes, and the banner all appear as expected, which \
+             means the tile-attribute and second-VRAM-bank paths are doing something coherent. \
+             It has not been compared pixel-for-pixel against the published reference image, so \
+             it is not recorded as a pass. Doing that comparison would make this the only \
+             end-to-end check of tile attributes, the second VRAM bank, and CGB sprite priority",
         ),
         licence: "MIT (Matt Currie)",
     },

@@ -11,8 +11,16 @@
 //! trait alone, with nothing from `frontend-native` and no UI framework linked in. If that ever
 //! stops being true, this binary stops compiling — which is the crate-boundary rule enforcing
 //! itself at the place it matters most.
+//!
+//! # Sharing the loader with the window
+//!
+//! The extension-to-system decision lives in [`frontend_core::platform`], not here. It used to be
+//! a `match` in this file, and the native frontend would have needed a second copy — which is how
+//! two frontends end up disagreeing about what a `.gbc` file is. A `.gb` file gets Game Boy
+//! *hardware* and a `.gbc` file colour hardware; the header inside decides whether the colour
+//! machine runs in full colour or in DMG-compatibility mode, and that is `GbcSystem`'s business.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use core_common::{Framebuffer, InputState, System};
 use std::path::{Path, PathBuf};
@@ -34,6 +42,14 @@ enum Command {
         /// Also print a hash every N frames, to locate where two runs diverge.
         #[arg(long)]
         trace_every: Option<u64>,
+        /// Write the final framebuffer here as a PNG.
+        ///
+        /// This is how a rendering test ROM gets *looked at* rather than reduced to a hash. Two of
+        /// the corpus's open gaps — dmg-acid2 and cgb-acid2, which render and complete but have
+        /// never been compared against their published reference images — need exactly this and
+        /// nothing more.
+        #[arg(long, value_name = "FILE")]
+        save_frame: Option<PathBuf>,
     },
     /// Run a ROM twice from the same start and report whether the two runs match.
     ///
@@ -45,6 +61,12 @@ enum Command {
         #[arg(long, default_value_t = 600)]
         frames: u64,
     },
+    /// Report what a ROM is without running it: system, title, size, content hash.
+    ///
+    /// The same probe the library importer uses, so a title or hash printed here is the one that
+    /// would be indexed — which is what makes "why is this listed under that name?" answerable
+    /// without opening the application.
+    Identify { rom: PathBuf },
 }
 
 fn main() -> Result<()> {
@@ -59,6 +81,7 @@ fn main() -> Result<()> {
             rom,
             frames,
             trace_every,
+            save_frame,
         } => {
             let mut system = load(&rom)?;
             for frame in 1..=frames {
@@ -74,15 +97,29 @@ fn main() -> Result<()> {
             }
             println!("frames {frames}");
             println!("hash   {}", hash(system.framebuffer()));
+
+            if let Some(path) = save_frame {
+                std::fs::write(&path, frontend_core::encode_png(system.framebuffer()))
+                    .with_context(|| format!("could not write {}", path.display()))?;
+                println!("wrote  {}", path.display());
+            }
         }
 
         Command::CheckDeterminism { rom, frames } => {
             let first = run_to_hash(&rom, frames)?;
             let second = run_to_hash(&rom, frames)?;
             if first != second {
-                bail!("not deterministic: {first} then {second} over {frames} frames");
+                anyhow::bail!("not deterministic: {first} then {second} over {frames} frames");
             }
             println!("deterministic over {frames} frames: {first}");
+        }
+
+        Command::Identify { rom } => {
+            let info = frontend_core::platform::probe(&rom)?;
+            println!("system {}", info.platform.display_name());
+            println!("title  {}", info.title);
+            println!("size   {} bytes", info.size_bytes);
+            println!("hash   {:016x}", info.content_hash);
         }
     }
     Ok(())
@@ -90,39 +127,12 @@ fn main() -> Result<()> {
 
 /// Build the right system for a ROM.
 ///
-/// The Nintendo DS is named explicitly rather than swept into one "unsupported" arm, so the
-/// error says which system a ROM needs instead of leaving the user to wonder whether their file
-/// is corrupt.
+/// A ROM for a system that is not assembled yet is reported by name — "the Nintendo DS is not
+/// assembled yet" — rather than swept into one "unsupported" arm, so the error says which system a
+/// ROM needs instead of leaving the user to wonder whether their file is corrupt.
 fn load(path: &Path) -> Result<Box<dyn System>> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("could not read the ROM at {}", path.display()))?;
-
-    match path.extension().and_then(|e| e.to_str()) {
-        // A `.gb` file may still be a CGB-enhanced cartridge and a `.gbc` file may be a plain
-        // DMG one, so the extension only chooses the *hardware*; the header inside chooses the
-        // mode. That is `GbcSystem`'s job, which is why `.gbc` does not get a different branch
-        // so much as different hardware to run on.
-        Some("gb") => {
-            let system = system_gb::GbSystem::new(bytes, None)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            Ok(Box::new(system))
-        }
-        Some("gbc") => {
-            let system = system_gbc::GbcSystem::new(bytes, None)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            Ok(Box::new(system))
-        }
-        Some("gba") => {
-            let system = system_gba::GbaSystem::new(bytes, None)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            Ok(Box::new(system))
-        }
-        Some("nds") => bail!("the Nintendo DS system is not assembled yet (prompt 13)"),
-        other => bail!(
-            "unrecognised ROM extension {:?}; expected .gb, .gbc, .gba, or .nds",
-            other.unwrap_or("(none)")
-        ),
-    }
+    let (_, system) = frontend_core::platform::load(path)?;
+    Ok(system)
 }
 
 fn run_to_hash(path: &Path, frames: u64) -> Result<String> {

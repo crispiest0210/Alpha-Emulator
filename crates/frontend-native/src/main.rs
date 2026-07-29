@@ -13,8 +13,6 @@
 //!
 //! - [`layout`] — where the picture goes and where a click lands in it. Pure arithmetic, unit-tested.
 //! - [`keymap`] — `winit` key codes to `frontend-core` keys. Pure, unit-tested.
-//! - [`screenshot`] — a PNG encoder with no dependencies. Unit-tested against the format's own
-//!   published check values.
 //! - [`block_on`] — a twenty-line executor for `wgpu`'s three `async` setup calls.
 //! - [`audio`] — the `cpal` output stream, the only place in the workspace that opens a device.
 //! - [`render`] — the surface, and the framebuffer as a GPU texture.
@@ -41,7 +39,6 @@ mod chrome;
 mod keymap;
 mod layout;
 mod render;
-mod screenshot;
 
 use anyhow::Result;
 use winit::event_loop::EventLoop;

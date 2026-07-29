@@ -1,5 +1,10 @@
 //! Writing a framebuffer out as a PNG.
 //!
+//! Here rather than in `frontend-native` because two callers want it and neither is presentation:
+//! the screenshot key, and `frontend-headless`, whose `--save-frame` is what makes validating
+//! dmg-acid2 and cgb-acid2 against their published reference images a one-command job instead of a
+//! project.
+//!
 //! # Why this is written out by hand
 //!
 //! A screenshot key needs a file format every tool can open, and PNG is that format. Reaching for
@@ -25,7 +30,7 @@ use std::path::{Path, PathBuf};
 ///
 /// The core's framebuffer is already `RGBA8` in the byte order PNG wants, so there is no colour
 /// conversion step to get wrong.
-pub fn encode(framebuffer: &Framebuffer) -> Vec<u8> {
+pub fn encode_png(framebuffer: &Framebuffer) -> Vec<u8> {
     let width = framebuffer.width();
     let height = framebuffer.height();
     let mut png = Vec::with_capacity(framebuffer.as_bytes().len() + 4096);
@@ -63,7 +68,11 @@ pub fn encode(framebuffer: &Framebuffer) -> Vec<u8> {
 /// Returns the path written. The name carries a timestamp rather than a counter so two runs of the
 /// application cannot overwrite each other's screenshots, which a counter starting from zero every
 /// launch would do immediately.
-pub fn save(dir: &Path, title: &str, framebuffer: &Framebuffer) -> std::io::Result<PathBuf> {
+pub fn save_screenshot(
+    dir: &Path,
+    title: &str,
+    framebuffer: &Framebuffer,
+) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -75,7 +84,7 @@ pub fn save(dir: &Path, title: &str, framebuffer: &Framebuffer) -> std::io::Resu
         .collect();
     let path = dir.join(format!("{safe}-{stamp}.png"));
     let mut file = std::fs::File::create(&path)?;
-    file.write_all(&encode(framebuffer))?;
+    file.write_all(&encode_png(framebuffer))?;
     file.sync_all()?;
     Ok(path)
 }
@@ -206,7 +215,7 @@ mod tests {
 
     #[test]
     fn the_signature_and_chunk_order_are_what_png_requires() {
-        let png = encode(&framebuffer(4, 3));
+        let png = encode_png(&framebuffer(4, 3));
         assert_eq!(
             &png[0..8],
             &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
@@ -217,7 +226,7 @@ mod tests {
 
     #[test]
     fn the_header_records_the_actual_dimensions_and_format() {
-        let png = encode(&framebuffer(240, 160));
+        let png = encode_png(&framebuffer(240, 160));
         let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
         assert_eq!((width, height), (240, 160));
@@ -231,7 +240,7 @@ mod tests {
         // Walk the file the way a decoder does. This catches a length written before the data it
         // describes, which is the mistake that produces a file that opens in one viewer and not
         // another.
-        let png = encode(&framebuffer(9, 7));
+        let png = encode_png(&framebuffer(9, 7));
         let mut offset = 8;
         let mut kinds = Vec::new();
         while offset < png.len() {
@@ -297,7 +306,7 @@ mod tests {
     #[test]
     fn the_pixel_data_survives_the_round_trip_with_its_filter_bytes() {
         let fb = framebuffer(5, 4);
-        let png = encode(&fb);
+        let png = encode_png(&fb);
         let idat_start = 8 + 12 + 13; // signature + IHDR chunk
         let idat_len =
             u32::from_be_bytes(png[idat_start..idat_start + 4].try_into().unwrap()) as usize;
@@ -322,7 +331,7 @@ mod tests {
         // single-block encoder passes every smaller test and produces an unopenable file for any
         // real screenshot.
         let fb = framebuffer(200, 200);
-        let png = encode(&fb);
+        let png = encode_png(&fb);
         let idat_start = 8 + 12 + 13;
         let idat_len =
             u32::from_be_bytes(png[idat_start..idat_start + 4].try_into().unwrap()) as usize;
@@ -341,7 +350,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("alpha-shot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let path = save(&dir, "Game/Boy: Title?", &framebuffer(16, 16)).unwrap();
+        let path = save_screenshot(&dir, "Game/Boy: Title?", &framebuffer(16, 16)).unwrap();
         assert!(path.exists());
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
@@ -349,7 +358,10 @@ mod tests {
             "unsafe file name: {name}"
         );
         assert!(name.ends_with(".png"));
-        assert_eq!(std::fs::read(&path).unwrap(), encode(&framebuffer(16, 16)));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            encode_png(&framebuffer(16, 16))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

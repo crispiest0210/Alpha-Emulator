@@ -56,6 +56,7 @@ mod emulation;
 pub mod frame;
 pub mod input;
 pub mod platform;
+pub mod png;
 pub mod session;
 
 pub use audio::{channel, AudioConsumer, AudioProducer, Resampler, DEFAULT_CAPACITY};
@@ -66,6 +67,7 @@ pub use input::{
     KeybindMap, PhysicalInputEvent, PhysicalKey,
 };
 pub use platform::{frame_duration, frame_rate, is_dual_screen, screen_size, LoadError, RomInfo};
+pub use png::encode_png;
 pub use session::{
     LoadedRom, SavedState, Session, SessionCommand, SessionEvent, SessionOptions, SessionStats,
     SessionStatus,
