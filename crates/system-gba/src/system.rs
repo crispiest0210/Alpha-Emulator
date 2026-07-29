@@ -28,12 +28,14 @@ use core_common::{
 };
 use cpu_arm7tdmi::{Arm7Tdmi, BootState, Exception, Mode};
 
+use crate::affine::{self, AffineBackground};
 use crate::bios;
 use crate::cartridge::Cartridge;
 use crate::compositor::{self, Frame};
 use crate::dma::DmaController;
 use crate::fifo::DirectSound;
 use crate::irq::{self, InterruptController};
+use crate::keypad::Keypad;
 use crate::memory::{GbaBus, Region};
 use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::waitstates::WaitControl;
@@ -60,9 +62,12 @@ pub struct GbaSystemBus {
     pub cartridge: Cartridge,
     pub video: VideoTiming,
     pub backgrounds: Backgrounds,
+    /// The two affine layers, 2 and 3.
+    pub affine: [AffineBackground; 2],
     pub timers: Timers,
     pub dma: DmaController,
     pub irq: InterruptController,
+    pub keypad: Keypad,
     pub sound: DirectSound,
     pub waits: WaitControl,
 
@@ -82,9 +87,11 @@ impl GbaSystemBus {
             cartridge,
             video: VideoTiming::new(),
             backgrounds: Backgrounds::new(),
+            affine: [AffineBackground::new(); 2],
             timers: Timers::new(),
             dma: DmaController::new(),
             irq: InterruptController::new(),
+            keypad: Keypad::new(),
             sound: DirectSound::new(),
             waits: WaitControl::new(),
             framebuffer: Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT),
@@ -117,8 +124,19 @@ impl GbaSystemBus {
         let events = self.video.tick(cycles);
         self.irq.raise(self.video.interrupt_sources(&events));
 
+        if events.frame_started {
+            // The reference point is reloaded from the registers at the top of a frame and
+            // accumulates from there; see the affine module for why that matters.
+            for layer in &mut self.affine {
+                layer.begin_frame();
+            }
+        }
         if let Some(line) = events.scanline_ready {
             self.render_line(line as u32);
+            // Advance *after* drawing: the line just drawn used the position it started with.
+            for layer in &mut self.affine {
+                layer.advance_line();
+            }
         }
         if events.entered_hblank {
             self.dma.on_hblank();
@@ -140,6 +158,7 @@ impl GbaSystemBus {
         let frame = Frame {
             video: &self.video,
             backgrounds: &self.backgrounds,
+            affine: &self.affine,
             vram: self.memory.vram(),
             palette: self.memory.palette(),
             oam: self.memory.oam(),
@@ -202,11 +221,18 @@ impl GbaSystemBus {
         if let Some(value) = self.irq.read16(addr) {
             return Some(value);
         }
+        if let Some(value) = self.keypad.read16(addr) {
+            return Some(value);
+        }
         if let Some(value) = self.sound.read16(addr) {
             return Some(value);
         }
         if WaitControl::owns(addr) {
             return Some(self.waits.read16());
+        }
+        // The affine registers are write-only, like the scroll registers beside them.
+        if affine_layer_of(addr).is_some() {
+            return Some(0);
         }
         None
     }
@@ -217,14 +243,30 @@ impl GbaSystemBus {
             || self.timers.write16(addr, value).is_some()
             || self.dma.write16(addr, value).is_some()
             || self.irq.write16(addr, value).is_some()
+            || self.keypad.write16(addr, value).is_some()
             || self.sound.write16(addr, value).is_some()
         {
             return;
         }
         if WaitControl::owns(addr) {
             self.waits.write16(value);
+            return;
+        }
+        if let Some((layer, offset)) = affine_layer_of(addr) {
+            self.affine[layer].write16(offset, value);
         }
     }
+}
+
+/// Which affine layer a register belongs to, and its offset within that layer's block.
+fn affine_layer_of(addr: u32) -> Option<(usize, u32)> {
+    if (affine::BG2_BASE..affine::BG2_BASE + 0x10).contains(&addr) {
+        return Some((0, addr - affine::BG2_BASE));
+    }
+    if (affine::BG3_BASE..affine::BG3_BASE + 0x10).contains(&addr) {
+        return Some((1, addr - affine::BG3_BASE));
+    }
+    None
 }
 
 impl GbaSystemBus {
@@ -507,7 +549,11 @@ impl System for GbaSystem {
         STATE_VERSION
     }
 
-    fn step_frame(&mut self, _input: InputState) -> FrameOutput {
+    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+        self.bus.keypad.set_input(input.buttons);
+        if self.bus.keypad.interrupt_requested() {
+            self.bus.irq.raise(irq::source::KEYPAD);
+        }
         self.bus.frame_ready = false;
         self.save_ram_dirty = false;
         let mut elapsed = 0u64;
@@ -571,9 +617,13 @@ impl Savable for GbaSystemBus {
         self.cartridge.save(w);
         self.video.save(w);
         self.backgrounds.save(w);
+        for layer in &self.affine {
+            layer.save(w);
+        }
         self.timers.save(w);
         self.dma.save(w);
         self.irq.save(w);
+        self.keypad.save(w);
         self.sound.save(w);
         self.waits.save(w);
         w.write_u64(self.sample_accumulator);
@@ -584,9 +634,13 @@ impl Savable for GbaSystemBus {
         self.cartridge.load(r)?;
         self.video.load(r)?;
         self.backgrounds.load(r)?;
+        for layer in &mut self.affine {
+            layer.load(r)?;
+        }
         self.timers.load(r)?;
         self.dma.load(r)?;
         self.irq.load(r)?;
+        self.keypad.load(r)?;
         self.sound.load(r)?;
         self.waits.load(r)?;
         self.sample_accumulator = r.read_u64()?;

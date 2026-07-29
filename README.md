@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ✅ | ⚠️ | ✅ | Assembled and running; passes all three `gba-suite` ROMs. No affine compositing, PSG mixing, windows, blending, keypad, or EEPROM yet |
+| Game Boy Advance | ✅ | ⚠️ | ✅ | Assembled and running; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, windows, blending, affine sprites, or EEPROM yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
@@ -57,7 +57,8 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done and tested; not yet charged to the CPU |
-| `system-gba` compositor — mode layers, priority, palette, sprites | text layers, bitmap modes, and non-affine sprites draw; **affine layers and sprites not yet composited** |
+| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds plus non-affine sprites draw; **affine sprites not yet composited** |
+| `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — `Div`, `Sqrt`, `ArcTan2`, `CpuSet`, the waiting calls | done; unhandled calls change nothing rather than guessing |

@@ -13,14 +13,13 @@
 //! What is not done, in rough order of how much it matters:
 //!
 //! - **All three `gba-suite` ROMs pass**: the instruction set in both states, and memory.
-//! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
-//!   show the backdrop rather than an untransformed approximation.
+//! - Affine *sprites* are decoded and transformed but not composited; they show nothing rather
+//!   than an untransformed approximation. Affine backgrounds are drawn.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access
 //!   currently costs what the ARM core says it does.
 //! - The four `apu-shared` PSG channels are not mixed in alongside the two FIFO channels.
 //! - Windows, colour blending, and mosaic are not implemented.
 //! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
-//! - Keypad input is not wired to `KEYINPUT`.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
 //!
@@ -40,6 +39,7 @@ pub mod compositor;
 pub mod dma;
 pub mod fifo;
 pub mod irq;
+pub mod keypad;
 pub mod memory;
 pub mod objects;
 pub mod system;
@@ -55,6 +55,7 @@ pub use compositor::{Frame, GbaPalette};
 pub use dma::DmaController;
 pub use fifo::{DirectSound, SoundFifo};
 pub use irq::InterruptController;
+pub use keypad::Keypad;
 pub use memory::{GbaBus, Region};
 pub use objects::{Object, ObjectAttributeMemory};
 pub use system::{GbaSystem, GbaSystemBus};

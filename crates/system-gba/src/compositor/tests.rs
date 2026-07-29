@@ -9,6 +9,7 @@ const BLUE: u16 = 0x7C00;
 struct Scene {
     video: VideoTiming,
     backgrounds: Backgrounds,
+    affine: [crate::affine::AffineBackground; 2],
     vram: Vec<u8>,
     palette: Vec<u8>,
     oam: Vec<u8>,
@@ -21,6 +22,7 @@ impl Scene {
         Self {
             video,
             backgrounds: Backgrounds::new(),
+            affine: [crate::affine::AffineBackground::new(); 2],
             vram: vec![0u8; 0x1_8000],
             palette: vec![0u8; 0x400],
             // Parked as hidden rather than zeroed: an all-zero OAM is 128 visible 8x8 sprites
@@ -62,6 +64,7 @@ impl Scene {
         Frame {
             video: &self.video,
             backgrounds: &self.backgrounds,
+            affine: &self.affine,
             vram: &self.vram,
             palette: &self.palette,
             oam: &self.oam,
@@ -219,15 +222,67 @@ fn a_line_past_the_bottom_of_the_screen_is_not_drawn() {
 }
 
 #[test]
-fn an_affine_layer_leaves_the_backdrop_rather_than_drawing_with_no_transform() {
-    // Mode 2's layers are affine, and the matrix accumulation is driven from the system
-    // assembly, which does not exist yet. Drawing them as text layers would put a picture on
-    // screen that is wrong in a way that looks deliberate.
+fn an_affine_layer_draws_through_its_transform() {
+    // Affine layers walk the *screen* and ask the transform where each pixel came from, rather
+    // than walking the map — a rotated map does not visit screen pixels in order.
     let mut scene = Scene::new(2);
     scene.colour(0, BLUE);
     scene.colour(1, RED);
-    scene.simple_layer(2, 0, 8);
-    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF);
+    // 256-colour tile 0: one byte per pixel, colour index 1 everywhere.
+    for byte in 0..64 {
+        scene.vram[byte] = 1;
+    }
+    // The map is one byte per tile with no attributes; cell 0 names tile 0.
+    scene.vram[8 * SCREEN_BLOCK] = 0;
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 4, 8 << 8);
+    scene.video.write16(reg::DISPCNT, 2 | (1 << 10));
+    scene.affine[0].matrix = crate::affine::IDENTITY;
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "the identity transform"
+    );
+    // Every unset map cell names tile 0, which is the one that was filled, so the whole
+    // 128-pixel map is opaque. Past its edge is where the backdrop shows.
+    assert_eq!(
+        scene.render(0).pixel(127, 0).r,
+        0xFF,
+        "the last mapped pixel"
+    );
+    assert_eq!(scene.render(0).pixel(128, 0).b, 0xFF, "and past its edge");
+}
+
+#[test]
+fn an_affine_layer_outside_its_map_shows_the_backdrop_unless_it_wraps() {
+    // Wrapping is not the default: a game rotating a small map wants the edges to fall away
+    // rather than tile, and reading the bit backwards makes a spinning floor look like
+    // wallpaper.
+    let mut scene = Scene::new(2);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    for byte in 0..64 {
+        scene.vram[byte] = 1;
+    }
+    scene.vram[8 * SCREEN_BLOCK] = 0;
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 4, 8 << 8);
+    scene.video.write16(reg::DISPCNT, 2 | (1 << 10));
+    scene.affine[0].matrix = crate::affine::IDENTITY;
+    // Start one whole 128x128-pixel map to the right, so every pixel is off the map.
+    scene.affine[0].write32(0x8, 128 << 8);
+    scene.affine[0].begin_frame();
+
+    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF, "off the map");
+
+    // With the wrap bit set the same position folds back onto the tile.
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 4, (8 << 8) | (1 << 13));
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "wrapped");
 }
 
 #[test]

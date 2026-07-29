@@ -20,6 +20,7 @@ use ppu_tile2d::{
     ScanlineBuffer, SpriteRule,
 };
 
+use crate::affine::AffineBackground;
 use crate::background::{Backgrounds, GbaTilemap};
 use crate::bitmap;
 use crate::objects::{ObjectAttributeMemory, ObjectMode};
@@ -82,6 +83,8 @@ impl PaletteSource for GbaPalette<'_> {
 pub struct Frame<'a> {
     pub video: &'a VideoTiming,
     pub backgrounds: &'a Backgrounds,
+    /// The two affine layers' matrices and accumulated positions, for layers 2 and 3.
+    pub affine: &'a [AffineBackground; 2],
     pub vram: &'a [u8],
     pub palette: &'a [u8],
     pub oam: &'a [u8],
@@ -142,13 +145,11 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let present = std::array::from_fn(|i| enabled[i] && kinds[i].is_some());
 
     for index in frame.backgrounds.draw_order(present) {
-        // Affine layers are not drawn here yet; they need the per-line matrix accumulation
-        // driven from the system assembly, which does not exist. Skipping them leaves the
-        // backdrop showing rather than drawing them with the wrong transform.
-        if kinds[index] != Some(LayerKind::Text) {
-            continue;
+        match kinds[index] {
+            Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut scanline),
+            Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut scanline),
+            _ => {}
         }
-        draw_text_layer(frame, index, line, &mut scanline);
     }
     draw_sprites(frame, line, &mut scanline);
 
@@ -178,6 +179,62 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         layer.bit_depth(),
     );
     render_text_background(&map, frame.vram, &params, scanline);
+}
+
+/// Draw one affine background layer.
+///
+/// Unlike a text layer, this walks the *screen* left to right and asks the transform where each
+/// pixel came from, rather than walking the map. That is the only way round it can work: a
+/// rotated map does not visit screen pixels in order.
+///
+/// Affine layers are always 256-colour and have no per-tile attributes — the map is one byte per
+/// tile with no palette, flip, or priority bits, because the transform is doing the work those
+/// would have done.
+fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuffer) {
+    let layer = frame.backgrounds.layers[index];
+    let affine = &frame.affine[index - 2];
+    let (width, height) = layer.size_in_tiles(true);
+    let map_base = layer.screen_base();
+    let char_base = layer.char_base();
+    let pixels = (width * 8, height * 8);
+
+    for x in 0..SCREEN_WIDTH {
+        let (tx, ty) = affine.texture_at(x);
+
+        // Outside the map, a layer either wraps or shows nothing, depending on a control bit.
+        // Wrapping is not the default: a game rotating a small map wants the edges to fall away
+        // rather than tile, and reading the bit backwards makes a spinning floor look like
+        // wallpaper.
+        let (tx, ty) = if layer.affine_wraps() {
+            (
+                tx.rem_euclid(pixels.0 as i32),
+                ty.rem_euclid(pixels.1 as i32),
+            )
+        } else {
+            if tx < 0 || ty < 0 || tx >= pixels.0 as i32 || ty >= pixels.1 as i32 {
+                continue;
+            }
+            (tx, ty)
+        };
+
+        let cell = map_base + (ty as usize / 8) * width as usize + (tx as usize / 8);
+        let tile = frame.vram.get(cell).copied().unwrap_or(0) as usize;
+        // 256 colours, so one byte per pixel and 64 bytes per tile.
+        let offset = char_base + tile * 64 + (ty as usize % 8) * 8 + (tx as usize % 8);
+        let colour = frame.vram.get(offset).copied().unwrap_or(0);
+        if colour == 0 {
+            continue;
+        }
+        scanline.set(
+            x as usize,
+            ppu_tile2d::IndexedPixel {
+                color: colour,
+                palette: 0,
+                priority: layer.priority(),
+                source: PixelSource::Background,
+            },
+        );
+    }
 }
 
 /// Draw the sprites covering this line, front-most first.
