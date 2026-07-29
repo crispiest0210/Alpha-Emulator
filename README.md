@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ❌ | ❌ | ❌ | CPU, memory map, interrupts, timers, DMA, video timing, and bitmap modes done and tested. No tile modes, sprites, APU, or assembly yet |
+| Game Boy Advance | ❌ | ❌ | ❌ | CPU, memory map, interrupts, timers, DMA, video timing, bitmap modes, and text backgrounds done and tested. No affine, sprites, APU, or assembly yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **The Game Boy core runs ROMs; the GUI does not yet.** The emulation core boots cartridges,
@@ -52,6 +52,7 @@ Component status:
 | `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
 | `system-gba` interrupt controller, timers, 4-channel DMA | done and tested; not yet driven |
 | `system-gba` video timing and bitmap modes 3/4/5 | done and tested; not yet driven |
+| `system-gba` text backgrounds — four layers, map decode, draw order | done and tested; not yet driven |
 | Everything else | not started |
 
 ### Accuracy suite

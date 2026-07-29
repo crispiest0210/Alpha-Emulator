@@ -11,12 +11,13 @@
 //!
 //! | Done | Not started |
 //! |---|---|
-//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Tile modes 0-2, including affine backgrounds |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Sprites, windows, and colour blending |
-//! | [`timers`] — four channels, prescalers, cascade | APU: four PSG channels plus two DMA-fed FIFOs |
-//! | [`dma`] — four channels, all trigger modes, priority | Wait-state timing (`WAITCNT`) |
-//! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Cartridge wiring and the `System` impl |
-//! | [`bitmap`] — modes 3, 4, and 5 | |
+//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Affine backgrounds (the matrix registers and their per-line accumulation) |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Sprites: OAM decode, affine objects, 1D/2D tile mapping |
+//! | [`timers`] — four channels, prescalers, cascade | Windows and colour blending |
+//! | [`dma`] — four channels, all trigger modes, priority | APU: four PSG channels plus two DMA-fed FIFOs |
+//! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Wait-state timing (`WAITCNT`) |
+//! | [`bitmap`] — modes 3, 4, and 5 | Cartridge wiring and the `System` impl |
+//! | [`background`] — the four text layers, map decode, draw order | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -26,6 +27,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod background;
 pub mod bitmap;
 pub mod dma;
 pub mod irq;
@@ -33,6 +35,7 @@ pub mod memory;
 pub mod timers;
 pub mod video;
 
+pub use background::{Backgrounds, GbaTilemap};
 pub use bitmap::bgr555_to_rgba8;
 pub use dma::DmaController;
 pub use irq::InterruptController;
