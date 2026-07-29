@@ -28,6 +28,7 @@ use crate::session::{
 };
 use core_common::{AudioSample, FrameOutput, InputState, System, AUDIO_SAMPLE_RATE};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use debugger::Breakpoints;
 use library::{AppPaths, RomId};
 use savestate::RewindBuffer;
 use std::path::{Path, PathBuf};
@@ -83,6 +84,11 @@ pub(crate) fn run(
         fast_forward_speed: config.emulation.fast_forward_speed,
         rewind_config: config.rewind,
         step_budget: 0,
+        instruction_budget: 0,
+        breakpoints: Breakpoints::new(),
+        debug_attached: false,
+        last_debug_request: None,
+        resume_past: None,
         pacer: Pacer::default(),
         stats: StatsWindow::new(),
     };
@@ -146,6 +152,25 @@ struct Emulator {
     rewind_config: RewindConfig,
     /// Frames still owed to a `StepFrames` command while paused.
     step_budget: u32,
+    /// Instructions still owed to a `StepInstructions` command.
+    instruction_budget: u32,
+
+    /// Execution breakpoints. Consulted only while [`debug_attached`](Self::debug_attached).
+    breakpoints: Breakpoints,
+    /// Whether to run instruction-at-a-time so breakpoints can be checked between them.
+    debug_attached: bool,
+    /// The last snapshot request, re-served whenever execution stops.
+    ///
+    /// Without this, "step, then refresh" is a race the caller cannot win: both commands are drained
+    /// before the loop ticks, so the snapshot would be captured *before* the step ran and show the
+    /// state the user just left. Remembering the request and re-serving it on every stop is what
+    /// makes a step button show the instruction it landed on.
+    last_debug_request: Option<debugger::Request>,
+    /// The address a resume must not immediately re-break on.
+    ///
+    /// Without this, continuing from a breakpoint checks the same address, breaks again, and the
+    /// machine never advances — the classic way a first debugger implementation appears to hang.
+    resume_past: Option<u32>,
 
     pacer: Pacer,
     stats: StatsWindow,
@@ -160,6 +185,9 @@ struct Active {
     frame: u64,
     frame_duration: Duration,
     frame_rate: f64,
+    /// Emulated cycles in one frame, for the debugger's stepping loop — which has no `step_frame`
+    /// to tell it when a frame ended.
+    frame_cycles: u64,
     /// `None` when rewind is switched off in the settings.
     ///
     /// Not a zero-capacity buffer: [`RewindBuffer::new`] deliberately clamps capacity up to one,
@@ -258,9 +286,9 @@ impl Emulator {
         if active.stopped {
             return false;
         }
-        // A `StepFrames` budget overrides a pause, which is exactly what a debugger's step
-        // button means: stay paused, but advance.
-        !self.paused || self.step_budget > 0
+        // A step budget overrides a pause, which is exactly what a debugger's step button means:
+        // stay paused, but advance.
+        !self.paused || self.step_budget > 0 || self.instruction_budget > 0
     }
 
     /// The speed multiplier this iteration runs at. Zero means uncapped.
@@ -282,6 +310,8 @@ impl Emulator {
     fn tick(&mut self) {
         if self.rewinding {
             self.rewind_tick();
+        } else if self.needs_instruction_stepping() {
+            self.debug_tick();
         } else {
             self.frame_tick();
         }
@@ -293,6 +323,15 @@ impl Emulator {
         }
     }
 
+    /// Whether this iteration has to run one instruction at a time.
+    ///
+    /// Only when there is something to check between instructions. Attaching the debugger to look at
+    /// registers and memory therefore costs nothing: the loop keeps calling `step_frame`, input keeps
+    /// working, and snapshots are served between frames.
+    fn needs_instruction_stepping(&self) -> bool {
+        self.debug_attached && (!self.breakpoints.is_empty() || self.instruction_budget > 0)
+    }
+
     fn target_frame_duration(&self) -> Duration {
         let Some(active) = self.active.as_ref() else {
             return IDLE_POLL;
@@ -302,6 +341,92 @@ impl Emulator {
             return Duration::ZERO;
         }
         active.frame_duration.div_f32(speed)
+    }
+
+    /// One frame's worth of emulated time, run one instruction at a time.
+    ///
+    /// This is the whole mechanism behind execution breakpoints, and it needs no hook inside any
+    /// system: the check happens *here*, between calls to
+    /// [`step_instruction`](System::step_instruction), so a system crate never learns that
+    /// breakpoints exist and a detached session runs `step_frame` exactly as it always did.
+    ///
+    /// The cost is real — a breakpoint check and a virtual call per instruction — and it is paid
+    /// only while the debugger is attached, which is the trade prompt 15 asks for. Prompt 18 can
+    /// measure it; nothing here claims a number.
+    fn debug_tick(&mut self) {
+        let input = self.input.latest();
+        let speed = self.speed();
+        let present = self.out.frames.has_room();
+        let single_stepping = self.instruction_budget > 0;
+
+        // Input is deliberately not delivered here, and that is a real limitation rather than an
+        // oversight: `InputState` applies to a whole frame by the `System` contract, and there is no
+        // per-instruction path to hand it through. So while a breakpoint is set, the joypad reads as
+        // it did on the last full frame. Reaching a breakpoint that needs a button press means
+        // pressing it, then setting the breakpoint. Closing that gap wants an input setter on
+        // `System`, which is prompt 15's remaining work rather than something to bodge here.
+        let _ = input;
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let budget = active.frame_cycles;
+        let mut spent = 0u64;
+        let mut hit = None;
+
+        while spent < budget {
+            let pc = active.system.debug().map(|target| target.program_counter());
+            if let Some(pc) = pc {
+                // The instruction being resumed *from* is exempt, once.
+                if self.resume_past == Some(pc) {
+                    self.resume_past = None;
+                } else if self.breakpoints.check_execution(pc).is_some() {
+                    hit = Some(pc);
+                    break;
+                }
+            }
+            spent += active.system.step_instruction().0;
+
+            if self.instruction_budget > 0 {
+                self.instruction_budget -= 1;
+                if self.instruction_budget == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Audio is drained whatever happened, because the system's buffer is bounded.
+        let samples = active.system.take_audio_samples();
+        self.out.push_audio(samples, speed);
+        if present || hit.is_some() || single_stepping {
+            let number = active.frame;
+            self.out.frames.publish(number, active.system.framebuffer());
+        }
+        active.frame += 1;
+        self.stats.frame_completed();
+
+        if let Some(addr) = hit {
+            // Stop *before* executing the instruction, which is what a breakpoint means — the
+            // register view then shows the state the instruction is about to act on.
+            self.paused = true;
+            self.instruction_budget = 0;
+            self.resume_past = Some(addr);
+            self.pacer.reset();
+            self.emit(SessionEvent::BreakpointHit { addr });
+            self.announce_status();
+            self.reserve_debug_snapshot();
+        } else if single_stepping && self.instruction_budget == 0 {
+            self.paused = true;
+            self.pacer.reset();
+            self.announce_status();
+            self.reserve_debug_snapshot();
+        }
+    }
+
+    /// Re-send the last snapshot request, if there was one.
+    fn reserve_debug_snapshot(&mut self) {
+        if let Some(request) = self.last_debug_request {
+            self.serve_debug_snapshot(request);
+        }
     }
 
     fn frame_tick(&mut self) {
@@ -449,9 +574,95 @@ impl Emulator {
                 self.out.resampler.set_target_rate(rate.max(1));
             }
             SessionCommand::FlushSaveRam => self.maybe_flush_save_ram(true),
+
+            SessionCommand::SetDebugAttached(attached) => {
+                if self.debug_attached != attached {
+                    self.debug_attached = attached;
+                    self.resume_past = None;
+                    self.instruction_budget = 0;
+                    // Detaching leaves the breakpoints registered but unchecked. That is the honest
+                    // behaviour: closing the panel should not silently discard the work of setting
+                    // them, and re-opening it must not surprise the user by breaking somewhere they
+                    // forgot about — so the panel shows the list either way.
+                    self.pacer.reset();
+                }
+            }
+            SessionCommand::RequestDebugSnapshot(request) => {
+                self.last_debug_request = Some(request);
+                self.serve_debug_snapshot(request);
+            }
+            SessionCommand::AddBreakpoint(addr) => {
+                self.breakpoints.add_execution(addr);
+                self.pacer.reset();
+            }
+            SessionCommand::RemoveBreakpoint(addr) => {
+                self.breakpoints.remove_execution(addr);
+                if self.resume_past == Some(addr) {
+                    self.resume_past = None;
+                }
+            }
+            SessionCommand::ClearBreakpoints => {
+                self.breakpoints.clear();
+                self.resume_past = None;
+            }
+            SessionCommand::StepInstructions(n) => {
+                if self.active.is_none() {
+                    self.emit(SessionEvent::DebugUnavailable(
+                        "no cartridge is loaded, so there is nothing to step".into(),
+                    ));
+                } else {
+                    self.instruction_budget = self.instruction_budget.saturating_add(n.max(1));
+                    self.pacer.reset();
+                }
+            }
+            SessionCommand::SetProgramCounter(pc) => {
+                match self
+                    .active
+                    .as_mut()
+                    .and_then(|active| active.system.debug())
+                {
+                    Some(target) => {
+                        target.set_program_counter(pc);
+                        // The exemption belongs to the address being *left*, and the machine is no
+                        // longer there.
+                        self.resume_past = None;
+                        self.emit(SessionEvent::Notice(format!("jumped to {pc:#X}")));
+                    }
+                    None => self.emit(SessionEvent::DebugUnavailable(
+                        "this system offers no debug introspection".into(),
+                    )),
+                }
+            }
+
             SessionCommand::Shutdown => return true,
         }
         false
+    }
+
+    /// Capture a snapshot and send it.
+    ///
+    /// Runs on the emulation thread between frames, which is what makes it safe to read the machine
+    /// at all — and why [`debugger::Request`] is clamped before it is served. A request that asked
+    /// for a million rows would show up as the emulator stuttering, not as an error.
+    fn serve_debug_snapshot(&mut self, request: debugger::Request) {
+        let breakpoints = &self.breakpoints;
+        let snapshot = match self
+            .active
+            .as_mut()
+            .and_then(|active| active.system.debug())
+        {
+            Some(target) => debugger::capture(target, breakpoints, &request),
+            None => {
+                let reason = if self.active.is_none() {
+                    "no cartridge is loaded"
+                } else {
+                    "this system offers no debug introspection yet"
+                };
+                self.emit(SessionEvent::DebugUnavailable(reason.into()));
+                return;
+            }
+        };
+        self.emit(SessionEvent::DebugSnapshot(Box::new(snapshot)));
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -460,6 +671,18 @@ impl Emulator {
         }
         self.paused = paused;
         self.step_budget = 0;
+        self.instruction_budget = 0;
+        if !paused {
+            // Resuming from a breakpoint: the address the machine is sitting on is exempt for one
+            // check, or continuing would break again immediately and the machine would never move.
+            if let Some(target) = self
+                .active
+                .as_mut()
+                .and_then(|active| active.system.debug())
+            {
+                self.resume_past = Some(target.program_counter());
+            }
+        }
         self.pacer.reset();
         // Resuming with a full audio ring of pre-pause samples would replay the moment before the
         // pause. Nothing is dropped here — the ring drains naturally within ~85 ms — but the
@@ -530,6 +753,7 @@ impl Emulator {
             frame: 0,
             frame_duration: platform::frame_duration(platform),
             frame_rate,
+            frame_cycles: platform::frame_cycles(platform),
             rewind: (capacity > 0)
                 .then(|| RewindBuffer::new(capacity, self.rewind_config.interval_frames as u64)),
             save_ram_path,
@@ -539,6 +763,11 @@ impl Emulator {
         self.paused = false;
         self.rewinding = false;
         self.step_budget = 0;
+        self.instruction_budget = 0;
+        // Breakpoints survive a ROM change deliberately — a contributor comparing two builds of the
+        // same homebrew wants the same addresses — but the resume exemption belongs to a machine that
+        // no longer exists.
+        self.resume_past = None;
         self.pacer.reset();
         self.out.resampler.reset();
         self.stats = StatsWindow::new();

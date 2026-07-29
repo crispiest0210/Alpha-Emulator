@@ -12,8 +12,9 @@
 
 use anyhow::Result;
 use frontend_core::{
-    catalog, screen_size, Action, ChromeAction, Config, Frame, InputTracker, KeybindMap, LoadedRom,
-    Session, SessionCommand, SessionEvent, SessionOptions, SessionStats, SessionStatus,
+    catalog, screen_size, Action, ChromeAction, Config, DebugSnapshot, Frame, InputTracker,
+    KeybindMap, LoadedRom, Session, SessionCommand, SessionEvent, SessionOptions, SessionStats,
+    SessionStatus,
 };
 use library::{AppPaths, Library, RomEntry, RomId, SaveStateEntry};
 use std::path::PathBuf;
@@ -72,6 +73,14 @@ pub struct App {
     loaded: Option<LoadedRom>,
     layout: Layout,
     messages: Vec<Message>,
+
+    /// The most recent debugger snapshot. Boxed as it arrives, and kept until replaced so the panel
+    /// has something to draw between requests.
+    debug: Option<Box<DebugSnapshot>>,
+    debug_unavailable: Option<String>,
+    /// When the next snapshot request goes out. The panel is refreshed on a timer while running and
+    /// on every stop by the session itself.
+    next_debug_request: Instant,
 
     cursor: Option<(f32, f32)>,
     pointer_down: bool,
@@ -138,6 +147,9 @@ impl App {
             loaded: None,
             layout: Layout::none(),
             messages,
+            debug: None,
+            debug_unavailable: None,
+            next_debug_request: Instant::now(),
             cursor: None,
             pointer_down: false,
             fullscreen: false,
@@ -224,6 +236,8 @@ impl App {
                     self.refresh_states();
                 }
                 SessionEvent::RomClosed => {
+                    self.debug = None;
+                    self.debug_unavailable = None;
                     self.loaded = None;
                     self.states.clear();
                     self.chrome.show_library = true;
@@ -265,6 +279,23 @@ impl App {
                 }
                 SessionEvent::Notice(text) => self.note(text, false),
                 SessionEvent::Error(text) => self.note(text, true),
+
+                SessionEvent::DebugSnapshot(snapshot) => {
+                    self.debug_unavailable = None;
+                    self.debug = Some(snapshot);
+                }
+                SessionEvent::BreakpointHit { addr } => {
+                    // Worth telling the user about even with the panel open: a breakpoint hit while
+                    // they were looking at the game is otherwise just the picture stopping.
+                    let digits =
+                        self.debug.as_ref().map(|s| s.address_digits).unwrap_or(4) as usize;
+                    self.note(format!("breakpoint at {addr:0>digits$X}"), false);
+                    self.chrome.show_debugger = true;
+                }
+                SessionEvent::DebugUnavailable(reason) => {
+                    self.debug = None;
+                    self.debug_unavailable = Some(reason);
+                }
             }
         }
         let now = Instant::now();
@@ -524,6 +555,26 @@ impl App {
         self.session.send(SessionCommand::SetRewinding(rewinding));
     }
 
+    /// Ask the session for a fresh snapshot, a few times a second while the panel is open.
+    ///
+    /// A timer rather than one request per redraw: a snapshot is a few hundred peeks on the emulation
+    /// thread, and sixty of them a second would be work taken from the machine to show a number that
+    /// nobody can read that fast. The session also re-serves the last request on every stop, so a
+    /// paused or single-stepped machine updates immediately regardless of this timer.
+    fn request_debug_snapshot_if_due(&mut self) {
+        const INTERVAL: Duration = Duration::from_millis(100);
+        if !self.chrome.show_debugger || self.loaded.is_none() {
+            return;
+        }
+        if Instant::now() < self.next_debug_request {
+            return;
+        }
+        self.next_debug_request = Instant::now() + INTERVAL;
+        self.session.send(SessionCommand::RequestDebugSnapshot(
+            crate::chrome::debug_request(&self.chrome),
+        ));
+    }
+
     // --- drawing --------------------------------------------------------------------------
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -574,6 +625,8 @@ impl App {
                 audio_description: &self.audio.describe(),
                 gpu_description: &self.renderer.adapter_summary(),
                 library_error: self.library_error.as_deref(),
+                debug: self.debug.as_deref(),
+                debug_unavailable: self.debug_unavailable.as_deref(),
                 fullscreen: self.fullscreen,
                 messages: &self.messages,
             };
@@ -785,6 +838,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.pump_session_events();
+        self.request_debug_snapshot_if_due();
 
         // If the emulation thread has died — a panic in a system — say so once and stop, rather
         // than presenting a frozen picture that looks like a hang.

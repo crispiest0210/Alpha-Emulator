@@ -26,6 +26,7 @@ use crate::frame::{frame_pipe, FrameSubscriber, DEFAULT_DEPTH};
 use crate::input::{input_channel, InputSender};
 use core_common::InputState;
 use crossbeam_channel::{Receiver, Sender};
+use debugger::Snapshot;
 use library::{AppPaths, Platform, RomId};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
@@ -147,6 +148,25 @@ pub enum SessionCommand {
     SetAudioOutputRate(u32),
     /// Write dirty save RAM now rather than waiting for the debounce.
     FlushSaveRam,
+
+    // --- debugger -------------------------------------------------------------------------
+    /// Attach or detach the debugger.
+    ///
+    /// While attached the loop runs one instruction at a time so breakpoints can be checked
+    /// between them, which costs perhaps a third of the machine's speed. Detached, it runs
+    /// `step_frame` exactly as before and the debugger costs *nothing* — not a branch, not a null
+    /// check. That is the whole reason attachment is explicit rather than implied by having a
+    /// breakpoint set.
+    SetDebugAttached(bool),
+    /// Ask for a fresh [`Snapshot`]. Answered with [`SessionEvent::DebugSnapshot`].
+    RequestDebugSnapshot(debugger::Request),
+    AddBreakpoint(u32),
+    RemoveBreakpoint(u32),
+    ClearBreakpoints,
+    /// Advance exactly `n` instructions, then stop. Implies a pause.
+    StepInstructions(u32),
+    /// The debugger's "set next statement".
+    SetProgramCounter(u32),
     /// Stop the thread. Sent automatically when the `Session` is dropped.
     Shutdown,
 }
@@ -170,6 +190,19 @@ pub enum SessionEvent {
     /// "cannot rewind further".
     Notice(String),
     Error(String),
+
+    /// A debugger snapshot, in answer to [`SessionCommand::RequestDebugSnapshot`].
+    ///
+    /// Boxed because it carries a few kilobytes of disassembly and hex rows, and every other event
+    /// in this enum is a handful of bytes — an unboxed variant would make the whole enum that large
+    /// for the sixty-times-a-second ones too.
+    DebugSnapshot(Box<Snapshot>),
+    /// Execution stopped at a breakpoint. The session is paused when this arrives.
+    BreakpointHit {
+        addr: u32,
+    },
+    /// The debugger asked for something this machine cannot offer.
+    DebugUnavailable(String),
 }
 
 /// How to start a session.

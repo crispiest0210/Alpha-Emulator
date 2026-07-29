@@ -9,6 +9,7 @@
 
 use crate::config::{Config, RewindConfig};
 use crate::session::{Session, SessionCommand, SessionEvent, SessionOptions, SessionStatus};
+use crate::DebugRequest;
 use library::AppPaths;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -812,4 +813,315 @@ fn input_reaches_the_machine_without_blocking_the_caller() {
     session.frames().poll();
     let now = session.frames().current().unwrap().number;
     wait_frame(&mut session, now + 3);
+}
+
+// --- debugger ---------------------------------------------------------------------------------
+
+/// A ROM whose entry point is a known sequence of three-byte jumps, so a breakpoint has an address
+/// worth setting and the disassembly has something recognisable in it.
+///
+/// `jp $0150` at `$0100`, then `jp $0100` at `$0150` — a two-instruction loop across two known
+/// addresses. Either one is a valid breakpoint target and the machine reaches both repeatedly, so a
+/// breakpoint that does not fire is unambiguously broken rather than merely unlucky.
+fn loop_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x0100] = 0xC3; // jp $0150
+    rom[0x0101] = 0x50;
+    rom[0x0102] = 0x01;
+    rom[0x0150] = 0xC3; // jp $0100
+    rom[0x0151] = 0x00;
+    rom[0x0152] = 0x01;
+    rom[0x0134..0x013C].copy_from_slice(b"LOOPTEST");
+    rom[0x0147] = 0x00;
+    rom[0x0148] = 0x00;
+    rom[0x014D] = cart_common::GbHeader::header_checksum(&rom);
+    rom
+}
+
+impl Fixture {
+    fn loop_rom(&self, name: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::write(&path, loop_rom()).unwrap();
+        path
+    }
+}
+
+fn wait_snapshot(session: &Session) -> Box<crate::DebugSnapshot> {
+    wait_event(session, "a debug snapshot", |event| match event {
+        SessionEvent::DebugSnapshot(snapshot) => Some(snapshot.clone()),
+        SessionEvent::DebugUnavailable(reason) => {
+            panic!("the Game Boy should offer introspection: {reason}")
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn a_snapshot_reports_registers_disassembly_and_memory() {
+    let fixture = Fixture::new("dbgsnap");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetPaused(true));
+    wait_status(&session, SessionStatus::Paused);
+
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest {
+        disassembly_lines: 4,
+        memory_at: 0x0100,
+        memory_rows: 1,
+        ..DebugRequest::default()
+    }));
+    let snapshot = wait_snapshot(&session);
+
+    assert_eq!(
+        snapshot.address_digits, 4,
+        "a Game Boy address is four digits"
+    );
+    assert!(snapshot.registers.iter().any(|r| r.name == "A"));
+    assert_eq!(snapshot.disassembly.len(), 4);
+    assert!(
+        snapshot.disassembly[0].is_program_counter,
+        "the first line is where execution is"
+    );
+    // The ROM's own bytes, read back through the peek path.
+    assert_eq!(snapshot.memory[0].bytes[0], Some(0xC3));
+    assert_eq!(snapshot.memory[0].bytes[1], Some(0x50));
+    assert_eq!(snapshot.region_of(0x0100), Some("ROM bank 0"));
+}
+
+#[test]
+fn a_snapshot_shows_io_as_unreadable_rather_than_inventing_zeroes() {
+    let fixture = Fixture::new("dbgio");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest {
+        disassembly_lines: 0,
+        memory_at: 0xFF40,
+        memory_rows: 1,
+        ..DebugRequest::default()
+    }));
+    let snapshot = wait_snapshot(&session);
+    assert!(
+        snapshot.memory[0].bytes.iter().all(|byte| byte.is_none()),
+        "reading an I/O register can latch it, so a debugger must refuse: {:?}",
+        snapshot.memory[0].bytes
+    );
+}
+
+/// Prompt 15's first acceptance criterion: set a breakpoint at a known address and verify execution
+/// actually halts there with the expected state visible.
+#[test]
+fn an_execution_breakpoint_halts_the_machine_at_that_address() {
+    let fixture = Fixture::new("dbgbreak");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddBreakpoint(0x0150));
+
+    let addr = wait_event(&session, "the breakpoint to fire", |event| match event {
+        SessionEvent::BreakpointHit { addr } => Some(*addr),
+        _ => None,
+    });
+    assert_eq!(addr, 0x0150);
+    wait_status(&session, SessionStatus::Paused);
+
+    // The machine stopped *before* executing, so the program counter is the breakpoint itself.
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest {
+        disassembly_lines: 1,
+        ..DebugRequest::default()
+    }));
+    let snapshot = wait_snapshot(&session);
+    assert_eq!(snapshot.program_counter, 0x0150);
+    assert!(snapshot.disassembly[0].has_breakpoint);
+    assert!(snapshot.disassembly[0].is_program_counter);
+    assert!(
+        snapshot.disassembly[0].text.to_lowercase().contains("100"),
+        "the instruction at the breakpoint is `jp $0100`, got {:?}",
+        snapshot.disassembly[0].text
+    );
+}
+
+#[test]
+fn resuming_from_a_breakpoint_makes_progress_instead_of_breaking_again() {
+    // The classic first-debugger bug: continue re-checks the address it is sitting on, breaks again,
+    // and the machine never moves. It looks exactly like a hang.
+    let fixture = Fixture::new("dbgresume");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddBreakpoint(0x0150));
+    wait_event(&session, "the first hit", |event| {
+        matches!(event, SessionEvent::BreakpointHit { .. }).then_some(())
+    });
+
+    session.send(SessionCommand::SetPaused(false));
+    // The loop returns to $0150 every two instructions, so a second hit proves the machine ran on
+    // rather than merely re-triggering where it stood.
+    let second = wait_event(&session, "a second hit", |event| match event {
+        SessionEvent::BreakpointHit { addr } => Some(*addr),
+        _ => None,
+    });
+    assert_eq!(second, 0x0150);
+}
+
+#[test]
+fn removing_a_breakpoint_lets_execution_past_it() {
+    let fixture = Fixture::new("dbgremove");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddBreakpoint(0x0150));
+    wait_event(&session, "the hit", |event| {
+        matches!(event, SessionEvent::BreakpointHit { .. }).then_some(())
+    });
+
+    session.send(SessionCommand::ClearBreakpoints);
+    session.send(SessionCommand::SetPaused(false));
+    wait_status(&session, SessionStatus::Running);
+
+    session.frames().poll();
+    let now = session.frames().current().map(|f| f.number).unwrap_or(0);
+    wait_frame(&mut session, now + 5);
+}
+
+#[test]
+fn a_breakpoint_at_an_address_never_reached_does_not_fire() {
+    let fixture = Fixture::new("dbgunreached");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    // The two-instruction loop never leaves $0100/$0150.
+    session.send(SessionCommand::AddBreakpoint(0x2000));
+
+    std::thread::sleep(Duration::from_millis(300));
+    for event in session.drain_events() {
+        if let SessionEvent::BreakpointHit { addr } = event {
+            panic!("fired at {addr:#06X}, which this ROM never executes");
+        }
+    }
+    assert!(session.frames().poll(), "and the machine kept running");
+}
+
+#[test]
+fn stepping_one_instruction_advances_the_program_counter_by_one_instruction() {
+    let fixture = Fixture::new("dbgstep");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddBreakpoint(0x0100));
+    wait_event(&session, "the hit", |event| {
+        matches!(event, SessionEvent::BreakpointHit { .. }).then_some(())
+    });
+
+    // Establish a standing request first, so the session knows what to re-serve when it stops.
+    // Sending "step" and "snapshot" together would be a race the caller cannot win — both are
+    // drained before the loop ticks — which is why the session re-serves on every stop instead.
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest {
+        disassembly_lines: 1,
+        ..DebugRequest::default()
+    }));
+    let before = wait_snapshot(&session);
+    assert_eq!(before.program_counter, 0x0100);
+
+    // From $0100, `jp $0150` is one instruction.
+    session.send(SessionCommand::StepInstructions(1));
+    let after = wait_event(
+        &session,
+        "the snapshot the stop produces",
+        |event| match event {
+            SessionEvent::DebugSnapshot(snapshot) if snapshot.program_counter != 0x0100 => {
+                Some(snapshot.clone())
+            }
+            _ => None,
+        },
+    );
+    assert_eq!(
+        after.program_counter, 0x0150,
+        "one step from a jump lands at its target"
+    );
+}
+
+#[test]
+fn setting_the_program_counter_moves_execution() {
+    let fixture = Fixture::new("dbgsetpc");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetPaused(true));
+    wait_status(&session, SessionStatus::Paused);
+
+    session.send(SessionCommand::SetProgramCounter(0x0150));
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest::default()));
+    let snapshot = wait_snapshot(&session);
+    assert_eq!(snapshot.program_counter, 0x0150);
+}
+
+#[test]
+fn attaching_with_no_breakpoints_leaves_the_machine_running_at_full_speed() {
+    // The design claim worth testing: attaching to look at registers must not slow anything down,
+    // because the loop only steps instruction-at-a-time when something needs checking.
+    let fixture = Fixture::new("dbgattached");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.loop_rom("loop.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 5);
+    session.send(SessionCommand::SetDebugAttached(true));
+
+    let stats = wait_event(&session, "statistics while attached", |event| match event {
+        SessionEvent::Stats(stats) if stats.frame > 10 => Some(*stats),
+        _ => None,
+    });
+    assert!(
+        stats.speed_percent > 20.0,
+        "attaching with no breakpoints should not cost speed: {stats:?}"
+    );
+}
+
+#[test]
+fn a_debug_request_with_no_cartridge_says_so_rather_than_returning_nothing() {
+    let fixture = Fixture::new("dbgnorom");
+    let session = fixture.session();
+    wait_status(&session, SessionStatus::Idle);
+
+    session.send(SessionCommand::RequestDebugSnapshot(DebugRequest::default()));
+    let reason = wait_event(&session, "DebugUnavailable", |event| match event {
+        SessionEvent::DebugUnavailable(reason) => Some(reason.clone()),
+        SessionEvent::DebugSnapshot(_) => panic!("there is no machine to snapshot"),
+        _ => None,
+    });
+    assert!(reason.contains("no cartridge"), "{reason}");
 }

@@ -200,10 +200,19 @@ its two CPU cores.
 
 - **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
   17 (testing).
-- **Partly done:** prompt 15 — the breakpoint and watchpoint registry works and is driven from a
-  running machine. The `egui` panel, the GDB remote-serial-protocol subset, and execution
-  tracing are not started. The frontend's debugger key pauses and says the panel does not exist,
-  rather than opening a window that pretends to be one.
+- **Mostly done:** prompt 15. The in-app `egui` debugger works — registers, disassembly with the
+  program counter highlighted and click-to-toggle breakpoints, a hex viewer with a region jump list,
+  instruction stepping, and execution breakpoints that genuinely halt. Three things remain, in the
+  order they are worth doing:
+  1. **Watchpoints do not halt.** `Breakpoints::check_access` is implemented and tested and nothing
+     calls it from a running machine. Unlike execution breakpoints, this cannot be done between
+     instructions — it needs the `DebugHooks` bus interception prompt 15 describes, which means a
+     touch point in each system's bus.
+  2. **Joypad input is not delivered while a breakpoint is set.** `InputState` applies to a whole
+     frame by the `System` contract and the stepping loop does not run frames. Wants an input setter
+     on `System`.
+  3. The GDB remote-serial-protocol subset and execution tracing, neither started. Prompt 15 itself
+     ranks the GDB server lowest.
 - **Untouched:** prompts 13 (NDS), 18 (performance), 19 (packaging).
 
 ### The biggest gap
@@ -216,8 +225,10 @@ coordinate mapping are written and unit-tested against a 256×384 framebuffer th
 yet. Prompt 13 is what fills that in.
 
 Prompt 18 is the other obvious next step and is no longer blocked: there is something running at
-speed to profile, and the HUD already reports measured speed, dropped frames, dropped samples, and
-rewind memory.
+speed to profile, the HUD already reports measured speed, dropped frames, dropped samples, and
+rewind memory, and prompt 15 left it a specific claim to check — that attaching the debugger with no
+breakpoints set costs nothing, because the loop only steps instruction-at-a-time when something needs
+checking. A test asserts the machine still keeps up; only profiling can say what it actually costs.
 
 ### What "verified" means for the frontend
 

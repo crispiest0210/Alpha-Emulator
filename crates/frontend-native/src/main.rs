@@ -16,7 +16,8 @@
 //! - [`block_on`] — a twenty-line executor for `wgpu`'s three `async` setup calls.
 //! - [`audio`] — the `cpal` output stream, the only place in the workspace that opens a device.
 //! - [`render`] — the surface, and the framebuffer as a GPU texture.
-//! - [`chrome`] — the panels, which return [`chrome::UiAction`]s rather than doing anything.
+//! - [`chrome`] — the panels, which return [`chrome::UiAction`]s rather than doing anything. That
+//!   includes the debugger panel: registers, disassembly, memory, breakpoints.
 //! - [`app`] — the composition: route an event, apply an action, draw a frame.
 //!
 //! # Status
@@ -26,9 +27,13 @@
 //! rewind, an HUD of measured figures, a keybind configurator, settings persisted as TOML, and
 //! screenshots.
 //!
-//! Not done: prompt 15's debugger panel — the `ToggleDebugger` key pauses and says so rather than
-//! opening a window that pretends to be one — and there is no native file dialog, because that
-//! would be a dependency for one button when drag-and-drop already covers the gesture.
+//! Prompt 15's debugger panel is here too, in `chrome/debugger_view.rs`: registers, disassembly with
+//! the program counter highlighted and click-to-toggle breakpoints, a hex viewer with a region jump
+//! list, and instruction stepping. Watchpoints appear in the registry but do not halt yet, and the
+//! panel says so rather than offering a control that does nothing.
+//!
+//! Not done: no native file dialog, because that would be a dependency for one button when
+//! drag-and-drop already covers the gesture.
 
 #![deny(unsafe_code)]
 

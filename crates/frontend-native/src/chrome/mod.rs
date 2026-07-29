@@ -15,12 +15,14 @@
 //! It also makes the panels' behaviour readable without following a call graph: the entire
 //! vocabulary of things the UI can do is the [`UiAction`] enum, on one screen.
 
+mod debugger_view;
 mod hud;
 mod keybinds;
 mod library_view;
 mod settings;
 mod states;
 
+pub use debugger_view::request as debug_request;
 pub use keybinds::resolve_capture;
 
 use frontend_core::{
@@ -91,6 +93,10 @@ pub struct ChromeState<'a> {
     pub audio_description: &'a str,
     pub gpu_description: &'a str,
     pub library_error: Option<&'a str>,
+    /// The most recent debugger snapshot, if the panel has one yet.
+    pub debug: Option<&'a frontend_core::DebugSnapshot>,
+    /// Why introspection is not available, when it is not.
+    pub debug_unavailable: Option<&'a str>,
     pub fullscreen: bool,
     /// Recent notices and errors, newest last.
     pub messages: &'a [Message],
@@ -127,6 +133,17 @@ pub struct Chrome {
     /// Save-state panel state.
     pub state_label: String,
 
+    /// Debugger panel state. All presentational: where the two views are scrolled to, and the
+    /// contents of three address boxes.
+    pub show_debugger: bool,
+    pub debugger_attached: bool,
+    pub debugger_follow_pc: bool,
+    pub debugger_disassembly_at: Option<u32>,
+    pub debugger_memory_at: u32,
+    pub debugger_goto: String,
+    pub debugger_memory_goto: String,
+    pub debugger_add_breakpoint: String,
+
     /// The keybind editor is waiting for a key press for this action.
     pub capturing: Option<Action>,
 }
@@ -148,6 +165,16 @@ impl Default for Chrome {
             rename_buffer: None,
             confirm_forget: None,
             state_label: String::new(),
+            show_debugger: false,
+            debugger_attached: false,
+            // Following the program counter is what a debugger view should do until the user
+            // deliberately scrolls away from it.
+            debugger_follow_pc: true,
+            debugger_disassembly_at: None,
+            debugger_memory_at: 0,
+            debugger_goto: String::new(),
+            debugger_memory_goto: String::new(),
+            debugger_add_breakpoint: String::new(),
             capturing: None,
         }
     }
@@ -174,9 +201,12 @@ impl Chrome {
                 None
             }
             ChromeAction::ToggleDebugger => {
-                // Prompt 15's panel is not built. Saying so is better than a key that appears to
-                // do nothing, and better than a stub window pretending a debugger exists.
-                Some(UiAction::Session(SessionCommand::SetPaused(true)))
+                self.show_debugger = !self.show_debugger;
+                // Opening it pauses, because the first thing anyone does on opening a debugger is
+                // stop the machine to look at it. Closing does not resume: the user may have paused
+                // deliberately, and un-pausing them would be presumptuous.
+                self.show_debugger
+                    .then_some(UiAction::Session(SessionCommand::SetPaused(true)))
             }
             ChromeAction::TogglePause => Some(UiAction::Session(SessionCommand::TogglePause)),
             ChromeAction::SaveState => Some(UiAction::Session(SessionCommand::SaveState {
@@ -204,6 +234,15 @@ impl Chrome {
         }
         if self.show_states {
             states::window(self, &ctx, state, &mut actions);
+        }
+        if self.show_debugger {
+            debugger_view::window(self, &ctx, state, &mut actions);
+        } else if self.debugger_attached {
+            // Closing the window by its own X leaves the emulation thread stepping one instruction
+            // at a time, which would be a permanent invisible slowdown. Detaching here covers every
+            // way the panel can close.
+            self.debugger_attached = false;
+            actions.push(UiAction::Session(SessionCommand::SetDebugAttached(false)));
         }
         if self.show_keybinds {
             keybinds::window(self, &ctx, state, &mut actions);
@@ -264,6 +303,18 @@ impl Chrome {
                 }
                 if ui.selectable_label(self.show_keybinds, "Keys").clicked() {
                     self.show_keybinds = !self.show_keybinds;
+                }
+                if ui
+                    .selectable_label(self.show_debugger, "Debugger")
+                    .on_hover_text(
+                        "Registers, disassembly, memory, and execution breakpoints. \
+                         Attaching steps one instruction at a time, which costs speed.",
+                    )
+                    .clicked()
+                {
+                    if let Some(action) = self.handle_chrome_action(ChromeAction::ToggleDebugger) {
+                        actions.push(action);
+                    }
                 }
                 if ui
                     .selectable_label(self.show_settings, "Settings")

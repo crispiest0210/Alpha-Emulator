@@ -172,6 +172,15 @@ pub fn frame_duration(platform: Platform) -> Duration {
     Duration::from_nanos((cycles * 1_000_000_000) / clock)
 }
 
+/// Emulated cycles in one video frame.
+///
+/// The debugger's stepping loop needs this: with a breakpoint check between instructions there is no
+/// `step_frame` to tell it when a frame ended, so it runs instructions until it has spent a frame's
+/// worth of cycles and then presents whatever the PPU has drawn.
+pub fn frame_cycles(platform: Platform) -> u64 {
+    clock_and_frame_cycles(platform).1
+}
+
 /// Frames per second, for display.
 pub fn frame_rate(platform: Platform) -> f64 {
     let (clock, cycles) = clock_and_frame_cycles(platform);

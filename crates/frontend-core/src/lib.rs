@@ -37,9 +37,16 @@
 //! [`config`] persists settings as TOML, [`catalog`] connects the SQLite library index to the
 //! cartridge headers, and [`platform`] is the one place that knows which system a file needs.
 //!
+//! The session also serves prompt 15's debugger: snapshots on request, instruction stepping, and
+//! execution breakpoints that halt — the last of those by stepping one instruction at a time while
+//! the debugger is attached and checking the registry between steps, so no system crate has a hook
+//! in its hot loop and a detached session runs exactly as it did.
+//!
 //! Not done: gamepad input (the keybind layer in [`input`] is keyboard-only by construction —
-//! [`input::PhysicalKey`] would need a sibling for pads), and touch input has a delivery path but
-//! no producer until prompt 13 gives it a DS to point at.
+//! [`input::PhysicalKey`] would need a sibling for pads); touch input has a delivery path but no
+//! producer until prompt 13 gives it a DS to point at; and while a breakpoint is set, joypad input is
+//! not delivered, because `InputState` applies to a whole frame and there is no per-instruction path
+//! to hand it through.
 //!
 //! # Dependency rule
 //!
@@ -76,6 +83,11 @@ pub use session::{
 /// Re-exported so a frontend needs one dependency for platform naming rather than reaching past
 /// this crate into `library` for an enum it uses in every match.
 pub use library::Platform;
+
+/// The debugger's snapshot types, for the same reason: the panel that renders them consumes this
+/// crate's session API, and making it depend on `debugger` separately would let it reach the
+/// registry the emulation thread owns.
+pub use debugger::{DisasmLine, MemoryRow, Request as DebugRequest, Snapshot as DebugSnapshot};
 
 #[cfg(test)]
 mod tests;
