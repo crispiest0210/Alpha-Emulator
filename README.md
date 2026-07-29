@@ -31,7 +31,7 @@ Component status:
 |---|---|
 | Workspace, `xtask`, CI, crate-boundary enforcement | done |
 | `core-common` — scheduler, bus, CPU/system traits | done |
-| `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
+| `savestate` — versioned format, `Savable`, rewind ring buffer | done; rewind verified against a running machine |
 | `cpu-sm83` — Game Boy CPU | complete; passes all Blargg CPU and timing suites |
 | `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete; passes `gba-suite`'s ARM and Thumb instruction ROMs |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |

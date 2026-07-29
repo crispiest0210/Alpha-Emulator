@@ -32,6 +32,10 @@
 
 #![deny(unsafe_code)]
 
+pub mod rewind;
+
+pub use rewind::{RewindBuffer, Snapshot};
+
 use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"ALPHAST1";

@@ -562,3 +562,61 @@ fn a_channel_with_its_length_counter_disabled_plays_indefinitely() {
         "nothing clocks the length counter, so the channel never expires"
     );
 }
+
+#[test]
+fn rewinding_a_running_machine_returns_it_to_where_it_was() {
+    // The acceptance test the rewind buffer exists for: it holds real save states of a real
+    // machine, and loading one puts that machine back. Unit-testing the ring on its own proves
+    // the bookkeeping; this proves the thing it is bookkeeping for.
+    use savestate::RewindBuffer;
+
+    let mut gb = system(COUNTER_PROGRAM);
+    let mut buffer = RewindBuffer::new(8, 2);
+
+    for frame in 0..12u64 {
+        if buffer.wants_snapshot() {
+            buffer.push(frame, gb.save_state());
+        } else {
+            buffer.frame_elapsed();
+        }
+        gb.step_frame(InputState::default());
+    }
+
+    let counter_now = read(&mut gb, 0xC000);
+    let snapshot = buffer.rewind().expect("there is history").clone();
+    gb.load_state(&snapshot.state).expect("the state is valid");
+    let counter_then = read(&mut gb, 0xC000);
+
+    assert_ne!(
+        counter_then, counter_now,
+        "the machine went back to an earlier moment"
+    );
+
+    // And running forward from there reaches the same place again, which is what makes rewind
+    // usable rather than merely a jump backwards.
+    let frames_to_replay = 12 - snapshot.frame;
+    for _ in 0..frames_to_replay {
+        gb.step_frame(InputState::default());
+    }
+    assert_eq!(read(&mut gb, 0xC000), counter_now);
+}
+
+#[test]
+fn a_rewind_buffer_can_walk_back_across_its_whole_depth_of_real_states() {
+    use savestate::RewindBuffer;
+
+    let mut gb = system(COUNTER_PROGRAM);
+    let mut buffer = RewindBuffer::new(4, 1);
+    for frame in 0..4u64 {
+        buffer.push(frame, gb.save_state());
+        gb.step_frame(InputState::default());
+    }
+
+    let mut seen = Vec::new();
+    while let Some(snapshot) = buffer.rewind() {
+        let state = snapshot.state.clone();
+        gb.load_state(&state).expect("every stored state loads");
+        seen.push(read(&mut gb, 0xC000));
+    }
+    assert_eq!(seen.len(), 3, "three steps back from the newest of four");
+}
