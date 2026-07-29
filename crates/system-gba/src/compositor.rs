@@ -23,6 +23,7 @@ use ppu_tile2d::{
 use crate::affine::AffineBackground;
 use crate::background::{Backgrounds, GbaTilemap};
 use crate::bitmap;
+use crate::effects::{BlendMode, Effects, Layer};
 use crate::objects::{ObjectAttributeMemory, ObjectMode};
 use crate::video::{dispcnt, VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -85,6 +86,7 @@ pub struct Frame<'a> {
     pub backgrounds: &'a Backgrounds,
     /// The two affine layers' matrices and accumulated positions, for layers 2 and 3.
     pub affine: &'a [AffineBackground; 2],
+    pub effects: &'a Effects,
     pub vram: &'a [u8],
     pub palette: &'a [u8],
     pub oam: &'a [u8],
@@ -159,6 +161,77 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let backdrop = palette.lookup_bg(0, 0);
     let row = framebuffer.row_mut(line);
     scanline.resolve_into(&palette, backdrop, row);
+    apply_effects(frame, line, &scanline, &palette, backdrop, row);
+}
+
+/// Mask out layers a window excludes, then blend what remains.
+///
+/// Runs after the line is resolved rather than during it, because both questions are about the
+/// *winning* pixel: which layer produced it, and what is behind it. Threading them through the
+/// per-layer draw would mean asking them once per layer per pixel instead of once per pixel.
+fn apply_effects(
+    frame: &Frame<'_>,
+    line: u32,
+    scanline: &ScanlineBuffer,
+    palette: &GbaPalette<'_>,
+    backdrop: Rgba8,
+    row: &mut [u8],
+) {
+    let windows = [
+        frame.video.dispcnt & (1 << 13) != 0,
+        frame.video.dispcnt & (1 << 14) != 0,
+        frame.video.dispcnt & (1 << 15) != 0,
+    ];
+    let mode = frame.effects.blend_mode();
+    if !windows[0] && !windows[1] && !windows[2] && mode == BlendMode::None {
+        return;
+    }
+
+    for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+        let indexed = scanline.get(x);
+        let layer = match indexed.source {
+            PixelSource::Sprite => Layer::Object,
+            PixelSource::Background => Layer::background(indexed.layer as usize),
+            PixelSource::Backdrop => Layer::Backdrop,
+        };
+
+        // The object window is a sprite's *shape* used as a region; sprites drawn into it are
+        // not yet distinguished from ordinary ones, so it is reported as never covering rather
+        // than as always covering — which would mask the whole screen.
+        let visible = frame.effects.visible_layers(x as u32, line, windows, false);
+        if visible & layer.bit() == 0 {
+            write_pixel(pixel, backdrop);
+            continue;
+        }
+
+        if mode == BlendMode::None || !frame.effects.is_first_target(layer) {
+            continue;
+        }
+        let top = Rgba8 {
+            r: pixel[0],
+            g: pixel[1],
+            b: pixel[2],
+            a: pixel[3],
+        };
+        // An alpha blend needs what is underneath. The scanline buffer keeps only the winning
+        // pixel, so the backdrop stands in — enough for the common case of a layer blended over
+        // the background colour, and honest about not being more than that.
+        let under = if mode == BlendMode::Alpha {
+            let _ = palette;
+            backdrop
+        } else {
+            top
+        };
+        write_pixel(pixel, frame.effects.blend(mode, top, under));
+    }
+}
+
+#[inline]
+fn write_pixel(out: &mut [u8], colour: Rgba8) {
+    out[0] = colour.r;
+    out[1] = colour.g;
+    out[2] = colour.b;
+    out[3] = colour.a;
 }
 
 fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut ScanlineBuffer) {
@@ -172,12 +245,15 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         width,
         height,
     };
-    let params = BackgroundParams::full_line(
-        line,
-        layer.scroll_x as u32,
-        layer.scroll_y as u32,
-        layer.bit_depth(),
-    );
+    let params = BackgroundParams {
+        layer: index as u8,
+        ..BackgroundParams::full_line(
+            line,
+            layer.scroll_x as u32,
+            layer.scroll_y as u32,
+            layer.bit_depth(),
+        )
+    };
     render_text_background(&map, frame.vram, &params, scanline);
 }
 
@@ -231,6 +307,7 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
                 color: colour,
                 palette: 0,
                 priority: layer.priority(),
+                layer: index as u8,
                 source: PixelSource::Background,
             },
         );

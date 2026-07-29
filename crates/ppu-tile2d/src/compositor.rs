@@ -90,6 +90,9 @@ pub struct BackgroundParams {
     pub map_width: u32,
     pub map_height: u32,
     pub depth: BitDepth,
+    /// Which layer this is, recorded on every pixel it draws. Zero for a system with one
+    /// background; see [`IndexedPixel::layer`](crate::IndexedPixel::layer).
+    pub layer: u8,
     /// Leftmost screen pixel to draw. Used by the Game Boy's window, which starts partway
     /// across the line.
     pub start_x: usize,
@@ -107,6 +110,7 @@ impl BackgroundParams {
             map_width: 32,
             map_height: 32,
             depth,
+            layer: 0,
             start_x: 0,
             origin_x: 0,
         }
@@ -157,6 +161,7 @@ pub fn render_text_background<M: TilemapSource>(
                 color: pixels[(source_x % 8) as usize],
                 palette: tile.palette,
                 priority: tile.priority,
+                layer: params.layer,
                 source: PixelSource::Background,
             },
         );
@@ -327,6 +332,7 @@ pub fn render_sprites(
                         color,
                         palette: sprite.palette,
                         priority: 0,
+                        layer: 0,
                         source: PixelSource::Sprite,
                     },
                 );

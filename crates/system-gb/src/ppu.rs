@@ -304,6 +304,8 @@ impl GbPpu {
             map_width: 32,
             map_height: 32,
             depth: BitDepth::Two,
+            // A Game Boy has one background, so there is no layer to distinguish.
+            layer: 0,
             start_x: start_x as usize,
             origin_x: start_x,
         };

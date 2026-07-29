@@ -110,6 +110,13 @@ pub struct IndexedPixel {
     pub palette: u8,
     /// Layer priority, lower in front. Used by systems that have more than one background.
     pub priority: u8,
+    /// Which layer drew this pixel, for systems whose effects are selected per layer.
+    ///
+    /// Distinct from `priority`, which two layers can share. The GBA's windows and colour
+    /// blending both ask "which layer is this?" of the *winning* pixel, and no combination of
+    /// the other fields answers it — a background at priority 2 and another at priority 2 are
+    /// indistinguishable without it. Zero on systems that have only one background.
+    pub layer: u8,
     pub source: PixelSource,
 }
 
@@ -233,6 +240,7 @@ mod tests {
     fn only_a_nonzero_background_pixel_hides_a_sprite_behind_it() {
         let opaque = IndexedPixel {
             color: 2,
+            layer: 0,
             source: PixelSource::Background,
             ..Default::default()
         };
@@ -241,6 +249,7 @@ mod tests {
         // Index 0 is the background's transparency, so a sprite shows through.
         let transparent = IndexedPixel {
             color: 0,
+            layer: 0,
             source: PixelSource::Background,
             ..Default::default()
         };
@@ -260,6 +269,7 @@ mod tests {
                 color: 3,
                 palette: 0,
                 priority: 0,
+                layer: 0,
                 source: PixelSource::Background,
             },
         );
@@ -285,6 +295,7 @@ mod tests {
             2,
             IndexedPixel {
                 color: 1,
+                layer: 0,
                 source: PixelSource::Sprite,
                 ..Default::default()
             },

@@ -24,9 +24,11 @@
 //!   on each other. Duplicating it is exactly the copy-paste this project avoids, so it wants
 //!   moving into `apu-shared` — and the obstacle is that three of its behaviours are gated on
 //!   `GbModel`, which would have to move too or be replaced by something narrower.
-//! - Windows and colour blending are implemented in [`effects`] and their registers are routed,
-//!   but the compositor does not consult them yet — the layer mask and the blend both need
-//!   applying per pixel as a line is resolved. Mosaic is not implemented at all.
+//! - Colour blending applies, but an alpha blend uses the backdrop as what lies underneath: the
+//!   scanline buffer keeps only the winning pixel, so the layer below it is not available.
+//!   That covers the common case of a layer blended over the background colour and nothing
+//!   more. The object window is likewise reported as never covering, since sprites drawn into
+//!   it are not yet distinguished. Mosaic is not implemented at all.
 //! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.

@@ -162,6 +162,7 @@ impl GbaSystemBus {
             video: &self.video,
             backgrounds: &self.backgrounds,
             affine: &self.affine,
+            effects: &self.effects,
             vram: self.memory.vram(),
             palette: self.memory.palette(),
             oam: self.memory.oam(),

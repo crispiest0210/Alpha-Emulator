@@ -10,6 +10,7 @@ struct Scene {
     video: VideoTiming,
     backgrounds: Backgrounds,
     affine: [crate::affine::AffineBackground; 2],
+    effects: crate::effects::Effects,
     vram: Vec<u8>,
     palette: Vec<u8>,
     oam: Vec<u8>,
@@ -23,6 +24,7 @@ impl Scene {
             video,
             backgrounds: Backgrounds::new(),
             affine: [crate::affine::AffineBackground::new(); 2],
+            effects: crate::effects::Effects::new(),
             vram: vec![0u8; 0x1_8000],
             palette: vec![0u8; 0x400],
             // Parked as hidden rather than zeroed: an all-zero OAM is 128 visible 8x8 sprites
@@ -65,6 +67,7 @@ impl Scene {
             video: &self.video,
             backgrounds: &self.backgrounds,
             affine: &self.affine,
+            effects: &self.effects,
             vram: &self.vram,
             palette: &self.palette,
             oam: &self.oam,
@@ -393,4 +396,83 @@ fn a_sprite_off_this_line_is_not_drawn() {
         0xFF,
         "but line 100 has it"
     );
+}
+
+// -- Windows and blending --------------------------------------------------
+
+#[test]
+fn a_window_masks_out_the_layers_it_excludes() {
+    // The layer that drew is masked away and the backdrop shows through, rather than the whole
+    // region being cleared.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+
+    // The layer draws one 8-pixel tile, so the window edge goes through the middle of it:
+    // x in 0..4 is inside, 4..8 is outside, and both halves are drawn pixels.
+    scene.effects.write16(ereg::WIN0H, 4);
+    scene.effects.write16(ereg::WIN0V, 160);
+    scene.effects.write16(ereg::WININ, Layer::Bg1.bit());
+    scene.effects.write16(ereg::WINOUT, Layer::Bg0.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    let framebuffer = scene.render(0);
+    assert_eq!(framebuffer.pixel(2, 0).b, 0xFF, "masked inside the window");
+    assert_eq!(framebuffer.pixel(6, 0).r, 0xFF, "and drawn outside it");
+}
+
+#[test]
+fn with_no_window_enabled_the_registers_are_not_consulted() {
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+    // A configuration that would mask everything, with the enable bits left clear.
+    scene.effects.write16(ereg::WININ, 0);
+    scene.effects.write16(ereg::WINOUT, Layer::Bg1.bit());
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "still drawn");
+}
+
+#[test]
+fn darkening_takes_the_selected_layer_toward_black() {
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+
+    let undarkened = scene.render(0).pixel(0, 0).r;
+    scene
+        .effects
+        .write16(ereg::BLDCNT, Layer::Bg0.bit() | (3 << 6));
+    scene.effects.write16(ereg::BLDY, 8); // half
+    let darkened = scene.render(0).pixel(0, 0).r;
+
+    assert_eq!(undarkened, 0xFF);
+    assert!(
+        darkened < undarkened,
+        "{darkened} should be below {undarkened}"
+    );
+}
+
+#[test]
+fn a_layer_that_is_not_a_blend_target_is_left_alone() {
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+    // Blending is on, but background 0 is not selected.
+    scene
+        .effects
+        .write16(ereg::BLDCNT, Layer::Bg1.bit() | (3 << 6));
+    scene.effects.write16(ereg::BLDY, 16);
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "untouched");
 }
