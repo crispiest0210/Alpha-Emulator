@@ -16,7 +16,7 @@ and tested**, not what is planned. It is updated as work lands.
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ❌ | ❌ | ❌ | PPU renders in colour: per-tile palettes, banked tile data, CGB sprite priority. Speed switch and HDMA not yet driven; no `System` impl |
+| Game Boy Color | ✅ | ⚠️ | ❌ | Assembled and running: colour rendering, `KEY1` double speed, both VRAM DMA modes, DMG-compatibility mode. **No CGB accuracy ROMs run yet** |
 | Game Boy Advance | ❌ | ❌ | ❌ | CPU core done; no memory map, PPU, or APU yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
@@ -45,7 +45,8 @@ Component status:
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
-| `system-gbc` — CGB palette RAM, `KEY1` speed switch, HDMA, model detection | units done and tested; PPU renders full CGB colour. **Speed switch and HDMA not yet driven; no `System` impl** |
+| `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
+| `system-gbc` — `System` impl, model selection, compatibility boot | done; **no CGB accuracy ROMs in the corpus yet** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
 | Everything else | not started |
@@ -91,8 +92,13 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-The ARM cores have not been run against anything: `arm7wrestler` and `gba-suite` are not in
-the corpus yet, and there is no GBA system to run them on.
+The Game Boy Color has no accuracy coverage at all yet: `cgb-acid2` and the Mooneye CGB suite
+are not in the corpus, so colour rendering, the speed switch, and VRAM DMA are checked against
+hardware documentation and unit tests rather than against a reference implementation. That is
+the single largest gap in the project's testing right now.
+
+The ARM cores have not been run against anything either: `arm7wrestler` and `gba-suite` are not
+in the corpus yet, and there is no GBA system to run them on.
 
 ## Setup
 
@@ -134,6 +140,10 @@ cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
 cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
 ```
+
+A `.gb` file runs on Game Boy hardware and a `.gbc` file on Game Boy Color hardware; what the
+cartridge header says decides whether a colour machine runs in full colour or in
+DMG-compatibility mode.
 
 `run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
 printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N

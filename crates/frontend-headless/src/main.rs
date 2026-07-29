@@ -98,8 +98,17 @@ fn load(path: &Path) -> Result<Box<dyn System>> {
         .with_context(|| format!("could not read the ROM at {}", path.display()))?;
 
     match path.extension().and_then(|e| e.to_str()) {
-        Some("gb") | Some("gbc") => {
+        // A `.gb` file may still be a CGB-enhanced cartridge and a `.gbc` file may be a plain
+        // DMG one, so the extension only chooses the *hardware*; the header inside chooses the
+        // mode. That is `GbcSystem`'s job, which is why `.gbc` does not get a different branch
+        // so much as different hardware to run on.
+        Some("gb") => {
             let system = system_gb::GbSystem::new(bytes, None)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            Ok(Box::new(system))
+        }
+        Some("gbc") => {
+            let system = system_gbc::GbcSystem::new(bytes, None)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
             Ok(Box::new(system))
         }

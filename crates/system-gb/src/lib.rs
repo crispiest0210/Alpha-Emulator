@@ -14,13 +14,14 @@
 //! these components rather than forking them. Concretely, [`ppu::GbPpu::render_scanline_with`]
 //! takes the palette source and the model, so one renderer produces both pictures.
 //!
-//! What is *not* here is anything a DMG has no concept of: colour palette RAM, the `KEY1`
-//! speed switch, and VRAM DMA all live in `system-gbc`.
+//! The CGB-only register blocks — colour palette RAM, the `KEY1` speed switch, VRAM DMA — are
+//! in [`cgb`], which explains why they are here rather than in `system-gbc`. What is left to
+//! that crate is the assembled machine and the boot path that recolours a DMG cartridge.
 
 #![deny(unsafe_code)]
 
 pub mod apu;
-pub mod attributes;
+pub mod cgb;
 pub mod joypad;
 pub mod memory;
 pub mod ppu;
@@ -28,7 +29,7 @@ pub mod system;
 pub mod timing;
 
 pub use apu::GbApu;
-pub use attributes::TileAttributes;
+pub use cgb::{CgbPalettes, CgbState, GbcCompatibilityShades, Hdma, SpeedSwitch, TileAttributes};
 pub use joypad::Joypad;
 pub use memory::{GbBus, GbModel};
 pub use ppu::GbPpu;

@@ -35,13 +35,14 @@ use core_common::{
 use cpu_sm83::Sm83;
 
 use crate::apu::GbApu;
+use crate::cgb::CgbState;
 use crate::joypad::{Joypad, JOYP};
 use crate::memory::{io, GbBus, GbModel};
 use crate::ppu::{self, GbPpu};
 use crate::timing::{interrupt, reg as timing_reg, GbTiming, TimingOutput, CLOCK_HZ};
 
 /// Bumped on any change to what this system serializes, including in a subsystem it owns.
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 /// Everything the CPU can reach, plus the subsystems that run on their own schedule.
 pub struct GbSystemBus {
@@ -50,6 +51,8 @@ pub struct GbSystemBus {
     pub ppu: GbPpu,
     pub apu: GbApu,
     pub joypad: Joypad,
+    /// The CGB-only register blocks. Inert on a DMG, where nothing routes to them.
+    pub cgb: CgbState,
 
     /// Bytes the game has pushed out of the serial port.
     ///
@@ -57,6 +60,9 @@ pub struct GbSystemBus {
     /// Blargg's test ROMs report their results, so the harness reads it. Kept out of save
     /// states: it is captured output, not machine state.
     pub serial_output: Vec<u8>,
+
+    /// Cycles owed to the machine when a double-speed halving did not divide evenly.
+    speed_remainder: u64,
 
     /// Event results accumulated since the frame loop last collected them.
     ///
@@ -81,7 +87,9 @@ impl GbSystemBus {
             ppu: GbPpu::new(),
             apu: GbApu::new(),
             joypad: Joypad::new(),
+            cgb: CgbState::new(),
             serial_output: Vec::new(),
+            speed_remainder: 0,
             pending: TimingOutput::default(),
         }
     }
@@ -97,6 +105,40 @@ impl GbSystemBus {
         for offset in 0..OAM_BYTES {
             let byte = self.read8(source + offset as u32);
             self.memory.oam_mut()[offset as usize] = byte;
+        }
+    }
+
+    /// Run a general-purpose VRAM DMA to completion.
+    ///
+    /// The CPU is stopped for the duration on hardware, which is why a game only starts one of
+    /// these during vertical blank. Copying it all at once is the same trade the OAM DMA above
+    /// makes: the bytes that land are identical, and only code that reads VRAM mid-transfer
+    /// could tell — and that code cannot run, because the CPU is stopped.
+    fn vram_dma_all(&mut self) {
+        while let Some(block) = self.cgb.hdma.take_block() {
+            self.copy_dma_block(block);
+        }
+    }
+
+    /// Move one 16-byte block, then charge the time it took.
+    fn copy_dma_block(&mut self, block: crate::cgb::Block) {
+        for offset in 0..block.length {
+            let byte = self.read8((block.source + offset) as u32);
+            self.write8((block.destination + offset) as u32, byte);
+        }
+        // Eight machine cycles per block at single speed. It is charged rather than ignored
+        // because a game that streams a tile set during HBlank is budgeting against it: an
+        // instant transfer would let it fit work in the line that hardware would not.
+        self.advance(Cycles(32));
+    }
+
+    /// Called when the PPU enters horizontal blank, where a streaming transfer moves one block.
+    fn vram_dma_hblank(&mut self) {
+        if !self.memory.model.has_cgb_hardware() || !self.cgb.hdma.is_hblank_pending() {
+            return;
+        }
+        if let Some(block) = self.cgb.hdma.take_block() {
+            self.copy_dma_block(block);
         }
     }
 
@@ -127,7 +169,17 @@ impl GbSystemBus {
             // Composite with the registers as they are *now*, which is what makes a mid-frame
             // scroll change split the raster.
             let (vram, oam) = self.memory.vram_and_oam();
-            self.ppu.render_scanline(line, vram, oam);
+            let model = self.memory.model;
+            if model.uses_colour_palettes() {
+                let palettes = self.cgb.palettes.clone();
+                self.ppu
+                    .render_scanline_with(model, line, vram, oam, &palettes);
+            } else {
+                self.ppu.render_scanline(line, vram, oam);
+            }
+            // A line finishing its drawing period *is* the entry into horizontal blank, which
+            // is the moment a streaming VRAM transfer moves its next block.
+            self.vram_dma_hblank();
         }
         out
     }
@@ -147,6 +199,10 @@ impl Bus for GbSystemBus {
                 .read_register(addr16)
                 .unwrap_or_else(|| self.memory.read8(addr)),
             OAM_DMA => self.memory.read8(addr),
+            _ if self.memory.model.has_cgb_hardware() && CgbState::owns(addr16) => self
+                .cgb
+                .read_register(addr16)
+                .unwrap_or_else(|| self.memory.read8(addr)),
             timing_reg::STAT | timing_reg::LY | timing_reg::LYC => self
                 .timing
                 .read_register(addr16)
@@ -190,6 +246,11 @@ impl Bus for GbSystemBus {
                 self.memory.write8(addr, value);
                 self.oam_dma(value);
             }
+            _ if self.memory.model.has_cgb_hardware() && CgbState::owns(addr16) => {
+                if self.cgb.write_register(addr16, value) {
+                    self.vram_dma_all();
+                }
+            }
             // The one address with two owners: the PPU takes the layer bits and the timing
             // state machine takes the LCD-enable bit.
             timing_reg::LCDC => {
@@ -222,7 +283,20 @@ impl Bus for GbSystemBus {
     /// Charging an instruction's cost at its end is what Blargg's `mem_timing` suite detects;
     /// draining here is what makes the fix real rather than cosmetic.
     fn tick(&mut self, cycles: Cycles) {
-        self.advance(cycles);
+        // In double-speed mode the CPU runs twice as fast and *nothing else does*. So the
+        // machine advances half as far per CPU cycle, rather than every scheduled interval
+        // being halved — model it the other way round and the timer, the frame sequencer, and
+        // the PPU all double their rates too, which is the bug this arrangement avoids.
+        //
+        // Every SM83 access is four t-cycles, so the halving is exact and the remainder below
+        // stays at zero on real code paths. It is carried anyway, because silently dropping a
+        // cycle would show up as slow clock drift that is very hard to trace back to here.
+        let divisor = self.cgb.speed.cpu_multiplier();
+        let total = cycles.get() + self.speed_remainder;
+        self.speed_remainder = total % divisor;
+        let advanced = total / divisor;
+
+        self.advance(Cycles(advanced));
         let out = self.service_events();
         self.pending.frame_ready |= out.frame_ready;
     }
@@ -243,6 +317,11 @@ impl Savable for GbSystemBus {
         self.ppu.save(w);
         self.apu.save(w);
         self.joypad.save(w);
+        // Written unconditionally, including on a DMG where it is inert. Making the payload
+        // depend on the model would mean a state file whose shape you cannot know until you
+        // have already read part of it.
+        self.cgb.save(w);
+        w.write_u64(self.speed_remainder);
     }
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.memory.load(r)?;
@@ -250,6 +329,8 @@ impl Savable for GbSystemBus {
         self.ppu.load(r)?;
         self.apu.load(r)?;
         self.joypad.load(r)?;
+        self.cgb.load(r)?;
+        self.speed_remainder = r.read_u64()?;
         Ok(())
     }
 }
@@ -270,12 +351,25 @@ impl GbSystem {
     /// state, so a ROM runs immediately. With one, execution starts at `0x0000` and the ROM
     /// scrolls the logo and hands over exactly as hardware does.
     pub fn new(rom: Vec<u8>, boot_rom: Option<Vec<u8>>) -> Result<Self, CartridgeError> {
+        Self::with_model(rom, boot_rom, GbModel::Dmg)
+    }
+
+    /// Build the machine for a specific model.
+    ///
+    /// `system-gbc` calls this with [`GbModel::for_cartridge`] rather than assembling a second
+    /// system: a Game Boy Color is this machine with more banks, a second palette path, and a
+    /// faster clock, and every one of those is already a branch inside these components.
+    pub fn with_model(
+        rom: Vec<u8>,
+        boot_rom: Option<Vec<u8>>,
+        model: GbModel,
+    ) -> Result<Self, CartridgeError> {
         let header = GbHeader::parse(&rom)?;
         let mapper = create_mapper(rom, &header)?;
 
         let mut system = Self {
             cpu: Sm83::new(),
-            bus: GbSystemBus::new(GbModel::Dmg, mapper),
+            bus: GbSystemBus::new(model, mapper),
             boot_rom,
             save_ram_dirty: false,
         };
@@ -360,6 +454,27 @@ impl GbSystem {
     }
 }
 
+impl GbSystem {
+    /// Turn a `STOP` into a speed switch when one is armed.
+    ///
+    /// `STOP` means two unrelated things on a CGB and the machine tells them apart by whether
+    /// `KEY1` bit 0 was set beforehand: armed, it changes the CPU clock and execution resumes;
+    /// unarmed, it is the DMG's low-power mode and the CPU waits for a joypad line. The CPU
+    /// core cannot make that distinction — `KEY1` is not its register — so it always stops and
+    /// the machine decides here what the stop meant.
+    fn resolve_stop(&mut self) {
+        if !self.cpu.is_stopped() || !self.bus.memory.model.has_cgb_hardware() {
+            return;
+        }
+        if let Some(stall) = self.bus.cgb.speed.switch() {
+            // The CPU is held while the clock relocks. Games enter the switch with interrupts
+            // disabled and time the gap, so it has to be charged rather than skipped.
+            self.bus.advance(Cycles(stall));
+            self.cpu.clear_stop();
+        }
+    }
+}
+
 impl System for GbSystem {
     fn id(&self) -> &'static str {
         "gb"
@@ -414,6 +529,7 @@ impl System for GbSystem {
         // event that should have interrupted it.
         loop {
             self.cpu.step(&mut self.bus);
+            self.resolve_stop();
             if self.bus.take_pending().frame_ready || self.bus.timing.now() >= deadline {
                 break;
             }

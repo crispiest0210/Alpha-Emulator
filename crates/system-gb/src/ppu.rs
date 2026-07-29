@@ -20,7 +20,7 @@
 //! write to both. That is deliberate duplication of a *read*, not of state: neither module
 //! stores the other's fields.
 
-use crate::attributes::TileAttributes;
+use crate::cgb::TileAttributes;
 use crate::memory::{self, GbModel};
 use core_common::{Framebuffer, Rgba8, Savable, StateError, StateReader, StateWriter};
 use ppu_tile2d::{
