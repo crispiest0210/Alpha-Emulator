@@ -6,41 +6,42 @@
 //!
 //! # Status
 //!
-//! Three subsystems are complete and tested; nothing is assembled yet, so this crate does not
-//! run a ROM.
+//! **The machine runs.** A cartridge boots, the display renders through the compositor, DMA and
+//! timers drive the sound FIFOs, and interrupts reach the game's handler with or without a BIOS.
+//! A save state round-trips frame-exactly and two runs of the same ROM are identical.
 //!
-//! | Done | Not started |
-//! |---|---|
-//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Affine backgrounds (the matrix registers and their per-line accumulation) |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Affine layers and affine sprites in the compositor |
-//! | [`timers`] — four channels, prescalers, cascade | Windows and colour blending |
-//! | [`dma`] — four channels, all trigger modes, priority | APU: four PSG channels plus two DMA-fed FIFOs |
-//! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Wait-state timing (`WAITCNT`) |
-//! | [`bitmap`] — modes 3, 4, and 5 | Cartridge wiring and the `System` impl |
-//! | [`background`] — the four text layers, map decode, draw order | |
-//! | [`objects`] — OAM decode, sizes, per-line selection, matrices | |
-//! | [`affine`] — the transform for rotated backgrounds and sprites | |
-//! | [`fifo`] — the two DMA-fed direct-sound channels | |
-//! | [`waitstates`] — `WAITCNT` and per-region access cost | |
-//! | [`compositor`] — layer selection, priority, palette, backdrop | |
+//! What is not done, in rough order of how much it matters:
+//!
+//! - **No accuracy coverage.** `gba-suite` and `arm7wrestler` are not in the corpus, so
+//!   everything here rests on hardware documentation and unit tests. They also exercise the ARM
+//!   core, which has never been run against anything — worth doing both together.
+//! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
+//!   show the backdrop rather than an untransformed approximation.
+//! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access
+//!   currently costs what the ARM core says it does.
+//! - The four `apu-shared` PSG channels are not mixed in alongside the two FIFO channels.
+//! - Windows, colour blending, and mosaic are not implemented.
+//! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
+//! - Keypad input is not wired to `KEYINPUT`.
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
-//! core never had". Nothing here has been run against `gba-suite` or `arm7wrestler` yet — the
-//! ARM core they exercise has never been run against them either, and it will be worth doing
-//! both together once there is a machine to run them on.
+//! core never had". The second half of that is met; the first is unmeasured until the accuracy
+//! ROMs land.
 
 #![deny(unsafe_code)]
 
 pub mod affine;
 pub mod background;
 pub mod bitmap;
+pub mod cartridge;
 pub mod compositor;
 pub mod dma;
 pub mod fifo;
 pub mod irq;
 pub mod memory;
 pub mod objects;
+pub mod system;
 pub mod timers;
 pub mod video;
 pub mod waitstates;
@@ -48,12 +49,14 @@ pub mod waitstates;
 pub use affine::AffineBackground;
 pub use background::{Backgrounds, GbaTilemap};
 pub use bitmap::bgr555_to_rgba8;
+pub use cartridge::Cartridge;
 pub use compositor::{Frame, GbaPalette};
 pub use dma::DmaController;
 pub use fifo::{DirectSound, SoundFifo};
 pub use irq::InterruptController;
 pub use memory::{GbaBus, Region};
 pub use objects::{Object, ObjectAttributeMemory};
+pub use system::{GbaSystem, GbaSystemBus};
 pub use timers::Timers;
 pub use video::VideoTiming;
 pub use waitstates::{Access, WaitControl};

@@ -90,9 +90,9 @@ fn main() -> Result<()> {
 
 /// Build the right system for a ROM.
 ///
-/// Only the Game Boy family is assembled so far. The others are named explicitly rather than
-/// swept into one "unsupported" arm, so the error says which system a ROM needs instead of
-/// leaving the user to wonder whether their file is corrupt.
+/// The Nintendo DS is named explicitly rather than swept into one "unsupported" arm, so the
+/// error says which system a ROM needs instead of leaving the user to wonder whether their file
+/// is corrupt.
 fn load(path: &Path) -> Result<Box<dyn System>> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("could not read the ROM at {}", path.display()))?;
@@ -112,7 +112,11 @@ fn load(path: &Path) -> Result<Box<dyn System>> {
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
             Ok(Box::new(system))
         }
-        Some("gba") => bail!("the Game Boy Advance system is not assembled yet (prompt 12)"),
+        Some("gba") => {
+            let system = system_gba::GbaSystem::new(bytes, None)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            Ok(Box::new(system))
+        }
         Some("nds") => bail!("the Nintendo DS system is not assembled yet (prompt 13)"),
         other => bail!(
             "unrecognised ROM extension {:?}; expected .gb, .gbc, .gba, or .nds",

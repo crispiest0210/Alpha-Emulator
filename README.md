@@ -17,10 +17,10 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ❌ | ❌ | ❌ | Every subsystem done and tested as a unit, including a working scanline compositor. **Not assembled** — no bus, no cartridge wiring, no `System` impl, so it does not run a ROM |
+| Game Boy Advance | ✅ | ❌ | ❌ | Assembled and running: boots a cartridge, renders, DMA and timers drive audio, interrupts work without a BIOS. **No accuracy ROMs run yet**; no affine compositing, no PSG mixing, no keypad |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
-**The Game Boy core runs ROMs; the GUI does not yet.** The emulation core boots cartridges,
+**Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
 renders frames, and produces audio — that is what the accuracy suite below drives it through.
 What is missing is the frontend that connects it to a window: `cargo xtask dev` still opens an
 empty one. Wiring the two together is prompt 14.
@@ -58,6 +58,8 @@ Component status:
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done and tested; not yet charged to the CPU |
 | `system-gba` compositor — mode layers, priority, palette, sprites | text layers, bitmap modes, and non-affine sprites draw; **affine layers and sprites not yet composited** |
+| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
+| `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | Everything else | not started |
 
 ### Accuracy suite
@@ -110,13 +112,17 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
+The Game Boy Advance has no accuracy coverage at all: `gba-suite` and `arm7wrestler` are not in
+the corpus. They would also be the first test of the ARM7TDMI core, which has never been run
+against anything — the two are worth doing together, and this is now the project's largest
+testing hole.
+
 The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
 hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU
 and the boot path, but validating cgb-acid2's output is what would cover the PPU. The Mooneye
 CGB suite is not in the corpus yet either.
 
-The ARM cores have not been run against anything either: `arm7wrestler` and `gba-suite` are not
-in the corpus yet, and there is no GBA system to run them on.
+There is now a GBA to run them on, which there was not before.
 
 ## Setup
 
