@@ -560,3 +560,102 @@ impl TestableSystem for system_gbc::GbcSystem {
         self.inner_mut().bus_mut().read8(addr)
     }
 }
+
+/// Run a `gba-suite` ROM.
+///
+/// Its convention is to leave the number of the failing sub-test in `r12` and spin, or zero if
+/// every one passed. There is no serial port and nothing written to memory, so "has it
+/// finished" is answered by the CPU no longer making progress — the program counter settling
+/// into the same place frame after frame.
+pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32) -> TestOutcome {
+    let register = |system: &S, name: &str| -> u64 {
+        system
+            .cpu_registers()
+            .iter()
+            .find(|r| r.name == name)
+            .map_or(0, |r| r.value)
+    };
+
+    let mut previous_pc = u64::MAX;
+    let mut settled = 0;
+
+    for frame in 1..=max_frames {
+        system.step_frame(InputState::default());
+        let pc = register(system, "PC");
+
+        // Three frames in the same place is a spin, not a slow test.
+        if pc == previous_pc {
+            settled += 1;
+        } else {
+            settled = 0;
+            previous_pc = pc;
+        }
+        if settled < 3 {
+            continue;
+        }
+
+        let failed = register(system, "R12");
+        return if failed == 0 {
+            TestOutcome::Passed {
+                report: "all sub-tests passed".into(),
+                frames: frame,
+            }
+        } else {
+            TestOutcome::Failed {
+                report: format!("sub-test {failed} failed"),
+                frames: frame,
+            }
+        };
+    }
+
+    TestOutcome::TimedOut {
+        report: format!("still running after {max_frames} frames"),
+        frames: max_frames,
+    }
+}
+
+impl TestableSystem for system_gba::GbaSystem {
+    fn serial_output(&self) -> &[u8] {
+        // The GBA's link port is not wired up, and no GBA test ROM reports through it.
+        &[]
+    }
+
+    fn cpu_registers(&self) -> Vec<RegisterValue> {
+        let cpu = self.cpu();
+        let mut out: Vec<RegisterValue> = (0..15)
+            .map(|index| RegisterValue {
+                name: REGISTER_NAMES[index],
+                value: cpu.reg(index) as u64,
+                width_bits: 32,
+            })
+            .collect();
+        out.push(RegisterValue {
+            name: "PC",
+            value: cpu.regs.pc() as u64,
+            width_bits: 32,
+        });
+        out
+    }
+
+    fn debug_state(&self) -> String {
+        let cpu = self.cpu();
+        format!(
+            "pc={:#010X} r12={:#010X} mode={:?} thumb={} halted={}",
+            cpu.regs.pc(),
+            cpu.reg(12),
+            cpu.mode(),
+            cpu.is_thumb(),
+            cpu.is_halted(),
+        )
+    }
+
+    fn read_byte(&mut self, addr: u32) -> u8 {
+        use core_common::Bus;
+        self.bus_mut().read8(addr)
+    }
+}
+
+/// `R0` through `R14`, for the register dump above.
+const REGISTER_NAMES: [&str; 15] = [
+    "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14",
+];

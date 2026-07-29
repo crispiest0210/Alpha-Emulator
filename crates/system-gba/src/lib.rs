@@ -12,9 +12,10 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **No accuracy coverage.** `gba-suite` and `arm7wrestler` are not in the corpus, so
-//!   everything here rests on hardware documentation and unit tests. They also exercise the ARM
-//!   core, which has never been run against anything — worth doing both together.
+//! - **All three `gba-suite` ROMs fail.** The CPU runs off into the OAM mirror around
+//!   `0x07F83000` and spins, so the reported sub-test number is garbage. This is the ARM7TDMI
+//!   core's first contact with a reference suite, so a genuine core bug is at least as likely
+//!   as a wiring problem. It is the most valuable open failure in the project.
 //! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
 //!   show the backdrop rather than an untransformed approximation.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access

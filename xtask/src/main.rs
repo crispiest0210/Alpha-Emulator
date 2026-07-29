@@ -369,6 +369,19 @@ const TEST_ROMS: &[(&str, &str)] = &[
         "gbc/blargg/cgb_sound.gb",
         "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cgb_sound/cgb_sound.gb",
     ),
+    // Game Boy Advance. Also the first real test of the ARM7TDMI core.
+    (
+        "gba/gba-suite/arm.gba",
+        "https://github.com/jsmolka/gba-tests/raw/master/arm/arm.gba",
+    ),
+    (
+        "gba/gba-suite/thumb.gba",
+        "https://github.com/jsmolka/gba-tests/raw/master/thumb/thumb.gba",
+    ),
+    (
+        "gba/gba-suite/memory.gba",
+        "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
+    ),
 ];
 
 /// The workspace root, found from this crate rather than the current directory.

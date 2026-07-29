@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ✅ | ❌ | ❌ | Assembled and running: boots a cartridge, renders, DMA and timers drive audio, interrupts work without a BIOS. **No accuracy ROMs run yet**; no affine compositing, no PSG mixing, no keypad |
+| Game Boy Advance | ✅ | ❌ | ❌ | Assembled and running, but **fails all three `gba-suite` ROMs** — the CPU runs off into unmapped memory. See below |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
@@ -80,6 +80,7 @@ Current Game Boy results:
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
+| `gba-suite` arm, thumb, memory | fail — see below |
 | dmg-acid2, cgb-acid2 | render and complete, but unvalidated — see below |
 
 Open gaps, each tracked with the specific reason:
@@ -112,10 +113,12 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-The Game Boy Advance has no accuracy coverage at all: `gba-suite` and `arm7wrestler` are not in
-the corpus. They would also be the first test of the ARM7TDMI core, which has never been run
-against anything — the two are worth doing together, and this is now the project's largest
-testing hole.
+**The GBA's three `gba-suite` ROMs all fail, and they are the most valuable failures in the
+project right now.** The CPU runs off into the OAM mirror around `0x07F83000` and spins there,
+so the reported sub-test number is garbage rather than a real result. This is the ARM7TDMI
+core's first contact with a reference suite — it passed its own unit tests but had never been
+run against one — so a genuine core bug is at least as likely as a wiring problem. Tracing the
+first branch away from the cartridge entry point is where to start.
 
 The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
 hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU

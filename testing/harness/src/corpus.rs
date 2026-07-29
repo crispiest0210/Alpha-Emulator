@@ -25,6 +25,9 @@ pub enum Convention {
     Mooneye,
     /// The rendered picture is the result; compare against a snapshot.
     Framebuffer,
+    /// `gba-suite`'s convention: run until the CPU stops making progress, then read `r12`.
+    /// Zero means every sub-test passed; anything else is the number of the one that failed.
+    GbaSuite,
 }
 
 /// One fetchable ROM.
@@ -34,6 +37,8 @@ pub enum Hardware {
     Dmg,
     /// Game Boy Color. The cartridge header still decides colour versus compatibility mode.
     Cgb,
+    /// Game Boy Advance.
+    Gba,
 }
 
 pub struct TestRom {
@@ -508,6 +513,54 @@ pub const CGB_ROMS: &[TestRom] = &[
              means stepping the APU finer than one machine cycle",
         ),
         licence: "public domain (Shay Green / blargg)",
+    },
+];
+
+/// Game Boy Advance ROMs.
+///
+/// `gba-suite` is the first accuracy coverage this project has for either the GBA or the
+/// ARM7TDMI core underneath it — the CPU passed its own unit tests but had never been run
+/// against a reference. Its sub-suites are separate ROMs so a failure names the instruction
+/// class rather than only "the CPU".
+pub const GBA_ROMS: &[TestRom] = &[
+    TestRom {
+        name: "gba_suite_arm",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/arm/arm.gba",
+        path: "gba/gba-suite/arm.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_thumb",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/thumb/thumb.gba",
+        path: "gba/gba-suite/thumb.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_memory",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
+        path: "gba/gba-suite/memory.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "the CPU runs off into the OAM mirror at around 0x07F83000 and spins there, so the r12 value is garbage rather than a sub-test number. This is the ARM7TDMI core's first contact with a reference suite — it passed its own unit tests but had never been run against one — so a genuine core bug is at least as likely as a wiring problem. Start by tracing the first branch away from the cartridge entry point",
+        ),
+        licence: "MIT (Julian Smolka)",
     },
 ];
 

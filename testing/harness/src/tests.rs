@@ -6,7 +6,8 @@
 
 use super::*;
 use crate::corpus::{
-    Convention, Hardware, TestRom, CGB_ROMS, GB_CPU_INSTRS_SUBTESTS, GB_DMG_SOUND_SINGLES, GB_ROMS,
+    Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
+    GB_DMG_SOUND_SINGLES, GB_ROMS,
 };
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
@@ -466,6 +467,10 @@ fn run_gb_rom(rom: &TestRom) -> Option<(TestOutcome, String)> {
             let system = system_gbc::GbcSystem::new(bytes, None).expect("the ROM parses");
             run_on(rom, system)
         }
+        Hardware::Gba => {
+            let system = system_gba::GbaSystem::new(bytes, None).expect("the ROM parses");
+            run_on(rom, system)
+        }
     }
 }
 
@@ -478,6 +483,7 @@ fn run_on<S: TestableSystem>(rom: &TestRom, mut system: S) -> Option<(TestOutcom
         Convention::BlarggSerial => run_blargg_serial(&mut system, rom.max_frames),
         Convention::BlarggMemory => run_blargg_memory(&mut system, rom.max_frames),
         Convention::Mooneye => run_mooneye(&mut system, rom.max_frames),
+        Convention::GbaSuite => run_gba_suite(&mut system, rom.max_frames),
         Convention::Framebuffer => {
             let framebuffer = capture_framebuffer(&mut system, rom.max_frames);
             let hash = framebuffer_hash(&framebuffer);
@@ -525,6 +531,7 @@ fn gb_accuracy_suite() {
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
         .chain(CGB_ROMS)
+        .chain(GBA_ROMS)
     {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);
