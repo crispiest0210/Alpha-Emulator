@@ -11,10 +11,12 @@
 //!
 //! | Done | Not started |
 //! |---|---|
-//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | PPU (tile modes 0-2, bitmap modes 3-5, affine) |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | APU (four PSG channels plus two DMA-fed FIFOs) |
-//! | [`timers`] — four channels, prescalers, cascade | Wait-state timing (`WAITCNT`) |
-//! | [`dma`] — four channels, all trigger modes, priority | Cartridge wiring and the `System` impl |
+//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Tile modes 0-2, including affine backgrounds |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Sprites, windows, and colour blending |
+//! | [`timers`] — four channels, prescalers, cascade | APU: four PSG channels plus two DMA-fed FIFOs |
+//! | [`dma`] — four channels, all trigger modes, priority | Wait-state timing (`WAITCNT`) |
+//! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Cartridge wiring and the `System` impl |
+//! | [`bitmap`] — modes 3, 4, and 5 | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -24,12 +26,16 @@
 
 #![deny(unsafe_code)]
 
+pub mod bitmap;
 pub mod dma;
 pub mod irq;
 pub mod memory;
 pub mod timers;
+pub mod video;
 
+pub use bitmap::bgr555_to_rgba8;
 pub use dma::DmaController;
 pub use irq::InterruptController;
 pub use memory::{GbaBus, Region};
 pub use timers::Timers;
+pub use video::VideoTiming;
