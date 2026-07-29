@@ -17,6 +17,20 @@ stricter than a fresh project would need: each one is a mistake already paid for
 
 ## Standing workflow
 
+**Keep working until a limit actually forces a stop.** Not until a task feels finished, not at a
+tidy-looking boundary, and not on a guess about how much budget is left. When one of the two
+budgets — the context window or the session token allowance — is genuinely close to exhausted,
+*then* run the handoff below. Until then, pick up the next piece.
+
+Two things follow from that:
+
+- **Do not estimate remaining context; read it.** Estimates in this project have been wrong by
+  thirty points in both directions, and stopping early on a bad guess wastes a whole session's
+  worth of budget. `/context` is the measurement.
+- **The two budgets are different.** Context is this window and refills on a new session; the
+  session token allowance is cumulative spend and does not. Whichever is closer to its limit is
+  the one that decides when to stop.
+
 **Every time you stop developing — end of a chunk, a natural pause, running low on budget, the
 user changing subject — update all affected documentation, then `git add`/`commit`/`push`.**
 This is not something to ask about. It is part of "done", like passing tests.
@@ -29,6 +43,9 @@ Affected documentation means every surface making a claim the change just falsif
   `.github/workflows/ci.yml`; those three must move together)
 - Crate-level `//!` docs, especially their Status sections
 - `testing/harness/src/corpus.rs` — `expected_failure` notes, added or removed
+
+When the stop is forced by the *context* limit specifically, also leave a handoff prompt for
+the next session naming the exact next piece of work — see the end of this file for the shape.
 
 The one exception is a half-finished refactor: finish or revert it first. A non-compiling tree
 cannot be handed off at all, and a half-threaded type parameter is invisible to every artifact
