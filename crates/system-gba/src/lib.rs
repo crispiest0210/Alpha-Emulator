@@ -12,9 +12,8 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **`gba-suite`'s Thumb ROM passes**; `memory` fails sub-test 3 and `arm` runs off into
-//!   unmapped memory in FIQ mode. Given the other two pass or report cleanly, `arm`'s failure
-//!   points at the exception path rather than at broad decoding.
+//! - **`gba-suite`'s ARM and Thumb ROMs pass.** `memory` fails sub-test 3 and reports cleanly,
+//!   so that is a specific memory-access behaviour rather than anything structural.
 //! - Affine backgrounds and affine sprites are decoded and transformed but not composited; they
 //!   show the backdrop rather than an untransformed approximation.
 //! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access

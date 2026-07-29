@@ -24,6 +24,9 @@ budgets — the context window or the session token allowance — is genuinely c
 
 Two things follow from that:
 
+- **Keep tool output small.** Pipe through `head`, `tail`, or `grep`; never `cat` a large file
+  — use `Read` with an offset. Bash results are one of the biggest consumers of the window, and
+  every wasted line is a line of real work that does not happen later in the session.
 - **Do not estimate remaining context; read it.** Estimates in this project have been wrong by
   thirty points in both directions, and stopping early on a bad guess wastes a whole session's
   worth of budget. `/context` is the measurement.
@@ -44,8 +47,12 @@ Affected documentation means every surface making a claim the change just falsif
 - Crate-level `//!` docs, especially their Status sections
 - `testing/harness/src/corpus.rs` — `expected_failure` notes, added or removed
 
-When the stop is forced by the *context* limit specifically, also leave a handoff prompt for
-the next session naming the exact next piece of work — see the end of this file for the shape.
+Write a handoff prompt **only** when the context window is genuinely near its limit — not at
+every stopping point. Below that, committing and keeping the docs current *is* the handoff, and
+a prompt written early is tokens spent on something that will be stale before it is read. When
+one is warranted, write it for a reader with no history at all: name the next piece of work, the
+file to start in, and the tool to use, and make sure this file and `README.md` are accurate
+first, since the prompt's job is only to point at them.
 
 The one exception is a half-finished refactor: finish or revert it first. A non-compiling tree
 cannot be handed off at all, and a half-threaded type parameter is invisible to every artifact

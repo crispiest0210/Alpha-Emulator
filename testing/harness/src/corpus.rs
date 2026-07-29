@@ -531,9 +531,7 @@ pub const GBA_ROMS: &[TestRom] = &[
         hardware: Hardware::Gba,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "runs off into unmapped memory with the CPU in FIQ mode, so the r12 value is garbage rather than a sub-test number. Its Thumb counterpart passes and memory reaches a real sub-test, so the ARM core is broadly sound — this is an ARM-only instruction, and entering FIQ unasked points at the exception path or at an instruction that decodes as one",
-        ),
+        expected_failure: None,
         licence: "MIT (Julian Smolka)",
     },
     TestRom {

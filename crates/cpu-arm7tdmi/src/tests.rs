@@ -995,3 +995,57 @@ fn introspection_exposes_the_inactive_banks() {
         "the active bank is already listed as sp, not duplicated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The legacy "P" form
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_comparison_with_r15_as_its_destination_restores_cpsr_from_spsr() {
+    // The ARM7TDMI's legacy "P" form. A comparison writes no result, so its `Rd` field is
+    // otherwise unused; naming R15 there means "copy SPSR into CPSR" — a mode change with no
+    // branch. `gba-suite` uses `CMPP PC, R0` to leave FIQ mode after testing banked registers,
+    // and without this the machine stays in FIQ, pops a return address off the wrong stack, and
+    // jumps to zero. That is the bug this test exists to prevent coming back.
+    let (mut cpu, mut bus) = setup(&[]);
+
+    let mut spsr = cpu.cpsr;
+    spsr.set_mode(Mode::System);
+    cpu.cpsr.set_mode(Mode::Fiq);
+    cpu.regs.set_spsr(Mode::Fiq, spsr);
+    assert_eq!(cpu.mode(), Mode::Fiq);
+
+    // `CMP PC, R0` with S set and Rd = R15.
+    cpu.execute_arm(0xE15F_F000, &mut bus);
+    assert_eq!(cpu.mode(), Mode::System, "the SPSR was copied back");
+}
+
+#[test]
+fn an_ordinary_comparison_leaves_the_mode_alone() {
+    // The P form is selected by `Rd`, so a normal comparison must not trip it.
+    let (mut cpu, mut bus) = setup(&[]);
+    let mut spsr = cpu.cpsr;
+    spsr.set_mode(Mode::System);
+    cpu.cpsr.set_mode(Mode::Fiq);
+    cpu.regs.set_spsr(Mode::Fiq, spsr);
+
+    // `CMP R1, R0` — `Rd` is R0, not R15.
+    cpu.execute_arm(0xE151_0000, &mut bus);
+    assert_eq!(cpu.mode(), Mode::Fiq);
+}
+
+#[test]
+fn every_comparison_opcode_supports_the_p_form() {
+    // TST, TEQ, CMP, and CMN all write no result, so all four have the spare `Rd` field.
+    for opcode in [0b1000u32, 0b1001, 0b1010, 0b1011] {
+        let (mut cpu, mut bus) = setup(&[]);
+        let mut spsr = cpu.cpsr;
+        spsr.set_mode(Mode::System);
+        cpu.cpsr.set_mode(Mode::Fiq);
+        cpu.regs.set_spsr(Mode::Fiq, spsr);
+
+        let instr = 0xE000_0000 | (opcode << 21) | (1 << 20) | (15 << 12);
+        cpu.execute_arm(instr, &mut bus);
+        assert_eq!(cpu.mode(), Mode::System, "opcode {opcode:#06b}");
+    }
+}

@@ -321,6 +321,15 @@ impl Arm7Tdmi {
             } else {
                 self.set_reg(rd, result);
             }
+        } else if rd == 15 {
+            // The ARM7TDMI's legacy "P" form. A comparison — `TST`, `TEQ`, `CMP`, `CMN` — writes
+            // no result, so its `Rd` field is otherwise unused; naming R15 there instead means
+            // "copy SPSR into CPSR", giving a mode change with no branch. `CMPP PC, R0` is the
+            // idiom, and `gba-suite` uses it to leave FIQ mode after testing banked registers.
+            //
+            // Reachable only for these four opcodes: with `S` clear the same encoding space is
+            // `MRS`/`MSR`, which is decoded before this function is entered.
+            self.restore_cpsr_from_spsr();
         }
         cycles
     }

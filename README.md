@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ✅ | ❌ | ⚠️ | Assembled and running. Passes `gba-suite`'s Thumb ROM; `memory` fails one sub-test and `arm` runs off — see below |
+| Game Boy Advance | ✅ | ❌ | ⚠️ | Assembled and running. Passes `gba-suite`'s ARM and Thumb ROMs; `memory` fails one sub-test — see below |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
@@ -33,7 +33,7 @@ Component status:
 | `core-common` — scheduler, bus, CPU/system traits | done |
 | `savestate` — versioned format and `Savable` | core done; rewind buffer pending (prompt 16) |
 | `cpu-sm83` — Game Boy CPU | complete; passes all Blargg CPU and timing suites |
-| `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete, unit-tested; **accuracy ROMs not yet run** |
+| `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete; passes `gba-suite`'s ARM and Thumb instruction ROMs |
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
@@ -81,8 +81,8 @@ Current Game Boy results:
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
-| `gba-suite` thumb | **passes** |
-| `gba-suite` arm, memory | fail — see below |
+| `gba-suite` arm, thumb | **pass** |
+| `gba-suite` memory | fails sub-test 3 — see below |
 | dmg-acid2, cgb-acid2 | render and complete, but unvalidated — see below |
 
 Open gaps, each tracked with the specific reason:
@@ -115,11 +115,9 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-**`gba-suite`'s Thumb ROM passes** — the whole Thumb instruction set, validated against a
-reference for the first time. `memory.gba` fails a specific sub-test (3) and reports cleanly,
-so that is a memory-access behaviour rather than anything structural. `arm.gba` still runs off
-into unmapped memory with the CPU in FIQ mode, which given the other two points at the
-exception path or at an ARM-only instruction that decodes as one.
+**`gba-suite`'s ARM and Thumb ROMs both pass** — the whole instruction set, both states,
+validated against a reference. `memory.gba` fails sub-test 3 and reports cleanly, so that is a
+specific memory-access behaviour rather than anything structural.
 
 The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
 hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU
