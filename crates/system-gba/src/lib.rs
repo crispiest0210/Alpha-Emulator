@@ -21,6 +21,7 @@
 //! | [`objects`] — OAM decode, sizes, per-line selection, matrices | |
 //! | [`affine`] — the transform for rotated backgrounds and sprites | |
 //! | [`fifo`] — the two DMA-fed direct-sound channels | |
+//! | [`waitstates`] — `WAITCNT` and per-region access cost | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -40,6 +41,7 @@ pub mod memory;
 pub mod objects;
 pub mod timers;
 pub mod video;
+pub mod waitstates;
 
 pub use affine::AffineBackground;
 pub use background::{Backgrounds, GbaTilemap};
@@ -51,3 +53,4 @@ pub use memory::{GbaBus, Region};
 pub use objects::{Object, ObjectAttributeMemory};
 pub use timers::Timers;
 pub use video::VideoTiming;
+pub use waitstates::{Access, WaitControl};

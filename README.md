@@ -56,6 +56,7 @@ Component status:
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; not yet driven |
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
+| `system-gba` wait states — `WAITCNT`, per-region access cost | done and tested; not yet charged to the CPU |
 | Everything else | not started |
 
 ### Accuracy suite
