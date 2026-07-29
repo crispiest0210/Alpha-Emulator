@@ -1,5 +1,8 @@
 # Contributing
 
+Working on this as an AI agent? Read [AGENTS.md](AGENTS.md) as well — it carries the standing
+workflow and the architectural principles this codebase has settled on.
+
 ## Getting started
 
 ```sh

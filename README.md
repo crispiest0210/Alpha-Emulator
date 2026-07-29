@@ -180,7 +180,9 @@ Two rules are load-bearing and enforced mechanically rather than by review:
 2. **`Savable` at creation time.** Every stateful struct implements save/load when it is
    written, never bolted on later by reaching into another module's private fields.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), and [AGENTS.md](AGENTS.md) if you are an AI agent
+picking this up — it carries the conventions and the paid-for mistakes that the code itself
+cannot tell you.
 
 ## License
 
