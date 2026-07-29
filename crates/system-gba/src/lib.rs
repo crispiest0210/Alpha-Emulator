@@ -12,7 +12,7 @@
 //! | Done | Not started |
 //! |---|---|
 //! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Affine backgrounds (the matrix registers and their per-line accumulation) |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Drawing sprites and affine layers into the compositor |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Affine layers and affine sprites in the compositor |
 //! | [`timers`] — four channels, prescalers, cascade | Windows and colour blending |
 //! | [`dma`] — four channels, all trigger modes, priority | APU: four PSG channels plus two DMA-fed FIFOs |
 //! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Wait-state timing (`WAITCNT`) |

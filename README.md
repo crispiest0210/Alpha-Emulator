@@ -38,7 +38,7 @@ Component status:
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
-| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules |
+| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules and both tile-mapping arrangements |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
@@ -57,7 +57,7 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done and tested; not yet charged to the CPU |
-| `system-gba` compositor — mode layers, priority, palette | text layers and bitmap modes draw; **sprites and affine layers not yet composited** |
+| `system-gba` compositor — mode layers, priority, palette, sprites | text layers, bitmap modes, and non-affine sprites draw; **affine layers and sprites not yet composited** |
 | Everything else | not started |
 
 ### Accuracy suite

@@ -355,6 +355,9 @@ impl GbPpu {
                     flip_x: attributes & 0x20 != 0,
                     flip_y: attributes & 0x40 != 0,
                     behind_background: attributes & 0x80 != 0,
+                    // A Game Boy sprite is one tile wide and its rows are contiguous, so
+                    // there is no arrangement to describe.
+                    row_stride: 0,
                 },
             );
             count += 1;
@@ -423,6 +426,7 @@ impl GbPpu {
 
 /// Filler for the fixed-size candidate array, never rendered.
 const PLACEHOLDER_SPRITE: Sprite = Sprite {
+    row_stride: 0,
     x: 0,
     y: 0,
     width: 8,

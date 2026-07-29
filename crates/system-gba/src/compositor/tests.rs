@@ -23,7 +23,15 @@ impl Scene {
             backgrounds: Backgrounds::new(),
             vram: vec![0u8; 0x1_8000],
             palette: vec![0u8; 0x400],
-            oam: vec![0u8; 0x400],
+            // Parked as hidden rather than zeroed: an all-zero OAM is 128 visible 8x8 sprites
+            // at the origin, which is what hardware shows and not what these scenes mean.
+            oam: {
+                let mut oam = vec![0u8; 0x400];
+                for entry in 0..crate::objects::OBJECT_COUNT {
+                    oam[entry * 8..entry * 8 + 2].copy_from_slice(&(2u16 << 8).to_le_bytes());
+                }
+                oam
+            },
         }
     }
 
@@ -227,4 +235,107 @@ fn the_drawn_predicate_distinguishes_the_backdrop_from_a_layer() {
     assert!(!was_drawn(PixelSource::Backdrop));
     assert!(was_drawn(PixelSource::Background));
     assert!(was_drawn(PixelSource::Sprite));
+}
+
+// -- Sprites ---------------------------------------------------------------
+
+impl Scene {
+    /// Put a sprite at OAM index 0 covering the top-left corner, drawn from tile 0 of the
+    /// object half of VRAM with colour index 1 everywhere.
+    fn simple_sprite(&mut self, attr0_extra: u16, attr2: u16) {
+        let base = crate::objects::OBJ_TILE_BASE;
+        for row in 0..8 {
+            for byte in 0..4 {
+                self.vram[base + row * 4 + byte] = 0x11;
+            }
+        }
+        self.oam[0..2].copy_from_slice(&attr0_extra.to_le_bytes());
+        self.oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+        self.oam[4..6].copy_from_slice(&attr2.to_le_bytes());
+        self.video.write16(
+            reg::DISPCNT,
+            self.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+        );
+    }
+}
+
+#[test]
+fn a_sprite_draws_over_a_text_layer() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(257, GREEN); // sprite palette 0, colour 1
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the sprite is in front"
+    );
+}
+
+#[test]
+fn a_sprite_draws_over_a_bitmap_mode_too() {
+    // Bitmap modes are not a separate world: sprites compose over them the same way.
+    let mut scene = Scene::new(3);
+    // The whole first line, so there is bitmap either side of the eight-pixel sprite.
+    for x in 0..SCREEN_WIDTH as usize {
+        scene.vram[x * 2..x * 2 + 2].copy_from_slice(&RED.to_le_bytes());
+    }
+    scene.colour(257, GREEN);
+    scene.simple_sprite(0, 0);
+
+    let framebuffer = scene.render(0);
+    assert_eq!(framebuffer.pixel(0, 0).g, 0xFF, "the sprite");
+    assert_eq!(
+        framebuffer.pixel(100, 0).r,
+        0xFF,
+        "and the bitmap beside it"
+    );
+}
+
+#[test]
+fn clearing_the_object_enable_bit_removes_every_sprite() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(0, 0);
+    let dispcnt = scene.video.dispcnt & !dispcnt::OBJ;
+    scene.video.write16(reg::DISPCNT, dispcnt);
+    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF, "the backdrop");
+}
+
+#[test]
+fn a_hidden_sprite_is_not_drawn() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(2 << 8, 0); // hidden
+    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF);
+}
+
+#[test]
+fn an_affine_sprite_is_skipped_rather_than_drawn_untransformed() {
+    // An untransformed rotated sprite looks like a deliberate picture that is simply wrong,
+    // which is harder to notice than an obvious gap.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(1 << 8, 0); // affine
+    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF);
+}
+
+#[test]
+fn a_sprite_off_this_line_is_not_drawn() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(100, 0); // y = 100
+    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF, "line 0 is above it");
+    assert_eq!(
+        scene.render(100).pixel(0, 100).g,
+        0xFF,
+        "but line 100 has it"
+    );
 }

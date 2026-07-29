@@ -207,6 +207,7 @@ impl Object {
             // single "behind background" bit, so this is always false and the caller compares
             // `priority` against the background's instead.
             behind_background: false,
+            row_stride: self.row_stride(one_dimensional),
         }
     }
 }

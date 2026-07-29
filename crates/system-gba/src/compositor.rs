@@ -16,12 +16,14 @@
 
 use core_common::{Framebuffer, Rgba8};
 use ppu_tile2d::{
-    render_text_background, BackgroundParams, PaletteSource, PixelSource, ScanlineBuffer,
+    render_sprites, render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource,
+    ScanlineBuffer, SpriteRule,
 };
 
 use crate::background::{Backgrounds, GbaTilemap};
 use crate::bitmap;
-use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::objects::{ObjectAttributeMemory, ObjectMode};
+use crate::video::{dispcnt, VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Which background layers a mode has, and whether each is affine.
 ///
@@ -106,9 +108,13 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     }
 
     let mode = frame.video.mode();
+    let mut scanline = ScanlineBuffer::new(SCREEN_WIDTH as usize);
+    scanline.clear();
+
+    // Sprites draw over a bitmap just as they draw over a tile layer, so both paths go through
+    // the same buffer — the bitmap is written straight to the row first and the sprites are
+    // composited on top of it afterwards.
     if (3..=5).contains(&mode) {
-        // The bitmap is the picture; there are no tile layers to compose with it. Sprites still
-        // draw over it, which the tile path below handles once there is a buffer to draw into.
         let row = framebuffer.row_mut(line);
         bitmap::render_scanline(
             mode,
@@ -118,11 +124,13 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
             frame.video.bitmap_frame_offset(),
             row,
         );
+        draw_sprites(frame, line, &mut scanline);
+        let palette = GbaPalette {
+            bytes: frame.palette,
+        };
+        overlay_sprites(&scanline, &palette, framebuffer.row_mut(line));
         return;
     }
-
-    let mut scanline = ScanlineBuffer::new(SCREEN_WIDTH as usize);
-    scanline.clear();
 
     let kinds = layers_for_mode(mode);
     let enabled = [
@@ -142,6 +150,7 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
         }
         draw_text_layer(frame, index, line, &mut scanline);
     }
+    draw_sprites(frame, line, &mut scanline);
 
     let palette = GbaPalette {
         bytes: frame.palette,
@@ -169,6 +178,55 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         layer.bit_depth(),
     );
     render_text_background(&map, frame.vram, &params, scanline);
+}
+
+/// Draw the sprites covering this line, front-most first.
+///
+/// Only non-affine sprites for now: an affine one needs its matrix applied per pixel, which the
+/// shared compositor does not describe. They are skipped rather than drawn untransformed,
+/// because an untransformed rotated sprite looks like a deliberate picture that is simply wrong.
+fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
+    if frame.video.dispcnt & dispcnt::OBJ == 0 {
+        return;
+    }
+    let oam = ObjectAttributeMemory::decode(frame.oam);
+    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
+
+    let sprites: Vec<_> = oam
+        .visible_on_line(line as i32)
+        .into_iter()
+        .map(|index| oam.objects[index])
+        .filter(|object| object.mode == ObjectMode::Normal)
+        .map(|object| object.to_sprite(one_dimensional))
+        .collect();
+
+    // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite
+    // decodes differently from a 16-colour one — but a scanline can hold both, so the depth is
+    // taken from each sprite rather than from the batch. Passed as four-bit here because that
+    // is what the shared entry point takes; eight-bit sprites are a follow-up.
+    render_sprites(
+        &sprites,
+        frame.vram,
+        BitDepth::Four,
+        line,
+        SpriteRule::SpriteDecides,
+        scanline,
+    );
+}
+
+/// Write the sprite pixels of a resolved buffer over an already-drawn row.
+///
+/// Used by the bitmap path, where the background is already RGBA in the row and only the sprite
+/// pixels need resolving.
+fn overlay_sprites(scanline: &ScanlineBuffer, palette: &GbaPalette<'_>, row: &mut [u8]) {
+    for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+        let indexed = scanline.get(x);
+        if indexed.source != PixelSource::Sprite {
+            continue;
+        }
+        let colour = palette.lookup_sprite(indexed.palette, indexed.color);
+        pixel.copy_from_slice(&[colour.r, colour.g, colour.b, colour.a]);
+    }
 }
 
 /// Whether a pixel came from a background rather than the backdrop.

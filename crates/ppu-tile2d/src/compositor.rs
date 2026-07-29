@@ -178,6 +178,13 @@ pub struct Sprite {
     pub flip_y: bool,
     /// Hidden wherever the background pixel is not index 0.
     pub behind_background: bool,
+    /// Bytes between one row of the sprite's tiles and the next.
+    ///
+    /// Zero means "the rows are contiguous", which is the Game Boy's only arrangement and the
+    /// GBA's one-dimensional mapping. The GBA can instead treat its whole object area as a
+    /// 32-tile-wide sheet that each sprite is a window onto, and then the next row is a fixed
+    /// distance away regardless of the sprite's width — hence a field rather than a derivation.
+    pub row_stride: usize,
 }
 
 /// Composite one scanline of sprites.
@@ -268,10 +275,14 @@ pub fn render_sprites(
             } else {
                 tile_column
             };
+            let row_stride = match sprite.row_stride {
+                0 => (sprite.width / 8) as usize * depth.tile_size(),
+                stride => stride,
+            };
             let tile = TileRef {
                 data_offset: sprite.tile_offset
-                    + (tile_index_in_sprite * (sprite.width / 8) + source_column) as usize
-                        * depth.tile_size(),
+                    + tile_index_in_sprite as usize * row_stride
+                    + source_column as usize * depth.tile_size(),
                 palette: sprite.palette,
                 flip_x: sprite.flip_x,
                 // The row was already flipped above, so the tile fetch must not flip again.
@@ -577,6 +588,7 @@ mod tests {
             flip_x: false,
             flip_y: false,
             behind_background: false,
+            row_stride: 0,
         }
     }
 
@@ -921,5 +933,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_zero_row_stride_means_the_rows_are_contiguous() {
+        // The Game Boy's only arrangement, and the GBA's one-dimensional mapping. Spelling it as
+        // zero rather than making every caller compute it keeps the common case honest.
+        let mut tile = vec![0u8; 0x400];
+        // A 16-wide sprite is two tiles per row, so its second row starts at tile 2.
+        tile[2 * 32] = 0xFF;
+
+        let mut line = ScanlineBuffer::new(32);
+        let sprite = Sprite {
+            width: 16,
+            height: 16,
+            ..sprite_at(0, 0)
+        };
+        render_sprites(
+            &[sprite],
+            &tile,
+            BitDepth::Four,
+            8,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
+        assert_ne!(line.get(0).color, 0, "row 8 came from tile 2");
+    }
+
+    #[test]
+    fn a_row_stride_puts_the_next_row_a_fixed_distance_away() {
+        // The GBA's two-dimensional mapping: the object area is one 32-tile-wide sheet and the
+        // sprite is a window onto it, so the next row is 32 tiles on whatever the sprite's width.
+        let mut tile = vec![0u8; 0x4000];
+        tile[32 * 32] = 0xFF;
+
+        let mut line = ScanlineBuffer::new(32);
+        let sprite = Sprite {
+            width: 16,
+            height: 16,
+            row_stride: 32 * 32,
+            ..sprite_at(0, 0)
+        };
+        render_sprites(
+            &[sprite],
+            &tile,
+            BitDepth::Four,
+            8,
+            SpriteRule::SpriteDecides,
+            &mut line,
+        );
+        assert_ne!(line.get(0).color, 0, "row 8 came from 32 tiles on");
     }
 }
