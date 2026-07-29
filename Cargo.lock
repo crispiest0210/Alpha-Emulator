@@ -836,6 +836,7 @@ dependencies = [
  "ahash",
  "bytemuck",
  "document-features",
+ "egui",
  "epaint",
  "log",
  "profiling",
@@ -843,6 +844,7 @@ dependencies = [
  "type-map",
  "web-time",
  "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -1106,6 +1108,7 @@ name = "frontend-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "core-common",
  "cpal",
  "debugger",
  "egui",

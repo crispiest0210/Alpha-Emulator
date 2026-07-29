@@ -117,6 +117,18 @@ machine is found by staring at a wrong picture.
 renderer produce both a monochrome and a colour picture with no duplicated fetch logic. Resolve
 to RGBA as late as possible.
 
+### A UI panel returns what the user asked for; it does not do it
+
+The chrome panels are handed a borrowed `ChromeState` and return `UiAction`s. They have no access
+to the session, the library, the window, or the filesystem — not by convention, by what they were
+given. `app.rs` interprets every action in one `match`, which is also the complete list of side
+effects the application has.
+
+This was the third attempt at the shape. Passing `&mut App` to each panel works and is what most
+egui applications do; it also means a settings checkbox *can* flush save RAM, and once one does, the
+file is a God Component again regardless of how many files it is split across. The action enum is
+what makes that unrepresentable rather than merely discouraged.
+
 ### Say what is not done
 
 Status sections, `expected_failure` notes, and README rows are load-bearing. A tracked failure
@@ -152,6 +164,29 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 - **An all-zero OAM is 128 visible sprites at the origin**, on both the Game Boy Advance and in
   any test scene that forgets to park the entries it is not using. That is what hardware shows;
   it is not a decoding bug.
+- **`egui` 0.35 replaced `SidePanel`/`TopBottomPanel` with one `Panel` type**, and panels now take
+  a `&mut Ui` rather than a `&Context`: the top-level call is `ctx.run_ui(input, |root| …)`, and
+  `Context::run` is gone. `Window`, `Area`, and `Modal` still take a `&Context`. Nothing in the
+  compiler error points at the replacement, so this is worth ten minutes of reading
+  `~/.cargo/registry/src/*/egui-0.35.0/src/containers/panel.rs` before guessing.
+- **The `egui-wgpu` `winit` feature is not on by default**, and without it `egui_wgpu::winit::Painter`
+  — which owns the surface, the device request, and the resize/surface-lost handling — simply does
+  not exist. It is enabled explicitly in the workspace `Cargo.toml`.
+- **User textures handed to `egui` must be `Rgba8Unorm`, not `Rgba8UnormSrgb`.** egui's shader picks
+  an entry point from the surface format so byte values pass through unchanged; an sRGB texture
+  applies the transfer function a second time and the picture comes out washed out.
+- **`wgpu` 29 renamed `ImageCopyTexture`/`ImageDataLayout` to `TexelCopyTextureInfo`/
+  `TexelCopyBufferLayout`**, and `SamplerDescriptor::mipmap_filter` takes a `MipmapFilterMode`
+  rather than a `FilterMode`.
+- **There is no async runtime in this workspace and there should not be one.** `wgpu`'s three
+  `async` setup calls are driven by `frontend-native::block_on`, twenty safe lines over
+  `std::task::Wake`. `pollster` is not in the lockfile and adding a runtime for three calls that
+  resolve on the first poll is not worth it.
+- **`RewindBuffer::new` clamps capacity up to one**, so "rewind disabled" is not expressible as a
+  capacity of zero — a buffer built that way silently records snapshots. The session holds an
+  `Option<RewindBuffer>` instead.
+- **Under `--data-dir`, `AppPaths::rooted_at` relocates everything.** Use it whenever trying a
+  frontend change; a bug in the import path should not be discovered against a real library.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.
@@ -159,24 +194,46 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 ## Where things stand
 
 `README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
-Advance all boot cartridges and run headlessly with real accuracy coverage, and every ROM in the
-corpus either passes or carries a written diagnosis. The Nintendo DS has only its two CPU cores.
+Advance are **playable** — window, audio, input, save states, rewind — with real accuracy coverage,
+and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS has only
+its two CPU cores.
 
-- **Complete:** prompts 11 (GB/GBC), 12 (GBA), 16 (savestate and rewind), 17 (testing).
+- **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
+  17 (testing).
 - **Partly done:** prompt 15 — the breakpoint and watchpoint registry works and is driven from a
   running machine. The `egui` panel, the GDB remote-serial-protocol subset, and execution
-  tracing are not started.
-- **Untouched:** prompts 13 (NDS), 14 (frontend), 18 (performance), 19 (packaging).
+  tracing are not started. The frontend's debugger key pauses and says the panel does not exist,
+  rather than opening a window that pretends to be one.
+- **Untouched:** prompts 13 (NDS), 18 (performance), 19 (packaging).
 
 ### The biggest gap
 
-**There is no GUI.** Three emulated systems run correctly and not one of them is playable,
-because `cargo xtask dev` still opens an empty window. `frontend-core` already has the lock-free
-audio ring, the resampler, and the keybind machinery; `frontend-native` has nothing but a window.
-Prompt 14 closes that, and it is the difference between a well-tested library and an emulator.
+**The Nintendo DS.** Both CPU cores are complete and unit-tested; nothing above them exists — no
+memory map, no 2D or 3D engine, no bus arbitration. Everything else it needs is already in place:
+`frontend-native` lists `.nds` files and greys them out, `frontend-core::platform` names the DS
+explicitly rather than sweeping it into an "unsupported" arm, and the dual-screen layout and touch
+coordinate mapping are written and unit-tested against a 256×384 framebuffer that nothing produces
+yet. Prompt 13 is what fills that in.
 
-It is also what several other prompts wait on: prompt 15's debugger panel needs its chrome, and
-prompt 18 has nothing to profile until something runs at speed.
+Prompt 18 is the other obvious next step and is no longer blocked: there is something running at
+speed to profile, and the HUD already reports measured speed, dropped frames, dropped samples, and
+rewind memory.
+
+### What "verified" means for the frontend
+
+Prompt 14 is explicit that it be checked by running the application, not by compiling it. What was
+actually exercised in a running window, on an M3 over Metal: window and surface creation, the GPU
+texture upload path, a Game Boy and a Game Boy Advance each holding a measured 100% speed
+(59.4–60.5 fps against a native 59.7275 Hz) with **zero** frames dropped to the drawing thread and
+zero audio samples dropped after the ring's initial fill, the header title read for the window and
+the library row, import, and a restart preserving the library without a re-import.
+
+What was **not** clicked or pressed by hand: quicksave, quickload, rewind, the HUD toggle, and
+keybind capture. macOS refuses synthetic keystrokes to an unbundled binary, so those paths are
+covered instead by their pieces — `keymap` and `InputTracker` each have unit tests, and every
+command a key sends is driven end to end through the real channel API against a real emulation
+thread in `frontend-core/src/tests.rs`. The untested link is the two-line hop between them. Press
+them yourself before touching that code.
 
 ### Smaller, well-defined items
 
@@ -192,7 +249,7 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
 - **dmg-acid2 and cgb-acid2** render and complete but have never been compared against their
   published reference images. Recording those hashes is cheap, and it would make cgb-acid2 the
-  only end-to-end check of CGB tile attributes.
+  only end-to-end check of CGB tile attributes. There is now a window to look at them in.
 - Mosaic, EEPROM saves, and the GBA's object window are not implemented.
 
 ### Tools worth knowing about before you start
@@ -213,4 +270,9 @@ cargo xtask test              # unit tests
 cargo xtask fetch-test-roms   # the accuracy corpus, never committed
 cargo xtask test --accuracy   # the accuracy suite
 cargo run -p frontend-headless -- run rom.gb --frames 600
+cargo xtask dev -- rom.gb      # play a cartridge in the window
+cargo run -p frontend-native -- --data-dir /tmp/scratch rom.gb   # …against a throwaway library
 ```
+
+That last one is how to try a frontend change without it touching your real library, saves, or
+config. `--data-dir` relocates the whole layout.

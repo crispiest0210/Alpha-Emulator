@@ -14,10 +14,10 @@ cargo xtask lint     # run this before opening a PR; CI runs exactly the same co
 
 `cargo xtask lint --fix` applies `rustfmt` and machine-applicable clippy fixes.
 
-## The two rules most likely to be broken
+## The three rules most likely to be broken
 
-These are the two invariants that an unfamiliar contributor is most likely to violate, and both
-exist because the predecessor project violated them and paid for it.
+These are the invariants an unfamiliar contributor is most likely to violate, and each exists
+because the predecessor project violated it and paid for it.
 
 ### 1. Crate boundaries are a dependency-direction contract
 
@@ -53,9 +53,40 @@ Concretely: if you add a field that affects emulated behavior, it belongs in tha
 `save`/`load` and in the save-state format version bump. A PR that adds emulated state without
 touching serialization will be asked to fix that before anything else.
 
+### 3. A UI panel returns what the user asked for; it does not do it
+
+**Nothing under `crates/frontend-native/src/chrome/` may touch the session, the library, the
+window, or the filesystem.** A panel is handed a `ChromeState` to draw and returns `UiAction`s;
+`app.rs` is the single place that interprets them.
+
+The predecessor's entire frontend was one ~2,200-line React component doing UI state, canvas
+drawing, Web Audio glue, keyboard routing, and IPC together. Splitting it into files would not have
+fixed that — a settings checkbox could still have reached into the emulator. What fixes it is that
+a panel has *no way* to: `ChromeState` borrows only what is drawable, and every side effect in the
+application is reachable from one `match` in `app.rs`.
+
+Two consequences worth knowing before you add a control:
+
+- If your panel needs something new, add a field to `ChromeState` or a variant to `UiAction` — do
+  not pass it the `Session` or the `Library`.
+- Session and emulation logic belongs in `frontend-core`, not here. Any future web or TUI frontend
+  reuses that crate whole and writes only its own presentation layer, and that reuse is the entire
+  reason for the split.
+
+The same rule is why `frontend-core` owns the library *integration* (`catalog`) while the UI thread
+owns the `rusqlite::Connection`: the emulation thread reports facts — a state file was written, at
+this path, at this frame — and never waits on a lock, because it has a 16.7 ms deadline.
+
 ## Testing
 
 - Unit tests live next to the code, run with `cargo xtask test`.
+- **`frontend-native` is verified by running it, not only by compiling it.** The pure parts have
+  unit tests — coordinate mapping and touch translation in `layout.rs`, key translation in
+  `keymap.rs`, the PNG encoder in `screenshot.rs` — and session behaviour is driven end to end
+  through the real channel API in `frontend-core`'s tests. Everything left is presentation, and the
+  only way to check presentation is to look at it: `cargo xtask dev -- <rom>`, or
+  `cargo run -p frontend-native -- --data-dir /tmp/scratch <rom>` to do it against a throwaway
+  library rather than your own.
 - The accuracy test-ROM suite runs with `cargo xtask test --accuracy`. Test ROMs are **fetched at
   test time and never committed to this repository** — see `testing/harness/`.
 - Adding a new accuracy test ROM: register it with the harness rather than adding a bespoke test

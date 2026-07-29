@@ -15,15 +15,14 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ✅ | ⚠️ | ✅ | Assembled and running; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
+| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
+| Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
+| Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
+| Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. The frontend already lists `.nds` files and greys them out rather than pretending otherwise |
 
-**Three of the four cores run ROMs; the GUI does not yet.** The emulation core boots cartridges,
-renders frames, and produces audio — that is what the accuracy suite below drives it through.
-What is missing is the frontend that connects it to a window: `cargo xtask dev` still opens an
-empty one. Wiring the two together is prompt 14.
+**Three of the four systems are playable.** `cargo xtask dev` opens a window with a ROM library,
+plays a cartridge with video, audio, and keyboard input, and supports quicksave, quickload, rewind,
+an HUD, a keybind editor, and screenshots. The Nintendo DS is the remaining gap (prompt 13).
 
 Component status:
 
@@ -41,14 +40,18 @@ Component status:
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules and both tile-mapping arrangements |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
-| `frontend-core` audio pipeline — lock-free ring, resampler | done; cpal device binding pending (prompt 14) |
+| `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
-| `frontend-core` input — keybinds, conflict rule, delivery | done; keyboard only, gamepads are future work |
+| `frontend-core` input — keybinds, conflict rule, delivery | done and driven from the window; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
 | `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
+| `library` — SQLite index, watched folders, reconciliation | done; a moved file is recognised by content hash and keeps its row |
+| `frontend-core` session — emulation thread, commands/events, frame pipe, rewind, save-RAM flush | done; lifecycle driven end to end by tests against a real thread |
+| `frontend-core` settings — TOML config, keybinds, presentation, rewind depth | done; a malformed file falls back to defaults and is left on disk |
+| `frontend-native` — window, `wgpu` presentation, `egui` chrome, library browser, HUD, keybind editor | done; **no debugger panel yet (prompt 15), and no native file dialog** |
 | `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
 | `system-gba` interrupt controller, timers, 4-channel DMA | done and tested; not yet driven |
 | `system-gba` video timing and bitmap modes 3/4/5 | done and tested; not yet driven |
@@ -63,7 +66,7 @@ Component status:
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — `Div`, `Sqrt`, `ArcTan2`, `CpuSet`, the waiting calls | done; unhandled calls change nothing rather than guessing |
-| `debugger` — breakpoints, watchpoints, conditions | registry done and driven from a running machine; **no `egui` panel, GDB server, or tracing yet** |
+| `debugger` — breakpoints, watchpoints, conditions | registry done and driven from a running machine; **no `egui` panel, GDB server, or tracing yet** — the frontend's debugger key pauses and says so |
 | Everything else | not started |
 
 ### Accuracy suite
@@ -135,8 +138,9 @@ Requires a Rust toolchain (installed via [rustup](https://rustup.rs); the pinned
 selected automatically from `rust-toolchain.toml`).
 
 ```sh
-cargo xtask setup   # checks for required system packages, tells you exactly what to install
-cargo xtask dev     # build and run the native frontend
+cargo xtask setup                       # checks for required system packages, tells you what to install
+cargo xtask dev                         # build and run the native frontend
+cargo xtask dev -- path/to/rom.gb       # …and start playing a cartridge straight away
 ```
 
 `cargo xtask setup` never downloads or vendors a binary into the repository — if a system
@@ -152,17 +156,49 @@ Linux, macOS, and Windows:
 | Command | What it does |
 |---|---|
 | `cargo xtask setup` | Verify host toolchain and system packages |
-| `cargo xtask dev` | Run the native frontend |
+| `cargo xtask dev` | Run the native frontend (`-- <rom>` to open a cartridge) |
 | `cargo xtask build --release` | Build the workspace optimized |
 | `cargo xtask test` | `cargo test --workspace` (`--accuracy` adds the test-ROM suite) |
 | `cargo xtask bench` | Run benchmarks |
 | `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
 | `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
 
+### Playing a game
+
+`cargo xtask dev` opens the application. Drop a `.gb`, `.gbc`, or `.gba` file onto the window — or
+paste its path into the library panel's import box — and it is indexed and starts playing. A ROM
+named on the command line does the same in one step.
+
+The library is a SQLite index, not a directory scan, and that distinction is load-bearing: a title
+you correct, a play count, and a save-state list all survive the file being moved to another folder,
+because reconciliation recognises it again by content hash. Files that have genuinely gone are
+greyed out and keep their history rather than vanishing.
+
+| Default key | Action |
+|---|---|
+| `W` `A` `S` `D` | D-pad |
+| `Space` / `R` | A / B |
+| `T` / `G` / `Q` / `E` | X / Y / L / R (GBA and DS) |
+| `Enter` / `Left Shift` | Start / Select |
+| `P` | Pause |
+| `Tab` (held) | Fast-forward |
+| `Backspace` (held) | Rewind |
+| `F1` | HUD |
+| `F2` / `F3` | Quicksave / quickload (slot 0) |
+| `F11` / `F12` | Fullscreen / screenshot |
+| `Escape` | Reset |
+
+All of them are rebindable in the **Keys** panel, and the bindings are physical key *positions*
+rather than letters, so a non-QWERTY layout gets the keys under the same fingers. Settings and
+keybinds are written as hand-editable TOML; run with `--data-dir <path>` to keep a whole separate
+library, saves, and config, which is what to use when trying something out.
+
+Everything the emulator writes goes to the OS-appropriate local-app-data directory — the paths are
+printed at startup.
+
 ### Running a ROM without a GUI
 
-The native frontend is not wired up yet, but the core is. `frontend-headless` runs a ROM with
-no window, no audio device, and no GPU:
+`frontend-headless` runs a ROM with no window, no audio device, and no GPU:
 
 ```sh
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600

@@ -94,7 +94,9 @@ impl Default for VideoConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `Copy` because it is four scalars that the settings panel copies to compare a pending change
+/// against the current one, and threading a clone through that would only obscure it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RewindConfig {
     pub enabled: bool,

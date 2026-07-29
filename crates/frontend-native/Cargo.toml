@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 frontend-core.workspace = true
+core-common.workspace = true
 library.workspace = true
 debugger.workspace = true
 wgpu.workspace = true

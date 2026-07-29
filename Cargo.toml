@@ -70,7 +70,9 @@ directories = "6.0"
 wgpu = "29.0"
 winit = "0.30"
 egui = "0.35"
-egui-wgpu = "0.35"
+# The `winit` feature is what provides `egui_wgpu::winit::Painter`, which owns the surface,
+# the device request, and the resize/surface-lost handling that would otherwise be hand-written.
+egui-wgpu = { version = "0.35", features = ["winit"] }
 egui-winit = "0.35"
 cpal = "0.18"
 
