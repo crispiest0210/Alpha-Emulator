@@ -17,13 +17,27 @@
 //!
 //! # Status
 //!
-//! The breakpoint and watchpoint registry is done and tested. Not started: the `egui` panel
-//! (which needs prompt 14's chrome to exist first), the GDB remote-serial-protocol subset, and
-//! execution tracing. The disassemblers themselves already live with their CPU cores, where
-//! `cpu-arm7tdmi` and `cpu-sm83` can keep them in step with the decoders they mirror.
+//! Done: the breakpoint and watchpoint registry, and [`view`] — the snapshot a debugger panel
+//! renders, built from [`DebugTarget`](core_common::DebugTarget) and so with no branch per system.
+//! `frontend-native` has the panel; `frontend-core`'s session serves the snapshots and single-steps.
+//!
+//! **Execution breakpoints halt; watchpoints do not yet.** The session steps instruction by
+//! instruction while a debugger is attached and checks
+//! [`check_execution`](Breakpoints::check_execution) between steps, which is how breakpoints work
+//! without a hook inside any system's hot loop — and why ordinary play pays literally nothing rather
+//! than paying a branch. Watchpoints need bus-access interception, which that trick cannot provide:
+//! [`check_access`](Breakpoints::check_access) is implemented and tested, and nothing calls it from
+//! a running machine yet. That is prompt 15's remaining work along with the GDB
+//! remote-serial-protocol subset and execution tracing.
+//!
+//! The disassemblers themselves live with their CPU cores, where `cpu-arm7tdmi` and `cpu-sm83` can
+//! keep them in step with the decoders they mirror; each system's `DebugTarget` picks the right one,
+//! which on the GBA means reading the T bit rather than guessing.
 
 #![deny(unsafe_code)]
 
 pub mod breakpoints;
+pub mod view;
 
 pub use breakpoints::{AccessKind, Breakpoints, Condition, Trigger, Watchpoint};
+pub use view::{capture, DisasmLine, MemoryRow, Request, Snapshot, BYTES_PER_ROW};

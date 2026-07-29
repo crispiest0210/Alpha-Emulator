@@ -71,6 +71,12 @@ impl System for ScriptedSystem {
     fn id(&self) -> &'static str {
         "scripted"
     }
+    /// The harness drives whole frames, never instructions, so this is unreachable. It panics
+    /// rather than returning zero: a zero would make a caller's stepping loop spin forever, and a
+    /// test double should fail loudly when used for something it does not model.
+    fn step_instruction(&mut self) -> core_common::Cycles {
+        unimplemented!("the scripted system models frames, not instructions")
+    }
     fn display_name(&self) -> &'static str {
         "Scripted"
     }
@@ -349,6 +355,9 @@ fn the_determinism_check_catches_a_divergence() {
     impl System for Flaky {
         fn id(&self) -> &'static str {
             "flaky"
+        }
+        fn step_instruction(&mut self) -> core_common::Cycles {
+            unimplemented!("this system models frames, not instructions")
         }
         fn display_name(&self) -> &'static str {
             "Flaky"

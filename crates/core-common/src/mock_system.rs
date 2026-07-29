@@ -376,6 +376,21 @@ impl System for MockSystem {
     }
 
     /// The canonical frame loop. Every real system crate follows this shape.
+    /// One instruction, with the scheduler drained first so events land at the right cycle.
+    ///
+    /// The mock exists to prove the trait is implementable without a real machine, so this is here
+    /// for the same reason every other method is: a `System` that cannot single-step is not a
+    /// `System`, and a mock that skipped the method would let a change to its contract go unchecked.
+    fn step_instruction(&mut self) -> Cycles {
+        let start = self.now;
+        while let Some((when, event)) = self.scheduler.pop_due(self.now) {
+            self.handle(when, event);
+        }
+        let cost = self.cpu.step(&mut self.bus);
+        self.now += cost;
+        self.now - start
+    }
+
     fn step_frame(&mut self, input: InputState) -> FrameOutput {
         self.bus.input = input;
         self.bus.save_ram_dirty = false;

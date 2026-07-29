@@ -46,8 +46,8 @@
 #![deny(unsafe_code)]
 
 use core_common::{
-    AudioSample, CartridgeError, FrameOutput, Framebuffer, InputState, Savable, StateError,
-    StateReader, StateWriter, System,
+    AudioSample, CartridgeError, Cycles, DebugTarget, FrameOutput, Framebuffer, InputState,
+    Savable, StateError, StateReader, StateWriter, System,
 };
 use system_gb::cgb::palettes;
 use system_gb::{GbSystem, GbcCompatibilityShades};
@@ -135,6 +135,14 @@ impl System for GbcSystem {
 
     fn state_version(&self) -> u32 {
         self.inner.state_version()
+    }
+
+    fn step_instruction(&mut self) -> Cycles {
+        self.inner.step_instruction()
+    }
+
+    fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
+        self.inner.debug()
     }
 
     fn load_cartridge(&mut self, rom: &[u8]) -> Result<(), CartridgeError> {

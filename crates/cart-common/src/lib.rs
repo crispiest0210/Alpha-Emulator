@@ -104,6 +104,22 @@ pub trait Mapper: Savable {
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, value: u8);
 
+    /// Read without side effects, or `None` where that is not possible.
+    ///
+    /// `read` takes `&mut self` because a cartridge is a device, not memory: an MBC3 RAM read can
+    /// be answering the RTC rather than returning stored bytes. But the *ROM* windows of every
+    /// mapper here are pure address decoding — bank number in, byte out — and a debugger that
+    /// cannot disassemble ROM is not a debugger at all, which is what refusing every cartridge read
+    /// left us with.
+    ///
+    /// So this is the narrow path: implement it for what is provably pure and answer `None` for the
+    /// rest. The default refuses everything, which is the safe answer for a mapper that has not
+    /// thought about it — a memory viewer showing `--` is correct, and one that advanced a state
+    /// machine to avoid showing `--` would change the bug being investigated.
+    fn peek(&self, _addr: u16) -> Option<u8> {
+        None
+    }
+
     /// The battery-backed save chip, if this cartridge has one.
     ///
     /// Returning a trait object rather than exposing the mapper's storage directly is the

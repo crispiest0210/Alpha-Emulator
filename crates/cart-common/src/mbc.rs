@@ -101,6 +101,16 @@ impl NoMbc {
 }
 
 impl Mapper for NoMbc {
+    /// ROM only. Bank selection is pure address arithmetic, so it is safe; cartridge RAM is not,
+    /// because [`BatteryBackedSave::read_byte`] takes `&mut self` for the Flash and EEPROM chips
+    /// whose reads really are commands. `None` there is the honest answer.
+    fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0x7FFF => Some(self.common.rom.get(addr as usize).copied().unwrap_or(0xFF)),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF => self.common.rom.get(addr as usize).copied().unwrap_or(0xFF),
@@ -207,6 +217,17 @@ impl Mbc1 {
 }
 
 impl Mapper for Mbc1 {
+    /// ROM only. Bank selection is pure address arithmetic, so it is safe; cartridge RAM is not,
+    /// because [`BatteryBackedSave::read_byte`] takes `&mut self` for the Flash and EEPROM chips
+    /// whose reads really are commands. `None` there is the honest answer.
+    fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0x3FFF => Some(self.common.read_rom(self.low_bank(), addr)),
+            0x4000..=0x7FFF => Some(self.common.read_rom(self.high_bank(), addr)),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF => self.common.read_rom(self.low_bank(), addr),
@@ -301,6 +322,17 @@ impl Mbc2 {
 }
 
 impl Mapper for Mbc2 {
+    /// ROM only. Bank selection is pure address arithmetic, so it is safe; cartridge RAM is not,
+    /// because [`BatteryBackedSave::read_byte`] takes `&mut self` for the Flash and EEPROM chips
+    /// whose reads really are commands. `None` there is the honest answer.
+    fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0x3FFF => Some(self.common.read_rom(0, addr)),
+            0x4000..=0x7FFF => Some(self.common.read_rom(self.rom_bank as usize, addr)),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF => self.common.read_rom(0, addr),
@@ -401,6 +433,17 @@ impl Mbc3 {
 }
 
 impl Mapper for Mbc3 {
+    /// ROM only. Bank selection is pure address arithmetic, so it is safe; cartridge RAM is not,
+    /// because [`BatteryBackedSave::read_byte`] takes `&mut self` for the Flash and EEPROM chips
+    /// whose reads really are commands. `None` there is the honest answer.
+    fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0x3FFF => Some(self.common.read_rom(0, addr)),
+            0x4000..=0x7FFF => Some(self.common.read_rom(self.rom_bank as usize, addr)),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF => self.common.read_rom(0, addr),
@@ -552,6 +595,17 @@ impl Mbc5 {
 }
 
 impl Mapper for Mbc5 {
+    /// ROM only. Bank selection is pure address arithmetic, so it is safe; cartridge RAM is not,
+    /// because [`BatteryBackedSave::read_byte`] takes `&mut self` for the Flash and EEPROM chips
+    /// whose reads really are commands. `None` there is the honest answer.
+    fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0x3FFF => Some(self.common.read_rom(0, addr)),
+            0x4000..=0x7FFF => Some(self.common.read_rom(self.rom_bank as usize, addr)),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF => self.common.read_rom(0, addr),

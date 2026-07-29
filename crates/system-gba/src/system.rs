@@ -348,6 +348,21 @@ impl Bus for GbaSystemBus {
         }
     }
 
+    /// A side-effect-free read, for the debugger's memory and disassembly views.
+    ///
+    /// I/O and cartridge save space answer `None`, and that is the honest answer rather than a
+    /// gap. An I/O halfword read here would go through `read_io16`, which is where registers with
+    /// read-side behaviour live; the save space is a flash or EEPROM state machine whose reads are
+    /// commands. Showing `--` for those two regions is correct — a memory viewer that stepped a
+    /// flash chip's state machine to avoid showing `--` would change the bug being investigated.
+    fn peek8(&self, addr: u32) -> Option<u8> {
+        match Region::of(addr) {
+            Region::Io | Region::Sram => None,
+            Region::Rom { .. } => Some(self.cartridge.read_rom(addr)),
+            _ => self.memory.read8(addr),
+        }
+    }
+
     fn write8(&mut self, addr: u32, value: u8) {
         self.charge(addr, 1);
         match Region::of(addr) {
@@ -472,27 +487,12 @@ impl GbaSystem {
         &self.cpu
     }
 
-    /// Run exactly one instruction and report what it cost.
+    /// Mutable access to the core, for the debugger's "set next statement".
     ///
-    /// Public because a debugger needs it and because tracing a machine that has run off into
-    /// unmapped memory is otherwise impossible from outside — `step_frame` is far too coarse to
-    /// see where a wrong branch was taken.
-    pub fn step_instruction(&mut self) -> Cycles {
-        self.service_interrupt();
-        if self.intercept_bios_call() {
-            // The call is answered without running the instruction, so it costs nothing beyond
-            // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
-            // against it, but a wrong non-zero figure is no better than this one.
-            self.bus.advance(1);
-            self.bus.take_pending_waits();
-            return Cycles(1);
-        }
-        let cycles = self.cpu.step(&mut self.bus).get().max(1);
-        // The instruction's own cost plus whatever its memory accesses waited for. Charged
-        // together so a scheduled event cannot fire between two halves of one access.
-        let total = cycles as u32 + self.bus.take_pending_waits();
-        self.bus.advance(total);
-        Cycles(total as u64)
+    /// As narrow as `bus_mut`: it exists so `DebugTarget` can move the program counter, which is the
+    /// only write a debugger makes into the CPU.
+    pub fn cpu_mut(&mut self) -> &mut Arm7Tdmi {
+        &mut self.cpu
     }
 
     /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
@@ -586,6 +586,34 @@ fn boot_state(has_bios: bool) -> BootState {
 }
 
 impl System for GbaSystem {
+    /// Run exactly one instruction and report what it cost.
+    ///
+    /// The debugger single-steps with this, and the session checks execution breakpoints between
+    /// calls to it. It is also how tracing a machine that has run off into unmapped memory is
+    /// possible at all from outside — `step_frame` is far too coarse to see where a wrong branch
+    /// was taken.
+    fn debug(&mut self) -> Option<&mut dyn core_common::DebugTarget> {
+        Some(self)
+    }
+
+    fn step_instruction(&mut self) -> Cycles {
+        self.service_interrupt();
+        if self.intercept_bios_call() {
+            // The call is answered without running the instruction, so it costs nothing beyond
+            // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
+            // against it, but a wrong non-zero figure is no better than this one.
+            self.bus.advance(1);
+            self.bus.take_pending_waits();
+            return Cycles(1);
+        }
+        let cycles = self.cpu.step(&mut self.bus).get().max(1);
+        // The instruction's own cost plus whatever its memory accesses waited for. Charged
+        // together so a scheduled event cannot fire between two halves of one access.
+        let total = cycles as u32 + self.bus.take_pending_waits();
+        self.bus.advance(total);
+        Cycles(total as u64)
+    }
+
     fn id(&self) -> &'static str {
         "gba"
     }

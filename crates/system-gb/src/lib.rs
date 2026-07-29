@@ -22,6 +22,7 @@
 
 pub mod apu;
 pub mod cgb;
+pub mod debug;
 pub mod joypad;
 pub mod memory;
 pub mod ppu;

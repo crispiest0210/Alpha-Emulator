@@ -421,11 +421,15 @@ impl Bus for GbBus {
     fn peek8(&self, addr: u32) -> Option<u8> {
         let addr = addr as u16;
         match addr {
-            // Cartridge reads can advance a mapper's state, so they are not peekable.
             0x0000..=0x7FFF if self.boot_rom_covers(addr) => {
                 Some(self.boot_rom.as_ref().unwrap()[addr as usize])
             }
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => None,
+            // ROM is peekable because bank selection is pure address arithmetic; cartridge RAM is
+            // not, because a mapper read there can be answering an RTC register or a Flash command.
+            // `Mapper::peek` draws that line, and it is the line that lets a debugger disassemble
+            // ROM at all — which is most of what a debugger is for.
+            0x0000..=0x7FFF => self.mapper.peek(addr),
+            0xA000..=0xBFFF => None,
             0x8000..=0x9FFF => Some(self.vram[self.vram_index(addr)]),
             0xC000..=0xFDFF => Some(self.wram[self.wram_index(addr)]),
             0xFE00..=0xFE9F => Some(self.oam[(addr - 0xFE00) as usize]),
@@ -695,8 +699,16 @@ mod tests {
         assert_eq!(bus.peek8(0xC000), Some(0x42));
         assert_eq!(bus.peek8(0xE000), Some(0x42), "echo RAM peeks too");
         assert_eq!(bus.peek8(0xFF40), None, "I/O may have side effects");
-        assert_eq!(bus.peek8(0x0000), None, "so may a mapper read");
         assert_eq!(bus.peek8(0xFFFF), Some(0));
+        // Cartridge ROM *is* peekable — bank selection is pure address arithmetic, and a debugger
+        // that cannot disassemble ROM is not a debugger. Cartridge RAM is not, because a mapper read
+        // there can be answering an RTC register or a Flash command.
+        assert!(bus.peek8(0x0000).is_some(), "ROM peeks");
+        assert_eq!(
+            bus.peek8(0xA000),
+            None,
+            "cartridge RAM may have side effects"
+        );
     }
 
     #[test]

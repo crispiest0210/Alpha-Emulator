@@ -7,6 +7,7 @@
 //! into a third-party core's private object graph, and refusing to expose that path is a
 //! deliberate structural choice, not an oversight.
 
+use crate::debug::DebugTarget;
 use crate::{AudioSample, Cycles, Framebuffer, InputState};
 use savestate::{decode_state, encode_state, Savable, StateError};
 use thiserror::Error;
@@ -101,6 +102,19 @@ pub trait System: Savable {
     /// Run one video frame.
     fn step_frame(&mut self, input: InputState) -> FrameOutput;
 
+    /// Run exactly one CPU instruction, returning the cycles it took.
+    ///
+    /// Required, not defaulted: there is no honest default. It is what a debugger single-steps
+    /// with, and it is also how execution breakpoints are checked without putting a hook inside
+    /// every system's hot loop — the session steps instruction by instruction *only while a
+    /// debugger is attached*, so ordinary play pays nothing at all. That trade is why this is on
+    /// the trait rather than being an inherent method on each system, which is what it was.
+    ///
+    /// Frame boundaries are not respected: stepping past the end of a frame is a normal thing for
+    /// a debugger to do, and [`framebuffer`](System::framebuffer) simply holds a partially drawn
+    /// picture until the frame completes.
+    fn step_instruction(&mut self) -> Cycles;
+
     /// Return to power-on state, keeping the loaded cartridge.
     fn reset(&mut self);
 
@@ -116,6 +130,15 @@ pub trait System: Savable {
     /// typically swap an internal accumulation buffer with a returned one, so no allocation
     /// happens per frame.
     fn take_audio_samples(&mut self) -> &[AudioSample];
+
+    /// Debugger inspection, when this system offers it.
+    ///
+    /// `None` by default, so a system can be written and run long before it has anything to
+    /// introspect — which is the state the Nintendo DS is in. A frontend shows the debugger panel
+    /// as unavailable rather than empty.
+    fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
+        None
+    }
 
     /// Battery-backed save contents, or `None` when the cartridge has no save memory.
     fn save_ram(&self) -> Option<&[u8]>;

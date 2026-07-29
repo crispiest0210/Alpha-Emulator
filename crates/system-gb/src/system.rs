@@ -440,6 +440,14 @@ impl GbSystem {
         &self.cpu
     }
 
+    /// Mutable access to the core, for the debugger's "set next statement".
+    ///
+    /// The counterpart to `bus_mut`, and as narrow: it exists so `DebugTarget` can move the program
+    /// counter, which is the only write a debugger makes into the CPU.
+    pub fn cpu_mut(&mut self) -> &mut Sm83 {
+        &mut self.cpu
+    }
+
     pub fn bus(&self) -> &GbSystemBus {
         &self.bus
     }
@@ -455,18 +463,6 @@ impl GbSystem {
 }
 
 impl GbSystem {
-    /// Run exactly one instruction and report the cycles it took.
-    ///
-    /// Public for the debugger and for tracing. A frontend driving this instead of `step_frame`
-    /// can check breakpoints between instructions without the system knowing that breakpoints
-    /// exist — which is what keeps `debugger` above the systems rather than inside them.
-    pub fn step_instruction(&mut self) -> Cycles {
-        let before = self.bus.timing.now();
-        self.cpu.step(&mut self.bus);
-        self.resolve_stop();
-        self.bus.timing.now() - before
-    }
-
     /// Turn a `STOP` into a speed switch when one is armed.
     ///
     /// `STOP` means two unrelated things on a CGB and the machine tells them apart by whether
@@ -488,6 +484,21 @@ impl GbSystem {
 }
 
 impl System for GbSystem {
+    /// Run exactly one instruction and report the cycles it took.
+    ///
+    /// What the debugger single-steps with, and what the session checks execution breakpoints
+    /// between — which is how breakpoints work without this crate knowing that breakpoints exist.
+    fn step_instruction(&mut self) -> Cycles {
+        let before = self.bus.timing.now();
+        self.cpu.step(&mut self.bus);
+        self.resolve_stop();
+        self.bus.timing.now() - before
+    }
+
+    fn debug(&mut self) -> Option<&mut dyn core_common::DebugTarget> {
+        Some(self)
+    }
+
     fn id(&self) -> &'static str {
         "gb"
     }
