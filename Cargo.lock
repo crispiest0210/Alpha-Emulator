@@ -1066,6 +1066,7 @@ name = "frontend-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cart-common",
  "core-common",
  "crossbeam-channel",
  "debugger",
