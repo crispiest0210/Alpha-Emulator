@@ -17,7 +17,7 @@ and tested**, not what is planned. It is updated as work lands.
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ⚠️ | ⚠️ | Runs, renders, and sounds. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ⚠️ | ⚠️ | Assembled and running. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
-| Game Boy Advance | ❌ | ❌ | ❌ | Every rendering and timing subsystem done and tested as a unit. Not assembled: no scanline compositor, no APU, no `System` impl |
+| Game Boy Advance | ❌ | ❌ | ❌ | Every subsystem done and tested as a unit, including a working scanline compositor. **Not assembled** — no bus, no cartridge wiring, no `System` impl, so it does not run a ROM |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. Will be explicitly partial when it does begin |
 
 **The Game Boy core runs ROMs; the GUI does not yet.** The emulation core boots cartridges,
