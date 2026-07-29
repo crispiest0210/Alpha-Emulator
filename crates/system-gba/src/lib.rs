@@ -12,13 +12,14 @@
 //! | Done | Not started |
 //! |---|---|
 //! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Affine backgrounds (the matrix registers and their per-line accumulation) |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Applying an affine matrix per pixel, for objects and backgrounds |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Assembling the layers into a scanline compositor |
 //! | [`timers`] — four channels, prescalers, cascade | Windows and colour blending |
 //! | [`dma`] — four channels, all trigger modes, priority | APU: four PSG channels plus two DMA-fed FIFOs |
 //! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Wait-state timing (`WAITCNT`) |
 //! | [`bitmap`] — modes 3, 4, and 5 | Cartridge wiring and the `System` impl |
 //! | [`background`] — the four text layers, map decode, draw order | |
 //! | [`objects`] — OAM decode, sizes, per-line selection, matrices | |
+//! | [`affine`] — the transform for rotated backgrounds and sprites | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -28,6 +29,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod affine;
 pub mod background;
 pub mod bitmap;
 pub mod dma;
@@ -37,6 +39,7 @@ pub mod objects;
 pub mod timers;
 pub mod video;
 
+pub use affine::AffineBackground;
 pub use background::{Backgrounds, GbaTilemap};
 pub use bitmap::bgr555_to_rgba8;
 pub use dma::DmaController;
