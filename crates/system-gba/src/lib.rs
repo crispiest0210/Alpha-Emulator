@@ -12,7 +12,7 @@
 //! | Done | Not started |
 //! |---|---|
 //! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | Affine backgrounds (the matrix registers and their per-line accumulation) |
-//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Assembling the layers into a scanline compositor |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | Drawing sprites and affine layers into the compositor |
 //! | [`timers`] — four channels, prescalers, cascade | Windows and colour blending |
 //! | [`dma`] — four channels, all trigger modes, priority | APU: four PSG channels plus two DMA-fed FIFOs |
 //! | [`video`] — scanline machine, `DISPCNT`/`DISPSTAT`/`VCOUNT` | Wait-state timing (`WAITCNT`) |
@@ -22,6 +22,7 @@
 //! | [`affine`] — the transform for rotated backgrounds and sprites | |
 //! | [`fifo`] — the two DMA-fed direct-sound channels | |
 //! | [`waitstates`] — `WAITCNT` and per-region access cost | |
+//! | [`compositor`] — layer selection, priority, palette, backdrop | |
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
@@ -34,6 +35,7 @@
 pub mod affine;
 pub mod background;
 pub mod bitmap;
+pub mod compositor;
 pub mod dma;
 pub mod fifo;
 pub mod irq;
@@ -46,6 +48,7 @@ pub mod waitstates;
 pub use affine::AffineBackground;
 pub use background::{Backgrounds, GbaTilemap};
 pub use bitmap::bgr555_to_rgba8;
+pub use compositor::{Frame, GbaPalette};
 pub use dma::DmaController;
 pub use fifo::{DirectSound, SoundFifo};
 pub use irq::InterruptController;

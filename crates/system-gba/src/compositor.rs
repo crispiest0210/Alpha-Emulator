@@ -1,0 +1,184 @@
+//! Putting the layers together into one scanline.
+//!
+//! # What decides what you see
+//!
+//! Up to four backgrounds and 128 sprites can want the same pixel. The rule is priority first
+//! — 0 in front, 3 behind — and then, at equal priority, sprites beat backgrounds and a lower
+//! background number beats a higher one. Every layer keeps its own palette index until the very
+//! end, so a pixel that loses costs nothing but a comparison.
+//!
+//! # Which backgrounds exist depends on the mode
+//!
+//! Modes 0 to 2 differ in which of the four layers are present and whether they are text or
+//! affine, and modes 3 to 5 have no tile layers at all — the bitmap *is* background 2. Getting
+//! this wrong does not produce a subtly wrong picture; it produces a layer drawn from memory
+//! that holds something else entirely.
+
+use core_common::{Framebuffer, Rgba8};
+use ppu_tile2d::{
+    render_text_background, BackgroundParams, PaletteSource, PixelSource, ScanlineBuffer,
+};
+
+use crate::background::{Backgrounds, GbaTilemap};
+use crate::bitmap;
+use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
+
+/// Which background layers a mode has, and whether each is affine.
+///
+/// Returned as a fixed array rather than a `Vec` because the answer is a property of the mode,
+/// not of the frame, and every caller wants to index it by layer number.
+pub fn layers_for_mode(mode: u16) -> [Option<LayerKind>; 4] {
+    use LayerKind::*;
+    match mode {
+        0 => [Some(Text), Some(Text), Some(Text), Some(Text)],
+        1 => [Some(Text), Some(Text), Some(Affine), None],
+        2 => [None, None, Some(Affine), Some(Affine)],
+        // The bitmap modes have no tile layers: the bitmap occupies background 2's slot, and
+        // the compositor draws it directly rather than through the tile pipeline.
+        3..=5 => [None, None, Some(Bitmap), None],
+        _ => [None; 4],
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerKind {
+    Text,
+    Affine,
+    Bitmap,
+}
+
+/// GBA palette RAM, as a [`PaletteSource`].
+///
+/// Background colours are the first 256 entries and sprite colours the second 256, so one
+/// structure serves both lookups — unlike the Game Boy Color, where they are separate memories.
+pub struct GbaPalette<'a> {
+    pub bytes: &'a [u8],
+}
+
+impl GbaPalette<'_> {
+    fn colour(&self, index: usize) -> Rgba8 {
+        let offset = index * 2;
+        match (self.bytes.get(offset), self.bytes.get(offset + 1)) {
+            (Some(&low), Some(&high)) => bitmap::bgr555_to_rgba8(u16::from_le_bytes([low, high])),
+            _ => Rgba8::BLACK,
+        }
+    }
+}
+
+impl PaletteSource for GbaPalette<'_> {
+    fn lookup_bg(&self, palette: u8, color: u8) -> Rgba8 {
+        self.colour((palette as usize & 0x0F) * 16 + color as usize)
+    }
+
+    fn lookup_sprite(&self, palette: u8, color: u8) -> Rgba8 {
+        // Sprite palettes start halfway through the memory.
+        self.colour(256 + (palette as usize & 0x0F) * 16 + color as usize)
+    }
+}
+
+/// Everything a scanline render needs that is not the framebuffer.
+pub struct Frame<'a> {
+    pub video: &'a VideoTiming,
+    pub backgrounds: &'a Backgrounds,
+    pub vram: &'a [u8],
+    pub palette: &'a [u8],
+    pub oam: &'a [u8],
+}
+
+/// Composite one scanline.
+///
+/// Draws back to front into a shared [`ScanlineBuffer`], so a pixel that is covered later costs
+/// only the comparison that covered it — the indexed form from prompt 08 is what makes that
+/// cheap enough to do naively.
+pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuffer) {
+    if line >= SCREEN_HEIGHT {
+        return;
+    }
+
+    // Forced blank is not "draw nothing": the screen goes white and video memory is untouched,
+    // which is what makes it usable for hiding a mid-frame rewrite of VRAM.
+    if frame.video.forced_blank() {
+        let row = framebuffer.row_mut(line);
+        for pixel in row.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        }
+        return;
+    }
+
+    let mode = frame.video.mode();
+    if (3..=5).contains(&mode) {
+        // The bitmap is the picture; there are no tile layers to compose with it. Sprites still
+        // draw over it, which the tile path below handles once there is a buffer to draw into.
+        let row = framebuffer.row_mut(line);
+        bitmap::render_scanline(
+            mode,
+            line,
+            frame.vram,
+            frame.palette,
+            frame.video.bitmap_frame_offset(),
+            row,
+        );
+        return;
+    }
+
+    let mut scanline = ScanlineBuffer::new(SCREEN_WIDTH as usize);
+    scanline.clear();
+
+    let kinds = layers_for_mode(mode);
+    let enabled = [
+        frame.video.dispcnt & (1 << 8) != 0,
+        frame.video.dispcnt & (1 << 9) != 0,
+        frame.video.dispcnt & (1 << 10) != 0,
+        frame.video.dispcnt & (1 << 11) != 0,
+    ];
+    let present = std::array::from_fn(|i| enabled[i] && kinds[i].is_some());
+
+    for index in frame.backgrounds.draw_order(present) {
+        // Affine layers are not drawn here yet; they need the per-line matrix accumulation
+        // driven from the system assembly, which does not exist. Skipping them leaves the
+        // backdrop showing rather than drawing them with the wrong transform.
+        if kinds[index] != Some(LayerKind::Text) {
+            continue;
+        }
+        draw_text_layer(frame, index, line, &mut scanline);
+    }
+
+    let palette = GbaPalette {
+        bytes: frame.palette,
+    };
+    let backdrop = palette.lookup_bg(0, 0);
+    let row = framebuffer.row_mut(line);
+    scanline.resolve_into(&palette, backdrop, row);
+}
+
+fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut ScanlineBuffer) {
+    let layer = frame.backgrounds.layers[index];
+    let (width, height) = layer.size_in_tiles(false);
+    let map = GbaTilemap {
+        vram: frame.vram,
+        screen_base: layer.screen_base(),
+        char_base: layer.char_base(),
+        depth: layer.bit_depth(),
+        width,
+        height,
+    };
+    let params = BackgroundParams::full_line(
+        line,
+        layer.scroll_x as u32,
+        layer.scroll_y as u32,
+        layer.bit_depth(),
+    );
+    render_text_background(&map, frame.vram, &params, scanline);
+}
+
+/// Whether a pixel came from a background rather than the backdrop.
+///
+/// Small enough to inline at the two call sites that want it, but named because "did anything
+/// draw here" is the question the priority rule keeps asking.
+#[inline]
+pub fn was_drawn(source: PixelSource) -> bool {
+    source != PixelSource::Backdrop
+}
+
+#[cfg(test)]
+mod tests;

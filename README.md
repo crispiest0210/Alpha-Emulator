@@ -57,6 +57,7 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done and tested; not yet charged to the CPU |
+| `system-gba` compositor — mode layers, priority, palette | text layers and bitmap modes draw; **sprites and affine layers not yet composited** |
 | Everything else | not started |
 
 ### Accuracy suite
