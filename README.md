@@ -63,6 +63,7 @@ Component status:
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — `Div`, `Sqrt`, `ArcTan2`, `CpuSet`, the waiting calls | done; unhandled calls change nothing rather than guessing |
+| `debugger` — breakpoints, watchpoints, conditions | registry done and driven from a running machine; **no `egui` panel, GDB server, or tracing yet** |
 | Everything else | not started |
 
 ### Accuracy suite

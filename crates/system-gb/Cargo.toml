@@ -16,3 +16,8 @@ cpu-sm83.workspace = true
 ppu-tile2d.workspace = true
 apu-shared.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# The debugger sits *above* the systems, so this is a dev-dependency: it lets the integration
+# test live next to the machine it drives without putting `debugger` into the shipped graph.
+debugger.workspace = true

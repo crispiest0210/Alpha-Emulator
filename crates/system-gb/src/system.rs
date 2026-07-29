@@ -455,6 +455,18 @@ impl GbSystem {
 }
 
 impl GbSystem {
+    /// Run exactly one instruction and report the cycles it took.
+    ///
+    /// Public for the debugger and for tracing. A frontend driving this instead of `step_frame`
+    /// can check breakpoints between instructions without the system knowing that breakpoints
+    /// exist — which is what keeps `debugger` above the systems rather than inside them.
+    pub fn step_instruction(&mut self) -> Cycles {
+        let before = self.bus.timing.now();
+        self.cpu.step(&mut self.bus);
+        self.resolve_stop();
+        self.bus.timing.now() - before
+    }
+
     /// Turn a `STOP` into a speed switch when one is armed.
     ///
     /// `STOP` means two unrelated things on a CGB and the machine tells them apart by whether

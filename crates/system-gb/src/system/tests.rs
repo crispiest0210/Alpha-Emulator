@@ -620,3 +620,70 @@ fn a_rewind_buffer_can_walk_back_across_its_whole_depth_of_real_states() {
     }
     assert_eq!(seen.len(), 3, "three steps back from the newest of four");
 }
+
+// ---------------------------------------------------------------------------
+// The debugger, driven from above
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_execution_breakpoint_stops_a_running_machine() {
+    // The integration prompt 15 asks for, arranged so the system never learns that breakpoints
+    // exist: the caller steps instructions and consults the registry between them. That is what
+    // keeps `debugger` above the systems rather than inside them.
+    use debugger::Breakpoints;
+
+    // The header's entry point jumps to 0x0150, where the test program is placed: `3E 00`
+    // LD A,0, then `3C` INC A at 0x0152, then a spin.
+    let mut gb = system(&[0x3E, 0x00, 0x3C, 0x18, 0xFE]);
+    let mut points = Breakpoints::new();
+    points.add_execution(0x0152);
+
+    let mut stopped_at = None;
+    for _ in 0..16 {
+        let pc = gb.cpu.pc;
+        if let Some(trigger) = points.check_execution(pc as u32) {
+            stopped_at = Some(trigger);
+            break;
+        }
+        gb.step_instruction();
+    }
+
+    assert_eq!(
+        stopped_at,
+        Some(debugger::Trigger::Execution { addr: 0x0152 }),
+        "it stopped before running the instruction at the breakpoint"
+    );
+}
+
+#[test]
+fn a_write_watchpoint_catches_the_access_that_set_a_register() {
+    // The other half of prompt 15's acceptance test: a watchpoint on an MMIO register fires on
+    // the expected write and not on unrelated traffic.
+    use debugger::{AccessKind, Breakpoints, Watchpoint};
+
+    let mut points = Breakpoints::new();
+    points.add_watchpoint(Watchpoint::at(0xFF47, AccessKind::Write)); // BGP
+
+    let mut gb = system(SPIN_PROGRAM);
+    assert_eq!(
+        points.check_access(0xFF40, AccessKind::Write, 0x91),
+        None,
+        "an unrelated register does not trigger it"
+    );
+
+    write(&mut gb, 0xFF47, 0xE4);
+    assert!(
+        points
+            .check_access(0xFF47, AccessKind::Write, 0xE4)
+            .is_some(),
+        "and the watched one does"
+    );
+}
+
+#[test]
+fn stepping_one_instruction_advances_the_clock_by_that_instruction() {
+    let mut gb = system(COUNTER_PROGRAM);
+    let cycles = gb.step_instruction();
+    assert!(cycles.get() > 0, "an instruction costs something");
+    assert_eq!(gb.bus().timing.now(), cycles);
+}

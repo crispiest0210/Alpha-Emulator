@@ -3038,6 +3038,7 @@ dependencies = [
  "cart-common",
  "core-common",
  "cpu-sm83",
+ "debugger",
  "ppu-tile2d",
  "savestate",
  "tracing",
