@@ -1,9 +1,35 @@
 //! Game Boy Advance system assembly.
 //!
-// TODO(prompt12): implement. See docs/successor-emulator/12-*.md
+//! Follows prompt 11's proven pattern, adapted for a much larger machine, and built up in the
+//! same order: the memory map first, then the register blocks that sit on it, then the
+//! assembly that drives them.
+//!
+//! # Status
+//!
+//! Three subsystems are complete and tested; nothing is assembled yet, so this crate does not
+//! run a ROM.
+//!
+//! | Done | Not started |
+//! |---|---|
+//! | [`memory`] — regions, mirroring, open bus, the 8-bit write quirk | PPU (tile modes 0-2, bitmap modes 3-5, affine) |
+//! | [`irq`] — `IE`/`IF`/`IME`, acknowledge-by-writing-ones | APU (four PSG channels plus two DMA-fed FIFOs) |
+//! | [`timers`] — four channels, prescalers, cascade | Wait-state timing (`WAITCNT`) |
+//! | [`dma`] — four channels, all trigger modes, priority | Cartridge wiring and the `System` impl |
+//!
+//! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
+//! least as correct and complete as the vendored core it replaces, with the test coverage that
+//! core never had". Nothing here has been run against `gba-suite` or `arm7wrestler` yet — the
+//! ARM core they exercise has never been run against them either, and it will be worth doing
+//! both together once there is a machine to run them on.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds() {}
-}
+#![deny(unsafe_code)]
+
+pub mod dma;
+pub mod irq;
+pub mod memory;
+pub mod timers;
+
+pub use dma::DmaController;
+pub use irq::InterruptController;
+pub use memory::{GbaBus, Region};
+pub use timers::Timers;
