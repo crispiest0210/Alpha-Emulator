@@ -13,10 +13,6 @@
 //! What is not done, in rough order of how much it matters:
 //!
 //! - **All three `gba-suite` ROMs pass**: the instruction set in both states, and memory.
-//! - Affine *sprites* are decoded and transformed but not composited; they show nothing rather
-//!   than an untransformed approximation. Affine backgrounds are drawn.
-//! - Wait states are computed by [`waitstates`] but not yet charged to the CPU, so every access
-//!   currently costs what the ARM core says it does.
 //! - The four `apu-shared` PSG channels are not mixed alongside the two FIFO channels, and
 //!   doing it needs a decision first. Their *register* layer — `NR10`-`NR52` decode, read masks,
 //!   power-down semantics — is shared by the Game Boy, the Game Boy Color, and the GBA, but it

@@ -20,11 +20,12 @@ use ppu_tile2d::{
     ScanlineBuffer, SpriteRule,
 };
 
+use crate::affine::transform_object_pixel;
 use crate::affine::AffineBackground;
 use crate::background::{Backgrounds, GbaTilemap};
 use crate::bitmap;
 use crate::effects::{BlendMode, Effects, Layer};
-use crate::objects::{ObjectAttributeMemory, ObjectMode};
+use crate::objects::{Object, ObjectAttributeMemory, ObjectMode};
 use crate::video::{dispcnt, VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Which background layers a mode has, and whether each is affine.
@@ -326,6 +327,18 @@ fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
     let oam = ObjectAttributeMemory::decode(frame.oam);
     let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
 
+    // Affine sprites are drawn here rather than handed to the shared compositor, which has no
+    // notion of a matrix. Back to front, so a nearer one overwrites a farther one — the shared
+    // path claims pixels front-first instead, and mixing the two orders would let a farther
+    // affine sprite cover a nearer ordinary one.
+    for index in oam.visible_on_line(line as i32).into_iter().rev() {
+        let object = oam.objects[index];
+        if object.mode == ObjectMode::Normal {
+            continue;
+        }
+        draw_affine_sprite(frame, &oam, &object, line as i32, one_dimensional, scanline);
+    }
+
     let sprites: Vec<_> = oam
         .visible_on_line(line as i32)
         .into_iter()
@@ -346,6 +359,82 @@ fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
         SpriteRule::SpriteDecides,
         scanline,
     );
+}
+
+/// Draw one rotated or scaled sprite.
+///
+/// Runs the opposite way from a background: for each pixel of the sprite's *screen* box, the
+/// matrix says which texture pixel it came from. A double-size sprite's box is twice its own
+/// size, which is what stops a rotation clipping against its own corners — the extra area is
+/// deliberately empty until the rotation moves something into it.
+fn draw_affine_sprite(
+    frame: &Frame<'_>,
+    oam: &ObjectAttributeMemory,
+    object: &Object,
+    line: i32,
+    one_dimensional: bool,
+    scanline: &mut ScanlineBuffer,
+) {
+    let matrix = &oam.matrices[object.matrix];
+    let (box_width, box_height) = object.screen_size();
+    let (half_w, half_h) = (object.width as i32 / 2, object.height as i32 / 2);
+    let (box_half_w, box_half_h) = (box_width as i32 / 2, box_height as i32 / 2);
+    let row_stride = object.row_stride(one_dimensional);
+    let tile_size = object.depth.tile_size();
+
+    for screen_x in 0..box_width as i32 {
+        let x = object.x + screen_x;
+        if x < 0 || x >= SCREEN_WIDTH as i32 {
+            continue;
+        }
+        // Offsets are measured from the centre of the box, which is where the matrix pivots.
+        let (tx, ty) = transform_object_pixel(
+            matrix,
+            screen_x - box_half_w,
+            (line - object.y) - box_half_h,
+            half_w,
+            half_h,
+        );
+        // Outside the sprite's own bounds the rotation has moved this pixel off the artwork.
+        if tx < 0 || ty < 0 || tx >= object.width as i32 || ty >= object.height as i32 {
+            continue;
+        }
+
+        let (tile_x, tile_y) = (tx as usize / 8, ty as usize / 8);
+        let base = object.tile_offset(one_dimensional) + tile_y * row_stride + tile_x * tile_size;
+        let (in_x, in_y) = (tx as usize % 8, ty as usize % 8);
+
+        let colour = match object.depth {
+            BitDepth::Eight => frame.vram.get(base + in_y * 8 + in_x).copied().unwrap_or(0),
+            _ => {
+                // Four bits per pixel, two pixels to a byte, low nibble first.
+                let byte = frame
+                    .vram
+                    .get(base + in_y * 4 + in_x / 2)
+                    .copied()
+                    .unwrap_or(0);
+                if in_x % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    byte >> 4
+                }
+            }
+        };
+        if colour == 0 {
+            continue;
+        }
+
+        scanline.set(
+            x as usize,
+            ppu_tile2d::IndexedPixel {
+                color: colour,
+                palette: object.palette,
+                priority: object.priority,
+                layer: 0,
+                source: PixelSource::Sprite,
+            },
+        );
+    }
 }
 
 /// Write the sprite pixels of a resolved buffer over an already-drawn row.

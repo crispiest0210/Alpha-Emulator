@@ -39,7 +39,7 @@ use crate::irq::{self, InterruptController};
 use crate::keypad::Keypad;
 use crate::memory::{GbaBus, Region};
 use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
-use crate::waitstates::WaitControl;
+use crate::waitstates::{Access, WaitControl};
 use crate::{background::Backgrounds, timers::Timers};
 
 /// Bumped on any change to what this system serializes.
@@ -80,6 +80,15 @@ pub struct GbaSystemBus {
     sample_accumulator: u64,
     /// Set when the video hardware reached vertical blanking during this slice.
     frame_ready: bool,
+
+    /// Wait-state cycles owed by accesses made during the current instruction.
+    ///
+    /// Accumulated rather than charged as they happen, because the ARM core reports an
+    /// instruction's own cost by returning it and advancing mid-instruction would let a
+    /// scheduled event fire between two halves of one access.
+    pending_waits: u32,
+    /// The address after the last access, for deciding whether the next one is sequential.
+    next_sequential: u32,
 }
 
 impl GbaSystemBus {
@@ -102,7 +111,29 @@ impl GbaSystemBus {
             drained: Vec::with_capacity(1024),
             sample_accumulator: 0,
             frame_ready: false,
+            pending_waits: 0,
+            next_sequential: 0,
         }
+    }
+
+    /// Charge an access against the wait-state table.
+    ///
+    /// A ROM access that continues from the previous address is cheaper, because the cartridge
+    /// bus keeps its latch — so this tracks where the last one ended rather than asking the
+    /// caller, which would mean every call site knowing about cartridge timing.
+    fn charge(&mut self, addr: u32, width: u32) {
+        let access = if addr == self.next_sequential {
+            Access::Sequential
+        } else {
+            Access::NonSequential
+        };
+        self.pending_waits += self.waits.cost(addr, width, access);
+        self.next_sequential = addr.wrapping_add(width);
+    }
+
+    /// Take the wait-state cycles owed since the last call.
+    pub fn take_pending_waits(&mut self) -> u32 {
+        std::mem::take(&mut self.pending_waits)
     }
 
     /// Advance every clocked subsystem and act on what they report.
@@ -300,6 +331,7 @@ fn step(addr: u32, step: crate::dma::AddressStep, unit: u32) -> u32 {
 
 impl Bus for GbaSystemBus {
     fn read8(&mut self, addr: u32) -> u8 {
+        self.charge(addr, 1);
         match Region::of(addr) {
             Region::Io => {
                 // Registers are halfwords; a byte read takes its half of one.
@@ -317,6 +349,7 @@ impl Bus for GbaSystemBus {
     }
 
     fn write8(&mut self, addr: u32, value: u8) {
+        self.charge(addr, 1);
         match Region::of(addr) {
             Region::Io => {
                 // A byte write to a halfword register is a read-modify-write, which matters for
@@ -346,6 +379,7 @@ impl Bus for GbaSystemBus {
 
     fn read16(&mut self, addr: u32) -> u16 {
         let addr = addr & !1;
+        self.charge(addr, 2);
         if Region::of(addr) == Region::Io {
             return self.read_io16(addr).unwrap_or(0);
         }
@@ -354,6 +388,7 @@ impl Bus for GbaSystemBus {
 
     fn write16(&mut self, addr: u32, value: u16) {
         let addr = addr & !1;
+        self.charge(addr, 2);
         match Region::of(addr) {
             Region::Io => {
                 self.write_io16(addr, value);
@@ -378,6 +413,8 @@ impl Bus for GbaSystemBus {
     /// third check; every 32-bit palette and VRAM write in every game would have been wrong.
     fn read32(&mut self, addr: u32) -> u32 {
         let addr = addr & !3;
+        // The two halfword reads below charge themselves, and the second is sequential by
+        // construction — which is exactly what the wait-state table says a word access costs.
         (self.read16(addr) as u32) | ((self.read16(addr.wrapping_add(2)) as u32) << 16)
     }
 
@@ -447,11 +484,15 @@ impl GbaSystem {
             // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
             // against it, but a wrong non-zero figure is no better than this one.
             self.bus.advance(1);
+            self.bus.take_pending_waits();
             return Cycles(1);
         }
         let cycles = self.cpu.step(&mut self.bus).get().max(1);
-        self.bus.advance(cycles as u32);
-        Cycles(cycles)
+        // The instruction's own cost plus whatever its memory accesses waited for. Charged
+        // together so a scheduled event cannot fire between two halves of one access.
+        let total = cycles as u32 + self.bus.take_pending_waits();
+        self.bus.advance(total);
+        Cycles(total as u64)
     }
 
     /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.

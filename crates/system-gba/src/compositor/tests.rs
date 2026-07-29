@@ -374,14 +374,18 @@ fn a_hidden_sprite_is_not_drawn() {
 }
 
 #[test]
-fn an_affine_sprite_is_skipped_rather_than_drawn_untransformed() {
-    // An untransformed rotated sprite looks like a deliberate picture that is simply wrong,
-    // which is harder to notice than an obvious gap.
+fn an_affine_sprite_with_no_matrix_written_draws_nothing() {
+    // Matrix 0 is all zeroes until a game writes one, which collapses every screen pixel onto
+    // the same texture pixel. Degenerate, and it must not index out of bounds.
     let mut scene = Scene::new(0);
     scene.colour(0, BLUE);
     scene.colour(257, GREEN);
     scene.simple_sprite(1 << 8, 0); // affine
-    assert_eq!(scene.render(0).pixel(0, 0).b, 0xFF);
+    assert_eq!(
+        scene.render(0).pixel(100, 0).b,
+        0xFF,
+        "nothing outside its box"
+    );
 }
 
 #[test]
@@ -475,4 +479,47 @@ fn a_layer_that_is_not_a_blend_target_is_left_alone() {
     scene.effects.write16(ereg::BLDY, 16);
 
     assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "untouched");
+}
+
+#[test]
+fn an_affine_sprite_draws_through_its_matrix() {
+    // The identity matrix should put it exactly where an ordinary sprite would be, which is the
+    // check that the centre-relative transform is not off by half a sprite.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(1 << 8, 0); // affine
+                                    // Matrix 0 is the identity, in the last halfword of OAM entries 0 through 3.
+    for (n, value) in [0x0100u16, 0x0000, 0x0000, 0x0100].iter().enumerate() {
+        scene.oam[n * 8 + 6..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let framebuffer = scene.render(0);
+    assert_eq!(framebuffer.pixel(0, 0).g, 0xFF, "drawn");
+    assert_eq!(framebuffer.pixel(7, 0).g, 0xFF, "the whole 8 pixels");
+    assert_eq!(framebuffer.pixel(8, 0).b, 0xFF, "and no further");
+}
+
+#[test]
+fn a_double_size_affine_sprite_covers_twice_the_area() {
+    // The extra area exists so a rotation is not clipped by the sprite's own corners, and is
+    // deliberately empty until the rotation moves something into it.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN);
+    scene.simple_sprite(3 << 8, 0); // affine, double size
+    for (n, value) in [0x0100u16, 0x0000, 0x0000, 0x0100].iter().enumerate() {
+        scene.oam[n * 8 + 6..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    // The artwork sits in the middle of the doubled box, so line 0 of the box maps above the
+    // top of the artwork and shows the margin; line 4 is where it starts.
+    assert_eq!(
+        scene.render(0).pixel(0, 0).b,
+        0xFF,
+        "the margin, vertically"
+    );
+    let framebuffer = scene.render(4);
+    assert_eq!(framebuffer.pixel(0, 4).b, 0xFF, "the margin, horizontally");
+    assert_eq!(framebuffer.pixel(6, 4).g, 0xFF, "and the artwork inside it");
 }

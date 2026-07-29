@@ -360,3 +360,60 @@ fn palette_ram_mirrors_every_kilobyte() {
     bus.write32(0x0500_0010, 1);
     assert_eq!(bus.read32(0x0500_0410), 1);
 }
+
+#[test]
+fn an_instruction_is_charged_for_the_memory_it_touched() {
+    // A flat cost per access would erase the difference between a game linked into the fast ROM
+    // window and one linked into the slow one, which is a choice games make deliberately.
+    let mut gba = system();
+    let bus = gba.bus_mut();
+    bus.take_pending_waits();
+
+    bus.read32(0x0300_0000); // IWRAM: one cycle at full width
+    let fast = bus.take_pending_waits();
+
+    bus.read32(0x0200_0000); // EWRAM: 16-bit bus with wait states
+    let slow = bus.take_pending_waits();
+
+    assert!(
+        slow > fast,
+        "EWRAM ({slow}) should cost more than IWRAM ({fast})"
+    );
+}
+
+#[test]
+fn a_rom_access_that_continues_from_the_last_one_is_cheaper() {
+    // The cartridge bus keeps its address latched, which is why a loop walking forward through
+    // ROM is much faster than one chasing pointers.
+    let mut gba = system();
+    let bus = gba.bus_mut();
+
+    bus.read16(0x0800_0000);
+    bus.take_pending_waits();
+    bus.read16(0x0800_0002); // continues
+    let sequential = bus.take_pending_waits();
+
+    bus.read16(0x0801_0000); // jumps
+    let jump = bus.take_pending_waits();
+
+    assert!(sequential < jump, "{sequential} should be below {jump}");
+}
+
+#[test]
+fn a_frame_takes_longer_when_the_cartridge_is_configured_slower() {
+    // The whole point of the wait-state table: the same code at two speeds.
+    fn frame_cycles(waitcnt: u16) -> u64 {
+        let mut gba = system();
+        gba.bus_mut().write16(crate::waitstates::WAITCNT, waitcnt);
+        gba.step_frame(InputState::default()).cycles_elapsed.get()
+    }
+
+    // Setting 2 is the fastest first access, setting 3 the slowest.
+    let fast = frame_cycles(2 << 2);
+    let slow = frame_cycles(3 << 2);
+    assert!(
+        slow > fast,
+        "a slower cartridge should reach vertical blanking in fewer instructions, so a frame \
+         costs more cycles per instruction: {slow} against {fast}"
+    );
+}
