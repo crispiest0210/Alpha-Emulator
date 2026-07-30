@@ -211,7 +211,9 @@ its two CPU cores.
   breakpoints exist and a detached session pays nothing at all. Watchpoints cannot work that way —
   only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
   and the session drains it after each instruction. That costs one branch per bus access whether or
-  not anything is watching. Measuring it is prompt 18's job; nothing claims a number.
+  not anything is watching — **+1.7% of a Game Boy frame and +4.5% of a GBA one**, measured under
+  prompt 18. See "Performance" below: the cost is kept deliberately and recorded as a deviation from
+  prompt 15's "zero measurable overhead" constraint rather than reported as compliance.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
@@ -241,11 +243,38 @@ explicitly rather than sweeping it into an "unsupported" arm, and the dual-scree
 coordinate mapping are written and unit-tested against a 256×384 framebuffer that nothing produces
 yet. Prompt 13 is what fills that in.
 
-Prompt 18 is the other obvious next step and is no longer blocked: there is something running at
-speed to profile, the HUD already reports measured speed, dropped frames, dropped samples, and
-rewind memory, and prompt 15 left it a specific claim to check — that attaching the debugger with no
-breakpoints set costs nothing, because the loop only steps instruction-at-a-time when something needs
-checking. A test asserts the machine still keeps up; only profiling can say what it actually costs.
+### Start here
+
+Prompt 13, `docs/successor-emulator/13-system-nds.md`, read after `00-INDEX-AND-ARCHITECTURE.md`.
+Build it the way the GBA was built and this file recommends — **tested units first, assembled last**.
+That order is not stylistic: a bug in a unit is found by its own test in seconds, and the same bug
+inside an assembled machine is found by staring at a wrong picture.
+
+The first unit is the memory map, in a new `crates/system-nds/src/memory.rs`, modelled on
+`crates/system-gba/src/memory.rs`. `system-nds` today contains only the two CPU cores. What makes the
+DS different from everything already done, and what to expect to spend the time on:
+
+- **Two CPUs sharing a bus**, with different views of it. The ARM9 has TCM and caches (already in
+  `cpu-arm946e`); the ARM7 does not. They see overlapping but not identical address spaces.
+- **Shared WRAM with a runtime-configurable split** between the two — a register decides who owns
+  which half, and both halves can be assigned to one core.
+- **VRAM banks A–I, individually mappable** to several purposes. This is the piece with no analogue
+  in anything built so far and the one most likely to be got subtly wrong.
+- **Two 2D engines.** Expect `ppu-tile2d` to serve both, and expect the "parameterise rather than
+  fork" principle above to apply exactly as it did for the CGB.
+- **A software 3D rasteriser**, which prompt 18 expects to be the first thing in this project that
+  actually needs optimising. Do not pre-optimise it: `cargo xtask bench` exists, and the decision
+  must not be inherited from the two go/no-go calls already made for the other cores.
+
+Everything above the system is already waiting for it. `frontend-native` lists `.nds` files and greys
+them out, `frontend-core::platform` names the DS explicitly rather than sweeping it into an
+"unsupported" arm, `frame_duration` already carries its 59.8261 Hz, and the dual-screen layout and
+touch-coordinate mapping are written and unit-tested against a 256×384 framebuffer that nothing
+produces yet. `System::debug` and `System::access_log` default to `None`, so a DS that implements
+neither still compiles and the debugger reports it as unavailable rather than lying.
+
+Prompt 13 is explicitly scoped as *partial* — say so in `README.md` as it lands, and keep saying so
+until it is not.
 
 ### What "verified" means for the frontend
 
@@ -304,6 +333,18 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   reasoning about them had failed.
 - `dmg_sound_results` in `testing/harness/src/tests.rs` prints what the memory-protocol sound
   ROMs actually reported, rather than just pass or fail.
+- **The debugger panel** (`cargo xtask dev -- <rom>`, then "Debugger") shows registers, disassembly
+  with click-to-toggle breakpoints, a hex viewer, and watchpoints. Attaching with no breakpoints set
+  costs nothing, so it is safe to leave open while a game runs.
+- **`cgb_acid2_attribute_dump`** in `crates/system-gbc/src/lib.rs` dumps VRAM maps, OAM flags, and
+  both palette sets from a running machine. It is what cracked cgb-acid2 in about a minute after
+  reasoning from the rendered picture had stalled — reach for it before staring at pixels. Its rows
+  are *map* rows, which with `SCY` non-zero are not screen rows.
+- **`frontend-headless run --save-frame out.png`** writes a framebuffer as a PNG, and `identify`
+  prints what the library importer would record for a ROM. Comparing that PNG against a published
+  reference image is what turned dmg-acid2 and cgb-acid2 from "renders something" into passes.
+- **`cargo xtask bench --quick --filter <name>`** for a fast measurement, `--save-baseline` and
+  `--baseline` for a before/after claim. `cargo xtask profile <rom>` prints the flamegraph command.
 
 ## Commands
 
