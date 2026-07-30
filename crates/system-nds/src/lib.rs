@@ -22,6 +22,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod cartridge;
 pub mod dma;
 pub mod engine2d;
 pub mod ipc;
@@ -31,6 +32,7 @@ pub mod timers;
 pub mod video;
 pub mod vram;
 
+pub use cartridge::NdsCartridge;
 pub use dma::DmaController;
 pub use engine2d::{Engine, Engine2d};
 pub use ipc::Ipc;
