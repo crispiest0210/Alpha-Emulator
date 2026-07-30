@@ -8,9 +8,9 @@
 //!
 //! Implemented so far: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), the
 //! inter-processor communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]),
-//! and the two timer blocks ([`timers`]).
+//! the two timer blocks ([`timers`]), and the two DMA controllers ([`dma`]).
 //!
-//! Not implemented yet: the two 2D engines, the 3D core, the audio hardware, DMA,
+//! Not implemented yet: the two 2D engines, the 3D core, the audio hardware,
 //! the cartridge, and the [`core_common::System`] implementation itself.
 //!
 //! # Wifi is out of scope
@@ -21,12 +21,14 @@
 
 #![deny(unsafe_code)]
 
+pub mod dma;
 pub mod ipc;
 pub mod irq;
 pub mod memory;
 pub mod timers;
 pub mod vram;
 
+pub use dma::DmaController;
 pub use ipc::Ipc;
 pub use irq::InterruptController;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};
