@@ -20,3 +20,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+criterion.workspace = true
+
+# `harness = false` because criterion provides its own `main`; leaving it on makes libtest and
+# criterion both try to parse the command line and neither work.
+[[bench]]
+name = "systems"
+harness = false

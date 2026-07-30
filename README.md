@@ -170,7 +170,8 @@ Linux, macOS, and Windows:
 | `cargo xtask dev` | Run the native frontend (`-- <rom>` to open a cartridge) |
 | `cargo xtask build --release` | Build the workspace optimized |
 | `cargo xtask test` | `cargo test --workspace` (`--accuracy` adds the test-ROM suite) |
-| `cargo xtask bench` | Run benchmarks |
+| `cargo xtask bench` | Criterion benchmarks (`--quick`, `--filter`, `--save-baseline`, `--baseline`) |
+| `cargo xtask profile <rom>` | Build the release driver and print the flamegraph command |
 | `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
 | `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
 
@@ -233,6 +234,37 @@ frames, which is how you locate the frame where two builds diverge rather than j
 that they did. `check-determinism` runs the same ROM twice from a fresh machine and compares:
 determinism is what save states, rewind, and replay all rest on, and it is cheap to check and
 easy to lose.
+
+## Performance
+
+Measured on an Apple M3, `bench` profile. Full numbers, the per-frame apportionment, and the
+dynamic-recompilation decision live in `testing/harness/benches/systems.rs` — beside the benchmarks
+that produced them rather than in prose that can drift from them.
+
+| workload | frame time | speed |
+|---|---|---|
+| Game Boy, rendering | 246 µs | 68x |
+| Game Boy, rendering + four APU channels | 361 µs | 46x |
+| Game Boy Advance, ARM instructions straight from ROM | 1 486 µs | 11.3x |
+| dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
+
+Three findings worth surfacing:
+
+- **The APU costs more than the PPU on a Game Boy frame** — about a third of it against a sixth. Not
+  what you would guess for a machine whose job is drawing a picture, and the first place to look if
+  the Game Boy ever needs to be faster.
+- **No dynamic recompiler, for either CPU core**, on the evidence rather than by preference. A dynarec
+  replaces dispatch and nothing else, and the worst measured workload on each system already runs at
+  46x and 11.3x real time. The Nintendo DS decision is deferred rather than inherited — prompt 18
+  expects it to be the case that actually needs help, and there is nothing to measure yet.
+- **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame and +4.5% of a GBA
+  one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
+  overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
+  leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
+  deliberate deviation with the number, not as compliance.
+
+Nothing has been optimised, deliberately: every system meets its target with 11x to 80x of margin, and
+an optimisation with no problem behind it is not worth its own risk.
 
 ## Architecture
 

@@ -212,7 +212,13 @@ its two CPU cores.
   only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
   and the session drains it after each instruction. That costs one branch per bus access whether or
   not anything is watching. Measuring it is prompt 18's job; nothing claims a number.
-- **Untouched:** prompts 13 (NDS), 18 (performance), 19 (packaging).
+- **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
+  profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
+  behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
+  11.3x real time. Findings live in `testing/harness/benches/systems.rs`. What is left is the NDS,
+  which prompt 18 expects to be the case that actually needs help and which cannot be measured until
+  prompt 13 exists — that decision must not be inherited from the two that were made.
+- **Untouched:** prompts 13 (NDS), 19 (packaging).
 
 ### The biggest gap
 
@@ -244,6 +250,16 @@ covered instead by their pieces — `keymap` and `InputTracker` each have unit t
 command a key sends is driven end to end through the real channel API against a real emulation
 thread in `frontend-core/src/tests.rs`. The untested link is the two-line hop between them. Press
 them yourself before touching that code.
+
+### Performance, and what it means for the smaller items
+
+`testing/harness/benches/systems.rs` has the numbers and the reasoning. The one finding that should
+change where anyone looks next: **on a Game Boy frame with music, the APU costs more than the PPU** —
+about a third of the frame against a sixth. Every system has between 11x and 80x of margin, so nothing
+has been optimised and nothing should be until something needs it.
+
+`cargo xtask bench --quick --filter gb/` is the fast loop; `--save-baseline` and `--baseline` are how a
+before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 ### Smaller, well-defined items
 

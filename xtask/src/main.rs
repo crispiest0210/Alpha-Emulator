@@ -41,7 +41,27 @@ enum Task {
         accuracy: bool,
     },
     /// Run benchmarks.
-    Bench,
+    Bench {
+        /// Only benchmarks whose name matches this. Criterion treats it as a regex.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Record these results as the baseline that later runs compare against.
+        #[arg(long, value_name = "NAME")]
+        save_baseline: Option<String>,
+        /// Compare against a previously saved baseline.
+        #[arg(long, value_name = "NAME")]
+        baseline: Option<String>,
+        /// Shorter warm-up and measurement, for a quick look rather than a number to quote.
+        #[arg(long)]
+        quick: bool,
+    },
+    /// Profile a real run and say how to turn it into a flamegraph.
+    Profile {
+        /// The ROM to run.
+        rom: std::path::PathBuf,
+        #[arg(long, default_value_t = 1800)]
+        frames: u64,
+    },
     /// Download the accuracy test-ROM corpus.
     FetchTestRoms {
         /// Re-download ROMs that are already present.
@@ -62,7 +82,13 @@ fn main() -> Result<()> {
         Task::Dev { release, args } => dev(release, &args),
         Task::Build { release } => build(release),
         Task::Test { accuracy } => test(accuracy),
-        Task::Bench => bench(),
+        Task::Bench {
+            filter,
+            save_baseline,
+            baseline,
+            quick,
+        } => bench(filter, save_baseline, baseline, quick),
+        Task::Profile { rom, frames } => profile(&rom, frames),
         Task::FetchTestRoms { force } => fetch_test_roms(force),
         Task::Lint { fix } => lint(fix),
     }
@@ -232,8 +258,81 @@ fn test(accuracy: bool) -> Result<()> {
     Ok(())
 }
 
-fn bench() -> Result<()> {
-    run(&cargo(), &["bench", "--workspace"])
+/// Run the criterion benchmarks.
+///
+/// Everything after `--` goes to criterion, which is why the flags are forwarded rather than
+/// reimplemented: `--save-baseline` and `--baseline` are how a before/after claim is made, and prompt
+/// 18 requires every optimisation to come with one.
+fn bench(
+    filter: Option<String>,
+    save_baseline: Option<String>,
+    baseline: Option<String>,
+    quick: bool,
+) -> Result<()> {
+    let mut args: Vec<String> = vec!["bench".into(), "--workspace".into(), "--".into()];
+    if quick {
+        // Enough to see a change of a few percent, not enough to quote. The defaults take minutes.
+        args.extend(["--warm-up-time".into(), "1".into()]);
+        args.extend(["--measurement-time".into(), "3".into()]);
+    }
+    if let Some(name) = save_baseline {
+        args.extend(["--save-baseline".into(), name]);
+    }
+    if let Some(name) = baseline {
+        args.extend(["--baseline".into(), name]);
+    }
+    // Last, because criterion takes the filter as a positional argument.
+    if let Some(filter) = filter {
+        args.push(filter);
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(&cargo(), &refs)
+}
+
+/// Run a ROM under the profiler, or explain how to.
+///
+/// Deliberately does not install anything. `cargo flamegraph` needs `cargo-flamegraph` and, on Linux,
+/// `perf` — both of which are the user's to install, exactly as `cargo xtask setup` treats every other
+/// system dependency. What this does is build the release binary and print the one command that
+/// profiles it, so the command in the docs and the command that runs are the same command.
+fn profile(rom: &std::path::Path, frames: u64) -> Result<()> {
+    if !rom.is_file() {
+        bail!("{} is not a file", rom.display());
+    }
+    run(&cargo(), &["build", "--release", "-p", "frontend-headless"])?;
+
+    let binary = "target/release/frontend-headless";
+    let frames = frames.to_string();
+    let args = ["run", rom.to_str().unwrap_or_default(), "--frames", &frames];
+
+    println!("\nProfiling target built. To capture a flamegraph:\n");
+    if have("flamegraph") || have("cargo-flamegraph") {
+        println!(
+            "  cargo flamegraph --release -p frontend-headless -- {}",
+            args.join(" ")
+        );
+    } else {
+        println!("  cargo install flamegraph      # once");
+        println!(
+            "  cargo flamegraph --release -p frontend-headless -- {}",
+            args.join(" ")
+        );
+    }
+    #[cfg(target_os = "macos")]
+    println!(
+        "\nOr, without installing anything (macOS):\n  \
+         sample $({binary} {} & echo $!) 5 -f /tmp/alpha.sample && cat /tmp/alpha.sample",
+        args.join(" ")
+    );
+    #[cfg(target_os = "linux")]
+    println!(
+        "\nOr, with perf:\n  \
+         perf record -g {binary} {} && perf report",
+        args.join(" ")
+    );
+
+    println!("\nRunning it once now, for a wall-clock figure:\n");
+    run(binary, &args)
 }
 
 // ---------------------------------------------------------------------------
