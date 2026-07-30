@@ -192,10 +192,12 @@ fn a_missing_rom_reports_an_error_and_leaves_the_session_idle() {
 }
 
 #[test]
-fn a_rom_for_an_unfinished_system_says_which_system() {
+fn a_ds_rom_the_header_rejects_reports_the_header_and_not_a_missing_system() {
+    // The Nintendo DS is assembled now, partially, so a file it turns down is a file with a bad
+    // header rather than a system that does not exist. Sixty-four bytes cannot hold one.
     let fixture = Fixture::new("nds");
     let rom = fixture.dir.join("game.nds");
-    std::fs::write(&rom, vec![0u8; 4096]).unwrap();
+    std::fs::write(&rom, vec![0u8; 64]).unwrap();
     let session = fixture.session();
 
     session.send(SessionCommand::LoadRom {
@@ -208,8 +210,8 @@ fn a_rom_for_an_unfinished_system_says_which_system() {
         _ => None,
     });
     assert!(
-        message.contains("Nintendo DS"),
-        "should name the system: {message}"
+        message.contains("512") || message.to_lowercase().contains("bytes"),
+        "should say the file is too small: {message}"
     );
 }
 

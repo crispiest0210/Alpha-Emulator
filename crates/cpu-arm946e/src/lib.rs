@@ -154,6 +154,18 @@ struct TcmBus<'a, B: Bus + ?Sized> {
     dtcm: &'a mut Tcm,
 }
 
+impl<B: Bus + ?Sized> TcmBus<'_, B> {
+    #[inline]
+    fn responds(&self, addr: u32) -> bool {
+        self.itcm.responds_to_read(addr) || self.dtcm.responds_to_read(addr)
+    }
+
+    #[inline]
+    fn responds_write(&self, addr: u32) -> bool {
+        self.itcm.responds_to_write(addr) || self.dtcm.responds_to_write(addr)
+    }
+}
+
 impl<B: Bus + ?Sized> Bus for TcmBus<'_, B> {
     #[inline]
     fn read8(&mut self, addr: u32) -> u8 {
@@ -174,6 +186,64 @@ impl<B: Bus + ?Sized> Bus for TcmBus<'_, B> {
             self.dtcm.write8(addr, value);
         } else {
             self.inner.write8(addr, value);
+        }
+    }
+
+    // The wide accessors must be forwarded, not left to the default byte composition.
+    //
+    // `Bus`'s defaults turn a halfword or word access into two or four byte accesses. That is
+    // correct for a bus whose byte and wide behaviour agree, and wrong for the DS: an ARM9 byte
+    // write to VRAM, palette RAM, or OAM is *dropped* by hardware, and several I/O registers —
+    // the IPC send FIFO among them — exist only as words. Decomposing here meant the ARM9 could
+    // not write to VRAM at all, which presented as a black screen with every register set
+    // correctly.
+    //
+    // A TCM that answers the first byte answers all of them, since the TCM regions are far
+    // larger than four bytes and aligned, so the composition below stays inside one memory.
+    #[inline]
+    fn read16(&mut self, addr: u32) -> u16 {
+        if self.responds(addr) {
+            u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))])
+        } else {
+            self.inner.read16(addr)
+        }
+    }
+
+    #[inline]
+    fn read32(&mut self, addr: u32) -> u32 {
+        if self.responds(addr) {
+            u32::from_le_bytes([
+                self.read8(addr),
+                self.read8(addr.wrapping_add(1)),
+                self.read8(addr.wrapping_add(2)),
+                self.read8(addr.wrapping_add(3)),
+            ])
+        } else {
+            self.inner.read32(addr)
+        }
+    }
+
+    #[inline]
+    fn write16(&mut self, addr: u32, value: u16) {
+        if self.responds_write(addr) {
+            let b = value.to_le_bytes();
+            self.write8(addr, b[0]);
+            self.write8(addr.wrapping_add(1), b[1]);
+        } else {
+            self.inner.write16(addr, value);
+        }
+    }
+
+    #[inline]
+    fn write32(&mut self, addr: u32, value: u32) {
+        if self.responds_write(addr) {
+            let b = value.to_le_bytes();
+            self.write8(addr, b[0]);
+            self.write8(addr.wrapping_add(1), b[1]);
+            self.write8(addr.wrapping_add(2), b[2]);
+            self.write8(addr.wrapping_add(3), b[3]);
+        } else {
+            self.inner.write32(addr, value);
         }
     }
 

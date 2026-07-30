@@ -131,9 +131,14 @@ pub fn build_system(platform: Platform, rom: Vec<u8>) -> Result<Box<dyn System>,
         // DMG-compatibility mode is decided by the cartridge header inside `GbcSystem`.
         Platform::Gbc => Ok(Box::new(system_gbc::GbcSystem::new(rom, None)?)),
         Platform::Gba => Ok(Box::new(system_gba::GbaSystem::new(rom, None)?)),
-        // Named explicitly, so the message says which system is missing rather than leaving the
-        // user to wonder whether their file is corrupt.
-        Platform::Nds => Err(LoadError::NotImplemented("Nintendo DS")),
+        // Partial: 2D only, with no audio and no 3D core. It is built rather than refused
+        // because a DS that runs 2D software is useful and says so, where a refusal says
+        // nothing at all. See `README.md` for exactly what is missing.
+        Platform::Nds => {
+            let mut nds = system_nds::NdsSystem::default();
+            nds.load_cartridge(&rom)?;
+            Ok(Box::new(nds))
+        }
     }
 }
 
@@ -248,14 +253,32 @@ mod tests {
     }
 
     #[test]
-    fn a_ds_rom_is_refused_by_name_not_as_a_corrupt_file() {
-        let Err(err) = build_system(Platform::Nds, vec![0; 4096]) else {
-            panic!("the Nintendo DS is not assembled");
+    fn a_ds_rom_with_a_bad_header_is_refused_as_a_bad_cartridge() {
+        // Not as "not implemented": the Nintendo DS is assembled now, partially, so a file it
+        // rejects is a file with a wrong header rather than a system that does not exist.
+        let Err(err) = build_system(Platform::Nds, vec![0; 64]) else {
+            panic!("64 bytes is not a DS cartridge");
         };
-        assert!(
-            matches!(err, LoadError::NotImplemented("Nintendo DS")),
-            "got {err}"
+        assert!(matches!(err, LoadError::Cartridge(_)), "got {err}");
+    }
+
+    #[test]
+    fn a_ds_rom_with_a_usable_header_builds_a_machine() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[..12].copy_from_slice(b"PLATFORMTEST");
+        // ARM9 and ARM7 binaries of one word each, inside the file.
+        rom[0x20..0x24].copy_from_slice(&0x4000u32.to_le_bytes());
+        rom[0x2C..0x30].copy_from_slice(&4u32.to_le_bytes());
+        rom[0x30..0x34].copy_from_slice(&0x6000u32.to_le_bytes());
+        rom[0x3C..0x40].copy_from_slice(&4u32.to_le_bytes());
+
+        assert_eq!(
+            header_title(Platform::Nds, &rom).as_deref(),
+            Some("PLATFORMTEST")
         );
+        let system = build_system(Platform::Nds, rom).expect("a DS machine");
+        assert_eq!(system.id(), "nds");
+        assert_eq!(system.framebuffer().height(), 384);
     }
 
     #[test]

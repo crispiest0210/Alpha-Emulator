@@ -297,6 +297,21 @@ impl NdsMemory {
         &mut self.oam
     }
 
+    /// Return every byte of RAM to zero, keeping the user-supplied BIOS images.
+    ///
+    /// The BIOSes are kept because they are not machine state: they are files the user supplied,
+    /// and re-reading them from disk on every reset would be the only alternative.
+    pub fn reset(&mut self) {
+        self.main_ram.fill(0);
+        self.shared_wram.fill(0);
+        self.arm7_wram.fill(0);
+        self.palette.fill(0);
+        self.oam.fill(0);
+        self.split = WramSplit::default();
+        self.open_bus9 = 0;
+        self.open_bus7 = 0;
+    }
+
     /// Read a byte from the ARM9's view, or `None` where this module owns nothing.
     ///
     /// `None` means I/O, VRAM, or the Slot-2 cartridge — all of which belong to other modules.

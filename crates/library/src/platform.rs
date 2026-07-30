@@ -47,8 +47,12 @@ impl Platform {
     /// The library indexes ROMs it cannot run — that is deliberate, so a user can import their
     /// whole collection — and the UI greys out the ones that are not playable yet instead of
     /// hiding them or failing on click.
+    ///
+    /// Every platform is runnable now. The Nintendo DS is *partial* — 2D only, no audio, no 3D
+    /// core — which is a different thing from unrunnable and is reported in `README.md` rather
+    /// than by greying out a row the user can happily play a 2D game in.
     pub const fn is_runnable(self) -> bool {
-        !matches!(self, Platform::Nds)
+        true
     }
 
     pub fn from_id(id: &str) -> Option<Self> {

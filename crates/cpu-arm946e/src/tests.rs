@@ -10,7 +10,7 @@
 //! with `system-nds`, and the accuracy-ROM gate with the test harness.
 
 use crate::*;
-use core_common::{Bus, Cpu, CpuIntrospect, Savable, StateReader, StateWriter};
+use core_common::{Bus, Cpu, CpuIntrospect, Savable, StateError, StateReader, StateWriter};
 
 const ORG: u32 = 0x0200_0000;
 const STACK: u32 = 0x0200_8000;
@@ -577,4 +577,121 @@ fn introspection_reports_cp15_alongside_the_register_file() {
         "the sticky overflow flag is visible: {}",
         cpu.flags_summary()
     );
+}
+
+/// A bus that records how wide each access was, to prove the TCM view forwards rather than
+/// decomposing.
+struct WidthBus {
+    inner: TestBus,
+    widths: Vec<(&'static str, u32)>,
+}
+
+impl WidthBus {
+    fn new() -> Self {
+        Self {
+            inner: TestBus::new(),
+            widths: Vec::new(),
+        }
+    }
+}
+
+impl Savable for WidthBus {
+    fn save(&self, w: &mut StateWriter) {
+        self.inner.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        self.inner.load(r)
+    }
+}
+
+impl Bus for WidthBus {
+    fn read8(&mut self, addr: u32) -> u8 {
+        self.widths.push(("read8", addr));
+        self.inner.read8(addr)
+    }
+    fn write8(&mut self, addr: u32, value: u8) {
+        self.widths.push(("write8", addr));
+        self.inner.write8(addr, value);
+    }
+    fn read16(&mut self, addr: u32) -> u16 {
+        self.widths.push(("read16", addr));
+        u16::from_le_bytes([self.inner.read8(addr), self.inner.read8(addr + 1)])
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        self.widths.push(("write16", addr));
+        let b = value.to_le_bytes();
+        self.inner.write8(addr, b[0]);
+        self.inner.write8(addr + 1, b[1]);
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        self.widths.push(("read32", addr));
+        u32::from_le_bytes(std::array::from_fn(|i| self.inner.read8(addr + i as u32)))
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        self.widths.push(("write32", addr));
+        let b = value.to_le_bytes();
+        for (i, byte) in b.iter().enumerate() {
+            self.inner.write8(addr + i as u32, *byte);
+        }
+    }
+    fn open_bus8(&self, _addr: u32) -> u8 {
+        0
+    }
+    fn peek8(&self, addr: u32) -> Option<u8> {
+        self.inner.peek8(addr)
+    }
+}
+
+#[test]
+fn a_wide_access_that_misses_tcm_stays_wide_on_the_way_out() {
+    // The `Bus` defaults decompose a halfword or word into byte accesses. That is wrong for the
+    // DS, where an ARM9 byte write to VRAM, palette RAM, or OAM is *dropped* by hardware and
+    // several I/O registers exist only as words — so the TCM view has to forward the width it
+    // was given. Getting this wrong made the ARM9 unable to write to VRAM at all, which
+    // presented as a black screen with every register set correctly.
+    let mut cpu = Arm946e::new(boot());
+    cpu.post_boot_nds();
+    let mut bus = WidthBus::new();
+
+    // 0x06000000 is VRAM on a real DS: outside both TCM regions.
+    let mut view = TcmBusProbe(&mut cpu, &mut bus);
+    view.write16(0x0600_0000, 0x1234);
+    view.write32(0x0600_0004, 0x89AB_CDEF);
+    view.read32(0x0600_0004);
+
+    let widths: Vec<&str> = bus.widths.iter().map(|(w, _)| *w).collect();
+    assert_eq!(widths, ["write16", "write32", "read32"]);
+}
+
+/// Drives `TcmBus` from outside the crate's private plumbing.
+struct TcmBusProbe<'a>(&'a mut Arm946e, &'a mut WidthBus);
+
+impl TcmBusProbe<'_> {
+    fn write16(&mut self, addr: u32, value: u16) {
+        let bus = &mut *self.1;
+        self.0
+            .with_tcm_bus(bus, |_, view| view.write16(addr, value));
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        let bus = &mut *self.1;
+        self.0
+            .with_tcm_bus(bus, |_, view| view.write32(addr, value));
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        let bus = &mut *self.1;
+        self.0.with_tcm_bus(bus, |_, view| view.read32(addr))
+    }
+}
+
+#[test]
+fn a_wide_access_inside_tcm_is_served_by_tcm_and_never_reaches_the_bus() {
+    let mut cpu = Arm946e::new(boot());
+    cpu.post_boot_nds();
+    let mut bus = WidthBus::new();
+
+    // ITCM starts at zero after the post-boot configuration.
+    let mut view = TcmBusProbe(&mut cpu, &mut bus);
+    view.write32(0x0000_0100, 0xDEAD_BEEF);
+    assert_eq!(view.read32(0x0000_0100), 0xDEAD_BEEF);
+    assert!(bus.widths.is_empty(), "{:?}", bus.widths);
 }
