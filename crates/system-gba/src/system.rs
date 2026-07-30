@@ -626,11 +626,15 @@ impl System for GbaSystem {
         STATE_VERSION
     }
 
-    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+    fn set_input(&mut self, input: InputState) {
         self.bus.keypad.set_input(input.buttons);
         if self.bus.keypad.interrupt_requested() {
             self.bus.irq.raise(irq::source::KEYPAD);
         }
+    }
+
+    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+        self.set_input(input);
         self.bus.frame_ready = false;
         self.save_ram_dirty = false;
         let mut elapsed = 0u64;

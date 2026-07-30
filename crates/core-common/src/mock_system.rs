@@ -391,8 +391,12 @@ impl System for MockSystem {
         self.now - start
     }
 
-    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+    fn set_input(&mut self, input: InputState) {
         self.bus.input = input;
+    }
+
+    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+        self.set_input(input);
         self.bus.save_ram_dirty = false;
         let start = self.now;
 

@@ -359,16 +359,13 @@ impl Emulator {
         let present = self.out.frames.has_room();
         let single_stepping = self.instruction_budget > 0;
 
-        // Input is deliberately not delivered here, and that is a real limitation rather than an
-        // oversight: `InputState` applies to a whole frame by the `System` contract, and there is no
-        // per-instruction path to hand it through. So while a breakpoint is set, the joypad reads as
-        // it did on the last full frame. Reaching a breakpoint that needs a button press means
-        // pressing it, then setting the breakpoint. Closing that gap wants an input setter on
-        // `System`, which is prompt 15's remaining work rather than something to bodge here.
-        let _ = input;
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        // Applied once per debug tick rather than per instruction, which is the same granularity
+        // `step_frame` gives it: `InputState` applies for a whole frame by the `System` contract, and
+        // no frontend can produce meaningful sub-frame input from a 60 Hz event loop anyway.
+        active.system.set_input(input);
         let budget = active.frame_cycles;
         let mut spent = 0u64;
         let mut hit = None;

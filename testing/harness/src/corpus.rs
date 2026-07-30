@@ -418,25 +418,24 @@ pub const GB_ROMS: &[TestRom] = &[
         hardware: Hardware::Dmg,
         // It draws its face within a few frames.
         max_frames: 60,
-        // Still unvalidated, but no longer unseen. The picture has been rendered and looked at:
-        // `cargo run -p frontend-headless -- run testing/test-roms/gb/dmg-acid2.gb --frames 120
-        // --save-frame /tmp/dmg-acid2.png`. It draws the expected scene — "HELLO WORLD!", the
-        // face with both eyes, nose, and mouth, and the "dmg-acid2 by Matt Currie" credit.
+        // **Validated against the published reference image**, and the only PPU check in the
+        // corpus that is. The comparison was done once, offline, and this hash is its result:
         //
-        // That is evidence, not validation, and `expected_hash` stays `None` because of the
-        // difference. This ROM is designed so that each individual PPU bug corrupts one small
-        // region of the face, and "the face looks right at 160x144" cannot distinguish a correct
-        // render from one with a two-pixel window-position error. What is left is a pixel
-        // comparison against the published reference PNG, which has to be fetched.
-        expected_hash: None,
-        expected_failure: Some(
-            "renders and then halts waiting for interrupts, which is how this ROM signals it \
-             has finished, and the picture has been inspected and shows the expected scene. It \
-             stays unvalidated because eyeballing a 160x144 face cannot distinguish a correct \
-             render from one with a small per-region defect, which is exactly what this ROM \
-             encodes. Fetch the published reference image and compare pixels; \
-             `frontend-headless run --save-frame` writes the PNG to compare against",
-        ),
+        //   cargo run -p frontend-headless -- run testing/test-roms/gb/dmg-acid2.gb \
+        //       --frames 60 --save-frame /tmp/mine.png
+        //   curl -sSfLO https://raw.githubusercontent.com/mattcurrie/dmg-acid2/master/img/reference-dmg.png
+        //   # then compare pixel-for-pixel; the reference is 2-bit greyscale, so a decoder has to
+        //   # scale samples to 8 bits rather than shifting them left
+        //
+        // All 23 040 pixels matched. The reference image is *not* committed — same rule as the
+        // ROMs — so redoing this means fetching it again, which is why the commands are here.
+        //
+        // This ROM is designed so each individual PPU bug corrupts one small region of the face,
+        // which is why an exact match is worth so much more than "the picture looks right": it
+        // covers sprite priority, both tile-mapping arrangements, the window, and BG-to-OBJ
+        // priority in one assertion.
+        expected_hash: Some("17a0f9970ac4d084"),
+        expected_failure: None,
         licence: "MIT (Matt Currie).",
     },
 ];
@@ -496,19 +495,40 @@ pub const CGB_ROMS: &[TestRom] = &[
         convention: Convention::Framebuffer,
         hardware: Hardware::Cgb,
         max_frames: 60,
-        // As with dmg-acid2: rendered, inspected, and still not validated. The colour output has
-        // been looked at — a yellow face with green eyes, a coloured banner behind "HELLO
-        // WORLD!", and the credit line — which is meaningful because a broken palette path or a
-        // missing second VRAM bank would not produce a plausible colour picture at all. It is
-        // still not a pixel comparison against the published reference.
+        // Compared against the published reference image and **898 of 23 040 pixels differ**
+        // (3.90%). Not a timing artefact: the count is identical at 30, 60, 120, 300, and 600
+        // frames. Not a global palette problem either — 22 142 pixels match exactly, including
+        // the whole lower half of the screen.
+        //
+        // The differences fall in three clusters, given as 8x8 tiles:
+        //
+        //   row  0, cols  4-8 and 10-14   the banner behind "HELLO WORLD!"
+        //   rows 5-6, cols 6-8 and 11-13  the eyes
+        //   rows 8-9, cols 6-7 and 9-10   the nose and mouth
+        //
+        // And two colours present in the reference never appear in our output at all:
+        // `(115, 115, 0)` and `(173, 173, 0)` — both mid shades of the face's yellow. In the
+        // differing areas we draw only black and full yellow where the reference has blues,
+        // greens, and those two dark yellows, the commonest substitutions being
+        // `(0,0,0) -> (107,189,255)` 312 times and `(255,255,0) -> (0,0,255)` 186 times.
+        //
+        // Read together that says something in those regions is being composited through the
+        // wrong palette — falling back to palette 0, which for this ROM *is* black and yellow —
+        // rather than the one its tile or sprite attribute selects. Since the rest of the screen
+        // is exact, the attribute decode works in general; what is wrong is narrower than that.
+        // The eyes and mouth are sprites and the banner is background, so whatever it is affects
+        // both paths.
+        //
+        // No `expected_hash` until it matches: recording the hash of a wrong picture would turn
+        // this from a tracked bug into a permanently green wrong answer.
         expected_hash: None,
         expected_failure: Some(
-            "renders a colour picture and reaches its end state, and the output has been \
-             inspected: the face, its palettes, and the banner all appear as expected, which \
-             means the tile-attribute and second-VRAM-bank paths are doing something coherent. \
-             It has not been compared pixel-for-pixel against the published reference image, so \
-             it is not recorded as a pass. Doing that comparison would make this the only \
-             end-to-end check of tile attributes, the second VRAM bank, and CGB sprite priority",
+            "898 of 23 040 pixels differ from the published reference, stable across frame \
+             counts, in three clusters — the banner, the eyes, and the mouth — with two mid \
+             shades of yellow never produced at all. Those regions are drawn through palette 0 \
+             instead of the palette their attribute selects; the rest of the screen is \
+             pixel-exact, so the attribute decode is right in general and the fault is \
+             narrower. See the comment above for the exact clusters and substitutions",
         ),
         licence: "MIT (Matt Currie)",
     },

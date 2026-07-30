@@ -1111,6 +1111,79 @@ fn attaching_with_no_breakpoints_leaves_the_machine_running_at_full_speed() {
     );
 }
 
+/// A ROM that waits for the A button, then jumps somewhere distinctive.
+///
+/// `$0100`: select the d-pad/buttons group, read `P1`, loop until bit 0 (A) reads low, then
+/// `jp $0180`. So `$0180` is reachable *only* if input got through — which is exactly the thing
+/// under test, and a breakpoint there cannot fire by accident.
+fn waits_for_a_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    let code: &[u8] = &[
+        // Selecting a group means driving its line *low*: P15 (bit 5) low selects the face buttons,
+        // P14 (bit 4) low selects the d-pad. Writing $20 — as the first draft of this did — leaves
+        // P15 high and P14 low, which selects the d-pad, and then `bit 0` reads Right rather than A.
+        0x3E, 0x10, //       ld a, $10      ; P15 low, P14 high: select the face buttons
+        0xE0, 0x00, //       ldh ($00), a
+        0xF0, 0x00, //  loop: ldh a, ($00)
+        0xCB, 0x47, //       bit 0, a       ; A button, active low
+        0x20, 0xFA, //       jr nz, loop    ; still released
+        0xC3, 0x80, 0x01, // jp $0180
+    ];
+    rom[0x0100..0x0100 + code.len()].copy_from_slice(code);
+    rom[0x0180] = 0x18; // jr -2, spin forever once we get here
+    rom[0x0181] = 0xFE;
+    rom[0x0134..0x013C].copy_from_slice(b"WAITS4_A");
+    rom[0x0147] = 0x00;
+    rom[0x0148] = 0x00;
+    rom[0x014D] = cart_common::GbHeader::header_checksum(&rom);
+    rom
+}
+
+/// Input must reach the machine while the debugger is stepping instruction-by-instruction.
+///
+/// It did not, until `System::set_input` was split out of `step_frame`: the stepping loop runs no
+/// frames, so the joypad kept reading whatever the last full frame saw and a breakpoint behind a
+/// button press was unreachable.
+#[test]
+fn input_reaches_the_machine_while_a_breakpoint_is_set() {
+    let fixture = Fixture::new("dbginput");
+    let rom = fixture.dir.join("waits.gb");
+    std::fs::write(&rom, waits_for_a_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+
+    // Attach and set the breakpoint *before* pressing anything, so the machine is in the stepping
+    // loop — with no frames running — for the whole test.
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddBreakpoint(0x0180));
+    std::thread::sleep(Duration::from_millis(100));
+    for event in session.drain_events() {
+        if let SessionEvent::BreakpointHit { addr } = event {
+            panic!("fired at {addr:#06X} before the button was pressed");
+        }
+    }
+
+    session.set_input(core_common::InputState {
+        buttons: core_common::Buttons::A,
+        touch: None,
+    });
+
+    let addr = wait_event(
+        &session,
+        "the breakpoint behind the button press",
+        |event| match event {
+            SessionEvent::BreakpointHit { addr } => Some(*addr),
+            _ => None,
+        },
+    );
+    assert_eq!(addr, 0x0180);
+}
+
 #[test]
 fn a_debug_request_with_no_cartridge_says_so_rather_than_returning_nothing() {
     let fixture = Fixture::new("dbgnorom");

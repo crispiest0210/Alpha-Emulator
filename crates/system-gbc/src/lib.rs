@@ -141,6 +141,10 @@ impl System for GbcSystem {
         self.inner.step_instruction()
     }
 
+    fn set_input(&mut self, input: InputState) {
+        self.inner.set_input(input);
+    }
+
     fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
         self.inner.debug()
     }

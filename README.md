@@ -92,7 +92,8 @@ Current Game Boy results:
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
 | `gba-suite` arm, thumb, memory | **pass** |
-| dmg-acid2, cgb-acid2 | render and complete, but unvalidated — see below |
+| dmg-acid2 | **passes** — pixel-exact against the published reference |
+| cgb-acid2 | fails — 898 of 23 040 pixels, diagnosed; see below |
 
 Open gaps, each tracked with the specific reason:
 
@@ -110,15 +111,19 @@ Open gaps, each tracked with the specific reason:
   whether powering off clears the length counters, whether `NRx1` length writes land while the
   APU is off, and whether the CPU may reach wave RAM mid-playback — so each is gated on the
   model rather than fixed one way.
-- **dmg-acid2 and cgb-acid2** render and then halt waiting for interrupts, which is how they
-  signal they have finished. Both pictures have now been rendered and *inspected* — dmg-acid2
-  draws the expected face, text, and credit line, and cgb-acid2 draws it in colour with a
-  coloured banner, which a broken palette path or missing second VRAM bank would not produce at
-  all. They are still not recorded as passes: this ROM family is designed so each individual PPU
-  bug corrupts one small region, and eyeballing a 160x144 face cannot distinguish a correct
-  render from one with a two-pixel defect. What is left is a pixel comparison against the
-  published reference images, which have to be fetched. `frontend-headless run --save-frame`
-  writes the PNG to compare.
+- **dmg-acid2 now passes**, compared pixel-for-pixel against its published reference: all 23 040
+  matched, so the DMG background, window, sprite priority, and both tile-mapping arrangements are
+  validated end to end rather than argued for. The hash is recorded in the corpus along with the
+  commands to redo the comparison; the reference image is fetched, never committed, same rule as
+  the ROMs.
+- **cgb-acid2 fails**, and now with a diagnosis instead of a shrug: 898 of 23 040 pixels differ,
+  identically at 30, 60, 120, 300, and 600 frames. Everything outside three clusters — the banner
+  behind "HELLO WORLD!", the eyes, and the mouth — is pixel-exact. In those clusters the *bitmaps*
+  are right and the colours are not: the banner is the same shape drawn through black-and-yellow
+  where the reference uses blues, and two mid shades of yellow never appear anywhere in our output.
+  That points at the palette a tile or sprite attribute selects being dropped in a narrow case,
+  not at the attribute decode in general. The mouth is the exception and differs in pixel data,
+  not just colour. Details in `testing/harness/src/corpus.rs`.
 
 Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
 they leave there names the exact rule that failed. `cargo test -p harness --release --

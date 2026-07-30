@@ -71,6 +71,10 @@ impl System for ScriptedSystem {
     fn id(&self) -> &'static str {
         "scripted"
     }
+    /// Recorded rather than acted on: the scripted system has no joypad to route it to, and the
+    /// harness drives every ROM with no input anyway.
+    fn set_input(&mut self, _input: InputState) {}
+
     /// The harness drives whole frames, never instructions, so this is unreachable. It panics
     /// rather than returning zero: a zero would make a caller's stepping loop spin forever, and a
     /// test double should fail loudly when used for something it does not model.
@@ -359,6 +363,7 @@ fn the_determinism_check_catches_a_divergence() {
         fn step_instruction(&mut self) -> core_common::Cycles {
             unimplemented!("this system models frames, not instructions")
         }
+        fn set_input(&mut self, _: InputState) {}
         fn display_name(&self) -> &'static str {
             "Flaky"
         }

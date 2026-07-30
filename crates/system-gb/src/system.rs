@@ -531,7 +531,7 @@ impl System for GbSystem {
     /// scheduled event, then drain everything due. The CPU's last instruction in a slice
     /// overshoots the boundary, which is expected — events fire a few cycles late but stay on
     /// their own grid, because they reschedule from their own timestamps.
-    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+    fn set_input(&mut self, input: InputState) {
         if self.bus.joypad.set_input(input) {
             self.bus.memory.interrupt_flags |= interrupt::JOYPAD;
             // A joypad line going low is also what releases `STOP`. That happens whether or not
@@ -539,6 +539,10 @@ impl System for GbSystem {
             // itself went low, not because an interrupt got serviced.
             self.cpu.clear_stop();
         }
+    }
+
+    fn step_frame(&mut self, input: InputState) -> FrameOutput {
+        self.set_input(input);
 
         let start = self.bus.timing.now();
         self.save_ram_dirty = false;

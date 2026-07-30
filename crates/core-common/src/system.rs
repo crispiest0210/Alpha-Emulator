@@ -99,7 +99,21 @@ pub trait System: Savable {
     /// than loaded as garbage.
     fn state_version(&self) -> u32;
 
+    /// Apply input without running anything.
+    ///
+    /// [`step_frame`](System::step_frame) calls this first, so the two can never disagree about what
+    /// applying input means. It is separate because the debugger needs it on its own: while
+    /// single-stepping there is no frame to pass input to, and without this the joypad would read as
+    /// it did on whatever full frame ran last.
+    ///
+    /// Required rather than defaulted. A no-op default would mean a system that forgot to implement
+    /// it silently ignores the controller, which is a bug with no error message.
+    fn set_input(&mut self, input: InputState);
+
     /// Run one video frame.
+    ///
+    /// `input` applies for the whole frame; implementations pass it to
+    /// [`set_input`](System::set_input) before running anything.
     fn step_frame(&mut self, input: InputState) -> FrameOutput;
 
     /// Run exactly one CPU instruction, returning the cycles it took.
