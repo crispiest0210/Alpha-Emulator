@@ -6,11 +6,12 @@
 //! than its completion; what is here is built the way the GBA was, as tested units assembled
 //! last. See `README.md` for the authoritative status table.
 //!
-//! Implemented so far: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), and
-//! the inter-processor communication hardware ([`ipc`]).
+//! Implemented so far: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), the
+//! inter-processor communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]),
+//! and the two timer blocks ([`timers`]).
 //!
-//! Not implemented yet: the two 2D engines, the 3D core, the audio hardware, DMA, timers,
-//! interrupts, the cartridge, and the [`core_common::System`] implementation itself.
+//! Not implemented yet: the two 2D engines, the 3D core, the audio hardware, DMA,
+//! the cartridge, and the [`core_common::System`] implementation itself.
 //!
 //! # Wifi is out of scope
 //!
@@ -21,11 +22,15 @@
 #![deny(unsafe_code)]
 
 pub mod ipc;
+pub mod irq;
 pub mod memory;
+pub mod timers;
 pub mod vram;
 
 pub use ipc::Ipc;
+pub use irq::InterruptController;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};
+pub use timers::TimerBlock;
 pub use vram::{Vram, VramSpace};
 
 /// Which of the DS's two CPUs an operation concerns.
