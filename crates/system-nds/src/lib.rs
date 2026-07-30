@@ -23,6 +23,7 @@
 #![deny(unsafe_code)]
 
 pub mod dma;
+pub mod engine2d;
 pub mod ipc;
 pub mod irq;
 pub mod memory;
@@ -31,6 +32,7 @@ pub mod video;
 pub mod vram;
 
 pub use dma::DmaController;
+pub use engine2d::{Engine, Engine2d};
 pub use ipc::Ipc;
 pub use irq::InterruptController;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};

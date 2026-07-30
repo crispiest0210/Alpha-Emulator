@@ -47,7 +47,7 @@ pub use compositor::{
     background_wins, decode_tile_row, render_sprites, render_text_background, BackgroundParams,
     Sprite, SpriteRule, TilemapSource,
 };
-pub use palette::{Bgr555Palette, MonochromePalette, PaletteSource, DMG_SHADES};
+pub use palette::{bgr555_to_rgba, Bgr555Palette, MonochromePalette, PaletteSource, DMG_SHADES};
 
 use core_common::Rgba8;
 
