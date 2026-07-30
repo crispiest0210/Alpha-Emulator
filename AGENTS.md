@@ -58,6 +58,70 @@ The one exception is a half-finished refactor: finish or revert it first. A non-
 cannot be handed off at all, and a half-threaded type parameter is invisible to every artifact
 above.
 
+## When you hit a design decision the prompts do not make
+
+This will happen, repeatedly. The twenty prompt files specify *what* to build and the principles
+below constrain *how*, but neither answers every question that comes up while building — and some of
+the questions that come up are genuinely open, with two or three defensible answers and no fact in
+the repository that picks between them.
+
+**Never stall on one.** An agent that stops to ask and produces nothing has spent a session
+achieving less than one that picked the obvious option and said so. The work is the deliverable.
+
+Sort the question first, because the two kinds want opposite handling:
+
+**Derivable — just decide, and do not ask.** The prompt files, the existing code, or the principles
+below already answer it, possibly after ten minutes of reading. Most questions are this. "Which
+crate does this type live in?" is answered by *a thing lives with the code that consumes it*. "Should
+I approximate this hardware behaviour?" is answered by *do not approximate a behaviour you have not
+modelled*. Asking about these wastes a round trip and signals the reading was not done.
+
+**Independent and unscoped — decide, keep going, and surface it.** Several answers are defensible,
+nothing written picks between them, and the choice changes what gets built or what a user ends up
+with. Take the best course of action *and* raise it. Do not wait for a reply before continuing:
+finish everything that does not depend on the answer, state the assumption you proceeded under, and
+make it easy to reverse.
+
+### What makes a decision worth raising
+
+Not difficulty — **blast radius and reversibility**. A hard call that one commit can undo is yours to
+make. An easy call that is expensive to walk back is worth thirty seconds of the user's attention:
+
+- it changes an **on-disk or on-the-wire format** — the save-state container, the library schema, the
+  config file, the release archive layout. Anything a user's data has to migrate through.
+- it **adds a dependency**, changes the licence set, or opens a network socket.
+- it **trades away a stated constraint**. Prompt 15 asks for zero measurable debugger overhead; the
+  recorder costs 1.7–4.5% and was kept anyway. That is a real trade someone else might make
+  differently, and it was raised as one rather than reported as compliance.
+- it **picks between named tools** where the prompt named one and you want another — `release.yml`
+  is hand-written where prompt 19 says `cargo-dist`.
+- it **defers a whole feature**, or ships something visibly partial.
+- it is **already flagged here as needing a decision first**. The GBA PSG mixing item under "Smaller,
+  well-defined items" is exactly this shape: the fix is blocked on where a shared register layer
+  should live, and that placement is a design choice, not a lookup.
+
+### How to raise one
+
+Concretely, or not at all. "How should I handle audio?" is unanswerable and wastes the exchange.
+What works is: **the specific choice, two or three real options, the recommendation, and what
+actually differs.** One or two sentences each. If the user does not reply, the recommendation is what
+happened anyway, so the question costs nothing.
+
+If the user reaffirms a direction you raised a concern about, that is the decision — say so once and
+build the whole thing, rather than re-litigating it or quietly building a narrowed version.
+
+### Record it either way
+
+A decision that is not written down was not made, it was merely done. Both places, always:
+
+- **In the code**, next to the thing it decided, saying what was chosen and *what was rejected and
+  why*. `frontend-core::platform` explains why the frame rate is a table rather than a trait method;
+  `core-common::debug` explains why the debugger gets `peek8` and not the bus. Those comments exist
+  so nobody re-opens a settled question, and so anyone who wants to re-open it has the argument.
+- **In the commit message**, which is where a reviewer looks for the reasoning behind a diff.
+
+A rejected alternative is worth more than the chosen one. The chosen one is visible in the code.
+
 ## Hard constraints
 
 These are not negotiable and not subject to "just for testing":
@@ -275,6 +339,23 @@ neither still compiles and the debugger reports it as unavailable rather than ly
 
 Prompt 13 is explicitly scoped as *partial* — say so in `README.md` as it lands, and keep saying so
 until it is not.
+
+Expect this prompt to raise more genuinely open design questions than any before it, because it is
+the first machine whose shape is not a bigger version of one already built. Read "When you hit a
+design decision the prompts do not make" above before starting. Four that are already visible from
+here, and are the kind to decide, proceed on, *and* raise:
+
+- **How the two CPUs are driven.** Lockstep at some quantum, or one scheduler both cores hang off?
+  Prompt 07's scheduler was not built with two masters in mind. This decides the shape of the frame
+  loop and is expensive to change later.
+- **Where "partial" is drawn.** A DS that runs 2D-only games well is a defensible first milestone and
+  so is refusing to boot until 3D exists. Which one shows up in `README.md`'s status table is a
+  product decision, not a technical one.
+- **Whether the VRAM bank mapping is resolved per access or precomputed.** A correctness/performance
+  trade with a real difference, and the first place in this project where that trade has teeth.
+- **Whether the 3D rasteriser stays software.** Prompt 18 says measure before deciding and prompt 13
+  says `system-nds` never gains a `wgpu` dependency, so an accelerated path means designing an
+  intermediate command buffer — a cross-crate interface worth agreeing before it is written.
 
 ### What "verified" means for the frontend
 
