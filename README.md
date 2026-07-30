@@ -143,6 +143,15 @@ yet.
 
 There is now a GBA to run them on, which there was not before.
 
+## Installing
+
+There are no published releases yet. When there is a tag, CI builds `alpha-emulator` (the windowed
+application) and `alpha-headless` (the CLI driver) for Linux, macOS on both architectures, and
+Windows, and attaches them to a draft GitHub release. Nothing is code-signed or notarised, so macOS
+and Windows will warn on first run — expected for an unsigned build, not a sign the archive is wrong.
+
+Until then, build it: see below.
+
 ## Setup
 
 Requires a Rust toolchain (installed via [rustup](https://rustup.rs); the pinned version is
@@ -174,6 +183,24 @@ Linux, macOS, and Windows:
 | `cargo xtask profile <rom>` | Build the release driver and print the flamegraph command |
 | `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
 | `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
+
+### What CI checks
+
+`ci.yml` runs on every push and pull request: `rustfmt` and `clippy`, the crate-boundary rule via
+`cargo deny`, unit tests and the full accuracy suite on Linux, macOS, and Windows, `cargo doc` with
+warnings denied, a release-profile build of the two shipped binaries, and `cargo bench --no-run`.
+
+The last two are there because both fail in ways nothing else catches. `panic = "abort"` and thin LTO
+apply only to the release profile, so a release-only compile error is real and would otherwise be
+discovered while cutting a tag. And nothing references the benchmarks, so they would rot silently
+until the next person needed a measurement — CI compiles them but never times them, because timings
+on a shared runner are noise and a check people learn to ignore is worse than no check.
+
+Every job pins the same toolchain `rust-toolchain.toml` gives a fresh clone. A CI that quietly ran a
+newer compiler would let a lint land that nobody local sees, or reject one everybody local passes.
+
+`docs.yml` publishes the rendered API documentation to GitHub Pages from `main`. Most of what a
+contributor needs here is `//!` prose beside the code it describes, so it is worth reading rendered.
 
 ### Playing a game
 

@@ -23,8 +23,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      # The pinned toolchain, not `stable`. `rust-toolchain.toml` is what a fresh clone gets, and a
+      # CI that silently ran a newer compiler would let a lint land that nobody local sees — or
+      # reject one that everybody local passes.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.97.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -39,7 +43,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources
@@ -58,7 +64,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace
         run: cargo build --workspace --all-targets
@@ -70,3 +78,53 @@ jobs:
         run: cargo xtask fetch-test-roms
       - name: Accuracy suite
         run: cargo xtask test --accuracy
+      - name: Benchmarks compile
+        # Compiled, never run. Benchmark *timings* on a shared CI runner are noise and would either
+        # fail randomly or teach everyone to ignore them; what CI can usefully protect is that the
+        # benchmarks still build, since nothing else references them and they would otherwise rot
+        # silently until the next person needed a measurement.
+        run: cargo bench --workspace --no-run
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build documentation
+        # Checked on every pull request, not only on the push that publishes it, so a dead
+        # intra-doc link is caught by the person who wrote it.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
+
+  packaging:
+    name: release build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the shipped binaries in release
+        # What `release.yml` builds, built on every change instead of first discovered at tag time.
+        # `panic = "abort"` and `lto = "thin"` only apply to the release profile, so a release-only
+        # compile failure is entirely possible and would otherwise surface during a release.
+        run: cargo build --release -p frontend-native -p frontend-headless

@@ -1,0 +1,78 @@
+# Publish the generated API documentation to GitHub Pages.
+#
+# # Why the docs are worth publishing for this project in particular
+#
+# Most of what a contributor needs to know here is written as `//!` and `///` prose next to the code
+# it describes — why the CGB's sprite attributes are decoded differently from the DMG's, why the
+# audio ring drops rather than blocks, what `peek8` answering `None` means. That is a deliberate
+# choice over a prose design document, because a comment beside the code is the only kind of
+# documentation that gets updated when the code does. Rendering it means it is readable without a
+# checkout.
+#
+# `--document-private-items`, because the audience is contributors rather than API consumers: nothing
+# in this workspace is published to crates.io, and the interesting reasoning is as often on a private
+# helper as on a public one.
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a newer commit wins. Queued rather than cancelled so a push that
+# lands during a deploy still publishes.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build documentation
+        # `-D warnings` so a broken intra-doc link fails here rather than shipping as a dead link.
+        # Those break constantly during refactors, and a docs build that tolerates them stops being
+        # worth reading.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
+
+      - name: Add a landing page
+        # `cargo doc` produces no index at the root, so a visitor to the Pages URL would get a
+        # directory listing. Redirect to the crate a reader should start from.
+        run: |
+          echo '<meta http-equiv="refresh" content="0;url=core_common/index.html">' > target/doc/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

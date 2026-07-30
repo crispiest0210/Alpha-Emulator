@@ -82,7 +82,8 @@ this path, at this frame — and never waits on a lock, because it has a 16.7 ms
 - Unit tests live next to the code, run with `cargo xtask test`.
 - **`frontend-native` is verified by running it, not only by compiling it.** The pure parts have
   unit tests — coordinate mapping and touch translation in `layout.rs`, key translation in
-  `keymap.rs`, the PNG encoder in `screenshot.rs` — and session behaviour is driven end to end
+  `keymap.rs`, and the PNG encoder over in `frontend-core`'s `png.rs` — and session behaviour is
+  driven end to end
   through the real channel API in `frontend-core`'s tests. Everything left is presentation, and the
   only way to check presentation is to look at it: `cargo xtask dev -- <rom>`, or
   `cargo run -p frontend-native -- --data-dir /tmp/scratch <rom>` to do it against a throwaway
@@ -121,6 +122,12 @@ Blargg's ROMs report in two different ways and the harness has a convention for 
 cartridge RAM. Picking the wrong one makes a ROM look like it hangs when it has actually
 finished and reported. `cargo test -p harness --release -- --ignored --nocapture
 dmg_sound_results` prints what the memory-protocol ROMs actually said.
+
+## Licensing
+
+Dual-licensed under MIT or Apache-2.0, at the user's option — `LICENSE-MIT` and `LICENSE-APACHE`.
+Contributions are accepted under the same terms. Release archives carry both files, because a
+dual-licensed project that ships neither is not actually offering the choice it claims to.
 
 ## Pull requests
 

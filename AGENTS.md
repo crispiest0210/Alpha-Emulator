@@ -218,7 +218,19 @@ its two CPU cores.
   11.3x real time. Findings live in `testing/harness/benches/systems.rs`. What is left is the NDS,
   which prompt 18 expects to be the case that actually needs help and which cannot be measured until
   prompt 13 exists — that decision must not be inherited from the two that were made.
-- **Untouched:** prompts 13 (NDS), 19 (packaging).
+- **Done:** prompt 19. CI pins the same toolchain a fresh clone gets and covers lint, the
+  crate-boundary rule, unit tests and the accuracy suite on three OSes, `cargo doc` with warnings
+  denied, a release-profile build of the shipped binaries, and `cargo bench --no-run`. `release.yml`
+  is tag-triggered and builds four targets; `docs.yml` publishes rustdoc to Pages. The two licence
+  files finally exist — the manifest had claimed `MIT OR Apache-2.0` since prompt 01 with neither
+  file in the repository.
+
+  Prompt 19 names `cargo-dist`; `release.yml` is hand-written instead, because the constraint it
+  actually sets is "reproducible from a clean checkout via CI alone" and a workflow that runs
+  `cargo build --release` and uploads the result meets that without a generated file that must not
+  be hand-edited. Revisit that the moment real installers are wanted — an `.msi`, a signed `.app`,
+  a `.deb` — which is exactly what those tools are for.
+- **Untouched:** prompt 13 (NDS). That is now the only one.
 
 ### The biggest gap
 
