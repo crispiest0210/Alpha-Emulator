@@ -129,6 +129,29 @@ Current Game Boy results:
 | `gba-suite` arm, thumb, memory | **pass** |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
 
+**Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
+asks for whatever test-ROM coverage exists at implementation time and for an explicit statement of
+what is verified only by other means. Nothing DS-shaped is in the corpus: the community's DS test
+ROMs are far fewer than the Game Boy family's, most target hardware this build does not model (3D,
+wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
+as fetchable artifacts. What the DS *is* verified by instead:
+
+- **224 unit tests in `system-nds`**, covering every module against the register behaviour it
+  implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
+  timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
+- **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing
+  code direct boot loaded, the ARM7 writing where only it can see, the two cores exchanging a word
+  through the FIFO with each side spinning on its own status flag, a vblank interrupt reaching a
+  handler with no BIOS present, and a program that maps a VRAM bank and puts a colour on screen.
+- **A determinism test**: two machines given the same ROM and input agree byte for byte after four
+  frames, which is prompt 13's dual-CPU constraint checked rather than asserted.
+- **A save-state round trip** that is a fixed point and that continues identically from a restore.
+- **Manual smoke test**: a hand-built homebrew that fills a VRAM framebuffer, run through
+  `frontend-headless run --frames 5 --save-frame`, produces the expected gradient on the top screen
+  and white on the bottom.
+
+This is a lower bar than the Game Boy family's and is meant to read as one.
+
 Open gaps, each tracked with the specific reason:
 
 - **Combined `cpu_instrs`** executes `STOP` inside the runner it copies into work RAM. Not an

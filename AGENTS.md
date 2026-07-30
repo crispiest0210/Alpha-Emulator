@@ -259,8 +259,8 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 
 `README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
 Advance are **playable** — window, audio, input, save states, rewind — with real accuracy coverage,
-and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS has only
-its two CPU cores.
+and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
+and draws both screens**, with no audio and no 3D core.
 
 - **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
   17 (testing).
@@ -281,9 +281,11 @@ its two CPU cores.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
-  11.3x real time. Findings live in `testing/harness/benches/systems.rs`. What is left is the NDS,
-  which prompt 18 expects to be the case that actually needs help and which cannot be measured until
-  prompt 13 exists — that decision must not be inherited from the two that were made.
+  11.3x real time. Findings live in `testing/harness/benches/systems.rs`. The NDS is now measured
+  too, and prompt 18 was right about it: **3.2x real time, without a 3D core**, a fifth of the GBA's
+  margin. That decision is therefore still open rather than inherited, and wants re-asking once the
+  3D rasteriser exists. One optimisation has been made, with a measured problem behind it — see
+  "Performance" below.
 - **Done:** prompt 19. CI pins the same toolchain a fresh clone gets and covers lint, the
   crate-boundary rule, unit tests and the accuracy suite on three OSes, `cargo doc` with warnings
   denied, a release-profile build of the shipped binaries, and `cargo bench --no-run`. `release.yml`
@@ -296,66 +298,76 @@ its two CPU cores.
   `cargo build --release` and uploads the result meets that without a generated file that must not
   be hand-edited. Revisit that the moment real installers are wanted — an `.msi`, a signed `.app`,
   a `.deb` — which is exactly what those tools are for.
-- **Untouched:** prompt 13 (NDS). That is now the only one.
+- **Mostly done:** prompt 13 (NDS). The machine boots a `.nds` ROM through direct boot, runs both
+  cores, and draws both screens. Everything below the 3D core exists and is unit-tested: two memory
+  maps over one store, all nine VRAM banks, both 2D engines, IPC, interrupts, timers, DMA, video
+  timing, keypad and touchscreen, the card transfer interface, and save states over all of it.
+  **Audio and the 3D core are not started**, and there is no save chip. See "The biggest gap".
+
+### The four decisions prompt 13 raised, and what was chosen
+
+Recorded here because they are the ones a reader will want to re-open, and each is argued in full in
+the module that made it.
+
+- **How the two CPUs are driven** — cooperative interleaving at a **video boundary**, in
+  `system-nds::system`. `VideoTiming::cycles_until_next_event` says how far the machine may run,
+  both cores run that far, then the boundary is serviced. A fixed small quantum was rejected because
+  it decouples the CPUs from the renderer and reintroduces prompt 08's mid-frame-scroll bug; one
+  merged scheduler was rejected as real work for a machine whose cores synchronize through polled
+  registers rather than through timing. `step_frame` is the only caller, so this is reversible in
+  one place.
+- **Where "partial" is drawn** — a DS that runs 2D software, says so, and refuses nothing. The
+  status table and `frontend-core::platform` both build a machine rather than declining one, and
+  `Platform::is_runnable` is now true for everything. Greying out a row a user can play a 2D game in
+  said less than `README.md` does.
+- **VRAM bank mapping** — **precomputed**, into a flat 328-entry page table rebuilt on a `VRAMCNT`
+  write. The alternative is nine register decodes on every access, landing in the rasteriser's
+  innermost texture fetch. Correctness is identical either way, because overlap is represented
+  rather than resolved.
+- **Whether the 3D rasteriser stays software** — still open, because it does not exist. Prompt 13
+  forbids `system-nds` a `wgpu` dependency, so an accelerated path means designing an intermediate
+  command buffer, and that is a cross-crate interface worth agreeing before it is written rather
+  than after.
+
+One more, not foreseen and worth knowing: **the timer block is duplicated from `system-gba`** rather
+than shared. `system-*` crates may not depend on each other and `core-common` is closed to
+platform-specific behaviour, so sharing needs a new crate — the same unresolved placement question
+`system-gb::apu`'s register layer is stuck on under "Smaller, well-defined items". This is now the
+second instance. Whoever answers it should answer it for both.
 
 ### The biggest gap
 
-**The Nintendo DS.** Both CPU cores are complete and unit-tested; nothing above them exists — no
-memory map, no 2D or 3D engine, no bus arbitration. Everything else it needs is already in place:
-`frontend-native` lists `.nds` files and greys them out, `frontend-core::platform` names the DS
-explicitly rather than sweeping it into an "unsupported" arm, and the dual-screen layout and touch
-coordinate mapping are written and unit-tested against a 256×384 framebuffer that nothing produces
-yet. Prompt 13 is what fills that in.
+**The DS's audio hardware and its 3D core.** Everything else in prompt 13 is done.
+
+- **Audio.** Sixteen PCM channels with several sample formats including ADPCM. Prompt 13 says to
+  implement it directly in `system-nds` rather than forcing it through `apu-shared`, and to evaluate
+  at implementation time whether any primitive is worth factoring out. `take_audio_samples` returns
+  nothing today, which a frontend handles as "no audio this frame" rather than as silence.
+- **The 3D core.** Geometry command FIFO, matrix stack, a software rasteriser, and compositing into
+  engine A's BG0. Prompt 13 calls it the single largest scope item in the project and says to
+  prioritise geometry and texturing correctness over fog and toon shading. Engine A's 3D layer
+  currently draws nothing and lets the backdrop through, with a test asserting that gap — the
+  approximation trap this project keeps refusing.
+
+Smaller DS gaps, all recorded in the crate docs where they are made: no save chip (the header does
+not say which of EEPROM or FLASH is fitted, and guessing corrupts saves silently), no KEY1
+encryption, no wifi and none planned, no mosaic, no mode 6 large bitmap, no display mode 3, and no
+per-line sprite budget.
 
 ### Start here
 
-Prompt 13, `docs/successor-emulator/13-system-nds.md`, read after `00-INDEX-AND-ARCHITECTURE.md`.
-Build it the way the GBA was built and this file recommends — **tested units first, assembled last**.
-That order is not stylistic: a bug in a unit is found by its own test in seconds, and the same bug
-inside an assembled machine is found by staring at a wrong picture.
+Read `docs/successor-emulator/13-system-nds.md` again — the two remaining items are both in it — and
+then `crates/system-nds/src/lib.rs`, whose Status section is kept current.
 
-The first unit is the memory map, in a new `crates/system-nds/src/memory.rs`, modelled on
-`crates/system-gba/src/memory.rs`. `system-nds` today contains only the two CPU cores. What makes the
-DS different from everything already done, and what to expect to spend the time on:
+**Audio is the smaller of the two and the better first move.** It has a clear register block, a
+shape prompt 09 already sketched, and it is the difference between "runs a homebrew" and "runs a
+homebrew properly". The 3D core is a much larger unit and should follow the same rule everything
+else here did: geometry FIFO, matrix stack, and rasteriser as separately tested pieces before any of
+it is wired into engine A.
 
-- **Two CPUs sharing a bus**, with different views of it. The ARM9 has TCM and caches (already in
-  `cpu-arm946e`); the ARM7 does not. They see overlapping but not identical address spaces.
-- **Shared WRAM with a runtime-configurable split** between the two — a register decides who owns
-  which half, and both halves can be assigned to one core.
-- **VRAM banks A–I, individually mappable** to several purposes. This is the piece with no analogue
-  in anything built so far and the one most likely to be got subtly wrong.
-- **Two 2D engines.** Expect `ppu-tile2d` to serve both, and expect the "parameterise rather than
-  fork" principle above to apply exactly as it did for the CGB.
-- **A software 3D rasteriser**, which prompt 18 expects to be the first thing in this project that
-  actually needs optimising. Do not pre-optimise it: `cargo xtask bench` exists, and the decision
-  must not be inherited from the two go/no-go calls already made for the other cores.
-
-Everything above the system is already waiting for it. `frontend-native` lists `.nds` files and greys
-them out, `frontend-core::platform` names the DS explicitly rather than sweeping it into an
-"unsupported" arm, `frame_duration` already carries its 59.8261 Hz, and the dual-screen layout and
-touch-coordinate mapping are written and unit-tested against a 256×384 framebuffer that nothing
-produces yet. `System::debug` and `System::access_log` default to `None`, so a DS that implements
-neither still compiles and the debugger reports it as unavailable rather than lying.
-
-Prompt 13 is explicitly scoped as *partial* — say so in `README.md` as it lands, and keep saying so
-until it is not.
-
-Expect this prompt to raise more genuinely open design questions than any before it, because it is
-the first machine whose shape is not a bigger version of one already built. Read "When you hit a
-design decision the prompts do not make" above before starting. Four that are already visible from
-here, and are the kind to decide, proceed on, *and* raise:
-
-- **How the two CPUs are driven.** Lockstep at some quantum, or one scheduler both cores hang off?
-  Prompt 07's scheduler was not built with two masters in mind. This decides the shape of the frame
-  loop and is expensive to change later.
-- **Where "partial" is drawn.** A DS that runs 2D-only games well is a defensible first milestone and
-  so is refusing to boot until 3D exists. Which one shows up in `README.md`'s status table is a
-  product decision, not a technical one.
-- **Whether the VRAM bank mapping is resolved per access or precomputed.** A correctness/performance
-  trade with a real difference, and the first place in this project where that trade has teeth.
-- **Whether the 3D rasteriser stays software.** Prompt 18 says measure before deciding and prompt 13
-  says `system-nds` never gains a `wgpu` dependency, so an accelerated path means designing an
-  intermediate command buffer — a cross-crate interface worth agreeing before it is written.
+Before optimising the 3D rasteriser, read "Performance" below. **The DS already has a fifth of the
+margin the GBA does** — 3.2x real time against 11.3x, and that is *without* 3D — so the dynarec
+question genuinely is still open for this system, unlike for the other two.
 
 ### What "verified" means for the frontend
 
@@ -375,10 +387,17 @@ them yourself before touching that code.
 
 ### Performance, and what it means for the smaller items
 
-`testing/harness/benches/systems.rs` has the numbers and the reasoning. The one finding that should
-change where anyone looks next: **on a Game Boy frame with music, the APU costs more than the PPU** —
-about a third of the frame against a sixth. Every system has between 11x and 80x of margin, so nothing
-has been optimised and nothing should be until something needs it.
+`testing/harness/benches/systems.rs` has the numbers and the reasoning. Two findings that should
+change where anyone looks next:
+
+- **On a Game Boy frame with music, the APU costs more than the PPU** — about a third of the frame
+  against a sixth. Not what you would guess for a machine whose job is drawing a picture.
+- **The DS is the tight one, at 3.2x real time**, against 11x to 80x everywhere else — and that is
+  before the 3D core exists. Its first measurement was 1.1x, and the cause was not the two 2D
+  engines: turning both displays off saved 1.5%. It was `NdsBus` composing every wide access out of
+  byte accesses, so each instruction fetch paid four region decodes. Reading RAM at its real width
+  cut a frame by 65%. That is the only optimisation in this project, and it had a measured problem
+  behind it — which is the bar for the next one too.
 
 `cargo xtask bench --quick --filter gb/` is the fast loop; `--save-baseline` and `--baseline` are how a
 before/after claim gets made, and prompt 18 requires one for every optimisation.
@@ -404,10 +423,22 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
   rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
 - Mosaic, EEPROM saves, and the GBA's object window are not implemented.
+- **`cpu-arm946e`'s `TcmBus` used to decompose wide accesses**, because `Bus`'s default `read32`
+  composes byte accesses and the wrapper did not override it. Invisible on a bus whose byte and wide
+  behaviour agree, and fatal on the DS, where an ARM9 byte write to VRAM, palette RAM, or OAM is
+  *dropped* by hardware. The ARM9 could not write to VRAM at all and it presented as a black screen
+  with every register set correctly. Fixed, with two tests; worth remembering as a shape of bug,
+  because any future bus wrapper can reintroduce it.
 
 ### Tools worth knowing about before you start
 
-- `GbSystem::step_instruction` and `GbaSystem::step_instruction` run exactly one instruction.
+- `GbSystem::step_instruction` and `GbaSystem::step_instruction` run exactly one instruction. So
+  does `NdsSystem`'s, on the ARM9.
+- **`system-nds`'s tests assemble ARM by hand.** `crates/system-nds/src/system/tests.rs` has a
+  `load(rd, value)` helper that emits however many instructions a 32-bit constant needs, which is
+  what makes an end-to-end test — "this program sets these registers and a pixel appears" — cheap to
+  write. Most DS addresses are not expressible as a single ARM immediate, and forgetting that is the
+  first thing that will bite when adding one.
 - The `#[ignore]`d `trace_gba_suite_entry` in `crates/system-gba/src/system/tests.rs` runs until
   the program counter leaves ROM and prints the instructions before it. It takes a `TRACE_ROM`
   environment variable. Three separate bugs this session were found with it in minutes, after
