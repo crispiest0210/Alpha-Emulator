@@ -8,7 +8,8 @@
 //!
 //! Implemented so far: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), the
 //! inter-processor communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]),
-//! the two timer blocks ([`timers`]), and the two DMA controllers ([`dma`]).
+//! the two timer blocks ([`timers`]), the two DMA
+//! controllers ([`dma`]), and the video timing ([`video`]).
 //!
 //! Not implemented yet: the two 2D engines, the 3D core, the audio hardware,
 //! the cartridge, and the [`core_common::System`] implementation itself.
@@ -26,6 +27,7 @@ pub mod ipc;
 pub mod irq;
 pub mod memory;
 pub mod timers;
+pub mod video;
 pub mod vram;
 
 pub use dma::DmaController;
@@ -33,6 +35,7 @@ pub use ipc::Ipc;
 pub use irq::InterruptController;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};
 pub use timers::TimerBlock;
+pub use video::VideoTiming;
 pub use vram::{Vram, VramSpace};
 
 /// Which of the DS's two CPUs an operation concerns.
