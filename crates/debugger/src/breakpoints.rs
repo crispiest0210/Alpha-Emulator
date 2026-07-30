@@ -26,11 +26,11 @@
 use std::collections::HashMap;
 
 /// What kind of access a watchpoint watches for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AccessKind {
-    Read,
-    Write,
-}
+///
+/// Re-exported from `core-common` rather than defined here: the bus records accesses and a system
+/// crate may not depend on this one, so the type has to live below both. Two enums that had to be
+/// converted between would be one more place for read and write to get swapped.
+pub use core_common::AccessKind;
 
 /// When a watchpoint should fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

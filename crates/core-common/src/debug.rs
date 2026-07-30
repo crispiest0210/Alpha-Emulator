@@ -32,6 +32,136 @@
 
 use crate::{DisasmInstruction, RegisterValue};
 
+/// Whether an access read or wrote.
+///
+/// Defined here rather than in `debugger` because the *bus* has to name it, and a system crate may
+/// not depend on `debugger`. `debugger` re-exports this, so there is one type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessKind {
+    Read,
+    Write,
+}
+
+/// One byte-wide bus access, as it happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Access {
+    pub addr: u32,
+    pub kind: AccessKind,
+    pub value: u8,
+}
+
+/// Entries one [`AccessLog`] holds.
+///
+/// Sized for the widest single instruction in the workspace: an ARM `ldm`/`stm` can move sixteen
+/// registers, which is sixty-four bytes, plus its own fetch. 128 leaves room without making the log
+/// large enough to matter — it lives inside the bus, so it is paid for in cache footprint whether it
+/// is armed or not.
+const CAPACITY: usize = 128;
+
+/// A bus's record of the accesses one instruction made.
+///
+/// # Why the bus records instead of the debugger checking
+///
+/// Watchpoints are the one thing the session's stepping trick cannot do. Execution breakpoints work
+/// by checking the program counter *between* calls to
+/// [`step_instruction`](crate::System::step_instruction), so no system crate learns that breakpoints
+/// exist. A watchpoint has to see each access, and only the bus does.
+///
+/// What the bus gets is deliberately as dumb as possible: it records, it does not decide. It has no
+/// idea what a watchpoint is, holds no addresses to compare against, and cannot stop execution. The
+/// session drains the log after each instruction and asks `debugger`'s registry about each entry, so
+/// the policy stays above the systems exactly as it does for execution breakpoints.
+///
+/// # What it costs when nothing is watching
+///
+/// One load and one branch per bus access, from [`record`](Self::record) returning immediately while
+/// [`is_armed`](Self::is_armed) is false. That is not nothing and it is not claimed to be: prompt 15
+/// asks for the claim to be *verified* with prompt 18's profiling rather than asserted, and it has
+/// not been. What can be said is that the branch is perfectly predicted — it is false for the entire
+/// lifetime of an ordinary session — and that arming happens only when a watchpoint exists.
+///
+/// # What it does not see
+///
+/// Accesses that never reach the bus. A PPU fetching tiles reads VRAM directly, and so does DMA on
+/// the Game Boy family; a watchpoint on VRAM sees the CPU's writes to it and not the PPU's reads
+/// from it. That matches what hardware watchpoints do — they watch the CPU bus — but it is a real
+/// limitation and a watchpoint that never fires on a DMA-written address is not broken.
+#[derive(Debug, Clone)]
+pub struct AccessLog {
+    armed: bool,
+    entries: Vec<Access>,
+    /// Set when an instruction made more accesses than the log can hold.
+    ///
+    /// Reported rather than ignored: silently dropping accesses would make a watchpoint that
+    /// *should* have fired look like one that was never hit, which is the worst failure a debugger
+    /// can have.
+    overflowed: bool,
+}
+
+impl Default for AccessLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccessLog {
+    pub fn new() -> Self {
+        Self {
+            armed: false,
+            entries: Vec::new(),
+            overflowed: false,
+        }
+    }
+
+    /// Start or stop recording. Clears whatever was held.
+    pub fn set_armed(&mut self, armed: bool) {
+        self.armed = armed;
+        self.entries.clear();
+        self.entries.shrink_to_fit();
+        if armed {
+            self.entries.reserve(CAPACITY);
+        }
+        self.overflowed = false;
+    }
+
+    #[inline(always)]
+    pub fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Record one byte-wide access.
+    ///
+    /// Byte-wide, always, even for a halfword or word transfer: a watchpoint covers an address
+    /// *range*, and recording a word store as one entry at its base address would mean a watchpoint
+    /// on the third byte of a structure never fired for the store that overwrote it.
+    #[inline(always)]
+    pub fn record(&mut self, addr: u32, kind: AccessKind, value: u8) {
+        if !self.armed {
+            return;
+        }
+        if self.entries.len() == CAPACITY {
+            self.overflowed = true;
+            return;
+        }
+        self.entries.push(Access { addr, kind, value });
+    }
+
+    /// Take everything recorded since the last drain.
+    pub fn drain(&mut self) -> impl Iterator<Item = Access> + '_ {
+        self.overflowed = false;
+        self.entries.drain(..)
+    }
+
+    /// Whether the last drain lost accesses to the capacity limit.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// A named span of a machine's address space, for a memory viewer's jump list.
 ///
 /// Static because these are properties of the hardware, not of a session: a Game Boy's video RAM is

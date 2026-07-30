@@ -20,6 +20,7 @@
 //! obviously missing, and a zero looks like a fact.
 
 use crate::Breakpoints;
+use crate::Watchpoint;
 use core_common::{DebugRegion, DebugTarget, RegisterValue};
 
 /// One line of a disassembly view.
@@ -120,6 +121,9 @@ pub struct Snapshot {
     pub memory: Vec<MemoryRow>,
     /// Execution breakpoints currently set, for the breakpoint list.
     pub execution_breakpoints: Vec<u32>,
+    /// Watchpoints currently set. Carried in the snapshot for the same reason the breakpoints are:
+    /// the panel that lists them has no access to the registry.
+    pub watchpoints: Vec<Watchpoint>,
 }
 
 impl Snapshot {
@@ -195,6 +199,7 @@ pub fn capture(target: &dyn DebugTarget, breakpoints: &Breakpoints, request: &Re
         disassembly,
         memory,
         execution_breakpoints: breakpoints.execution_breakpoints().to_vec(),
+        watchpoints: breakpoints.watchpoints().to_vec(),
     }
 }
 

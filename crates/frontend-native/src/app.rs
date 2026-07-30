@@ -292,6 +292,18 @@ impl App {
                     self.note(format!("breakpoint at {addr:0>digits$X}"), false);
                     self.chrome.show_debugger = true;
                 }
+                SessionEvent::WatchpointHit { addr, write, value } => {
+                    let digits =
+                        self.debug.as_ref().map(|s| s.address_digits).unwrap_or(4) as usize;
+                    self.note(
+                        format!(
+                            "watchpoint: {} {addr:0>digits$X} = {value:02X}",
+                            if write { "wrote" } else { "read" }
+                        ),
+                        false,
+                    );
+                    self.chrome.show_debugger = true;
+                }
                 SessionEvent::DebugUnavailable(reason) => {
                     self.debug = None;
                     self.debug_unavailable = Some(reason);

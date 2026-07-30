@@ -28,7 +28,7 @@ use crate::session::{
 };
 use core_common::{AudioSample, FrameOutput, InputState, System, AUDIO_SAMPLE_RATE};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
-use debugger::Breakpoints;
+use debugger::{AccessKind, Breakpoints, Trigger};
 use library::{AppPaths, RomId};
 use savestate::RewindBuffer;
 use std::path::{Path, PathBuf};
@@ -332,6 +332,21 @@ impl Emulator {
         self.debug_attached && (!self.breakpoints.is_empty() || self.instruction_budget > 0)
     }
 
+    /// Arm or disarm the bus recorder to match whether any watchpoint is registered.
+    ///
+    /// Called whenever the watchpoint set or the attachment changes, never per frame. The recorder
+    /// costs a branch per bus access while armed *and* while not, so the only thing arming changes is
+    /// whether entries accumulate — but leaving it armed with nothing watching would mean allocating
+    /// and draining a log nobody reads.
+    fn sync_access_log(&mut self) {
+        let wanted = self.debug_attached && !self.breakpoints.watchpoints().is_empty();
+        if let Some(log) = self.active.as_mut().and_then(|a| a.system.access_log()) {
+            if log.is_armed() != wanted {
+                log.set_armed(wanted);
+            }
+        }
+    }
+
     fn target_frame_duration(&self) -> Duration {
         let Some(active) = self.active.as_ref() else {
             return IDLE_POLL;
@@ -369,6 +384,8 @@ impl Emulator {
         let budget = active.frame_cycles;
         let mut spent = 0u64;
         let mut hit = None;
+        let mut watch_hit: Option<Trigger> = None;
+        let mut watch_overflow = false;
 
         while spent < budget {
             let pc = active.system.debug().map(|target| target.program_counter());
@@ -382,6 +399,35 @@ impl Emulator {
                 }
             }
             spent += active.system.step_instruction().0;
+
+            // Watchpoints, checked here rather than inside the bus. The bus only *records*; the
+            // registry that decides lives above the systems, exactly as it does for execution
+            // breakpoints.
+            if let Some(log) = active.system.access_log() {
+                if !log.is_empty() || log.overflowed() {
+                    let overflowed = log.overflowed();
+                    // Collected before consulting the registry: `check_access` needs `&mut` on the
+                    // breakpoints and the drain borrows the system, and the two live on different
+                    // fields of `self` only after the log's borrow has ended.
+                    let accesses: Vec<_> = log.drain().collect();
+                    if overflowed {
+                        watch_overflow = true;
+                    }
+                    for access in accesses {
+                        if let Some(trigger) = self.breakpoints.check_access(
+                            access.addr,
+                            access.kind,
+                            access.value as u32,
+                        ) {
+                            watch_hit = Some(trigger);
+                            break;
+                        }
+                    }
+                    if watch_hit.is_some() {
+                        break;
+                    }
+                }
+            }
 
             if self.instruction_budget > 0 {
                 self.instruction_budget -= 1;
@@ -401,6 +447,31 @@ impl Emulator {
         active.frame += 1;
         self.stats.frame_completed();
 
+        if watch_overflow {
+            // Said out loud rather than swallowed. An instruction that made more accesses than the
+            // log holds may have touched a watched address without the debugger noticing, and a
+            // watchpoint that silently misses a hit is worse than one that admits it might have.
+            self.emit(SessionEvent::Notice(
+                "an instruction made more bus accesses than the watch log holds; \
+                 a watchpoint may have been missed"
+                    .to_string(),
+            ));
+        }
+        if let Some(Trigger::Watchpoint { addr, kind, value }) = watch_hit {
+            // Stopped *after* the instruction, unlike an execution breakpoint: the access has
+            // already happened, and the useful thing to show is the state it produced.
+            self.paused = true;
+            self.instruction_budget = 0;
+            self.pacer.reset();
+            self.emit(SessionEvent::WatchpointHit {
+                addr,
+                write: kind == AccessKind::Write,
+                value: value as u8,
+            });
+            self.announce_status();
+            self.reserve_debug_snapshot();
+            return;
+        }
         if let Some(addr) = hit {
             // Stop *before* executing the instruction, which is what a breakpoint means — the
             // register view then shows the state the instruction is about to act on.
@@ -577,6 +648,7 @@ impl Emulator {
                     self.debug_attached = attached;
                     self.resume_past = None;
                     self.instruction_budget = 0;
+                    self.sync_access_log();
                     // Detaching leaves the breakpoints registered but unchecked. That is the honest
                     // behaviour: closing the panel should not silently discard the work of setting
                     // them, and re-opening it must not surprise the user by breaking somewhere they
@@ -601,6 +673,29 @@ impl Emulator {
             SessionCommand::ClearBreakpoints => {
                 self.breakpoints.clear();
                 self.resume_past = None;
+                self.sync_access_log();
+            }
+            SessionCommand::AddWatchpoint(watchpoint) => {
+                if self
+                    .active
+                    .as_mut()
+                    .and_then(|a| a.system.access_log())
+                    .is_none()
+                {
+                    self.emit(SessionEvent::DebugUnavailable(
+                        "this system's bus does not record accesses, so a watchpoint here could \
+                         never fire"
+                            .into(),
+                    ));
+                } else {
+                    self.breakpoints.add_watchpoint(watchpoint);
+                    self.sync_access_log();
+                    self.pacer.reset();
+                }
+            }
+            SessionCommand::RemoveWatchpointsAt(addr) => {
+                self.breakpoints.remove_watchpoints_at(addr);
+                self.sync_access_log();
             }
             SessionCommand::StepInstructions(n) => {
                 if self.active.is_none() {
@@ -769,6 +864,7 @@ impl Emulator {
         self.out.resampler.reset();
         self.stats = StatsWindow::new();
 
+        self.sync_access_log();
         self.emit(SessionEvent::RomLoaded(rom));
         self.announce_status();
     }

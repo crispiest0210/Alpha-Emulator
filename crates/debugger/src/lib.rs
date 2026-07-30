@@ -21,14 +21,25 @@
 //! renders, built from [`DebugTarget`](core_common::DebugTarget) and so with no branch per system.
 //! `frontend-native` has the panel; `frontend-core`'s session serves the snapshots and single-steps.
 //!
-//! **Execution breakpoints halt; watchpoints do not yet.** The session steps instruction by
-//! instruction while a debugger is attached and checks
-//! [`check_execution`](Breakpoints::check_execution) between steps, which is how breakpoints work
-//! without a hook inside any system's hot loop — and why ordinary play pays literally nothing rather
-//! than paying a branch. Watchpoints need bus-access interception, which that trick cannot provide:
-//! [`check_access`](Breakpoints::check_access) is implemented and tested, and nothing calls it from
-//! a running machine yet. That is prompt 15's remaining work along with the GDB
-//! remote-serial-protocol subset and execution tracing.
+//! **Execution breakpoints and watchpoints both halt**, by two different mechanisms, because they
+//! are two different problems:
+//!
+//! - An **execution breakpoint** needs the program counter at instruction boundaries, so the session
+//!   steps one instruction at a time while attached and checks
+//!   [`check_execution`](Breakpoints::check_execution) between steps. No system crate learns that
+//!   breakpoints exist, and a detached session pays literally nothing — not even a branch.
+//! - A **watchpoint** needs every bus access, and only the bus sees those. So each system's bus owns
+//!   a [`AccessLog`](core_common::AccessLog) that records when armed, and the session drains it after
+//!   each instruction and asks [`check_access`](Breakpoints::check_access) about each entry. The bus
+//!   records; it does not decide. It holds no addresses, knows nothing about watchpoints, and cannot
+//!   stop execution — so the policy still lives above the systems.
+//!
+//! The asymmetry is worth naming: the second mechanism costs one branch per bus access whether or not
+//! anything is watching, and the first costs nothing at all. That is why watchpoints needed a touch
+//! point in each bus and breakpoints did not, and it is the cost prompt 18 should measure rather than
+//! the one this crate asserts.
+//!
+//! Still not started: the GDB remote-serial-protocol subset and execution tracing.
 //!
 //! The disassemblers themselves live with their CPU cores, where `cpu-arm7tdmi` and `cpu-sm83` can
 //! keep them in step with the decoders they mirror; each system's `DebugTarget` picks the right one,

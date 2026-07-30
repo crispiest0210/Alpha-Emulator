@@ -29,8 +29,8 @@
 
 use cart_common::{create_mapper, GbHeader};
 use core_common::{
-    AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer, InputState, Savable,
-    StateError, StateReader, StateWriter, System,
+    AccessKind, AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer,
+    InputState, Savable, StateError, StateReader, StateWriter, System,
 };
 use cpu_sm83::Sm83;
 
@@ -53,6 +53,13 @@ pub struct GbSystemBus {
     pub joypad: Joypad,
     /// The CGB-only register blocks. Inert on a DMG, where nothing routes to them.
     pub cgb: CgbState,
+
+    /// The debugger's access recorder. Records nothing until a watchpoint arms it.
+    ///
+    /// On the bus rather than beside the CPU because the bus is the only thing that sees every
+    /// access. Kept out of save states: it is a debugging aid, not machine state, and a state file
+    /// carrying one would restore somebody else's watchpoints.
+    pub watch: AccessLog,
 
     /// Bytes the game has pushed out of the serial port.
     ///
@@ -88,6 +95,7 @@ impl GbSystemBus {
             apu: GbApu::for_model(model),
             joypad: Joypad::new(),
             cgb: CgbState::new(),
+            watch: AccessLog::new(),
             serial_output: Vec::new(),
             speed_remainder: 0,
             pending: TimingOutput::default(),
@@ -186,7 +194,69 @@ impl GbSystemBus {
 }
 
 impl Bus for GbSystemBus {
+    /// Every CPU read funnels through here, which is why the debugger's recorder sits here.
+    ///
+    /// The routing lives in [`read_routed`](Self::read_routed) and the recording here, rather than a
+    /// `record` call inside each of the eight arms it dispatches to — one of those would eventually
+    /// be forgotten, and a watchpoint that misses one region is worse than no watchpoint at all.
     fn read8(&mut self, addr: u32) -> u8 {
+        let value = self.read_routed(addr);
+        self.watch.record(addr, AccessKind::Read, value);
+        value
+    }
+
+    /// Recorded *before* the write lands.
+    ///
+    /// So the log holds the value the CPU asked to store rather than whatever a register decided to
+    /// keep. A watchpoint answers "what did the program try to do here", and for a register that
+    /// ignores half its bits those are different answers.
+    fn write8(&mut self, addr: u32, value: u8) {
+        self.watch.record(addr, AccessKind::Write, value);
+        self.write_routed(addr, value);
+    }
+
+    /// The CPU reports each machine cycle here as it happens.
+    ///
+    /// Advancing the clock is only half of it: the due events have to *fire* too. A timer
+    /// that overflows during an instruction must have overflowed by the time that same
+    /// instruction reads `TIMA` a cycle later, and moving the clock without draining the
+    /// scheduler would leave the read seeing a stale value — which is worse than the lump-sum
+    /// accounting this replaced, not better.
+    ///
+    /// Charging an instruction's cost at its end is what Blargg's `mem_timing` suite detects;
+    /// draining here is what makes the fix real rather than cosmetic.
+    fn tick(&mut self, cycles: Cycles) {
+        // In double-speed mode the CPU runs twice as fast and *nothing else does*. So the
+        // machine advances half as far per CPU cycle, rather than every scheduled interval
+        // being halved — model it the other way round and the timer, the frame sequencer, and
+        // the PPU all double their rates too, which is the bug this arrangement avoids.
+        //
+        // Every SM83 access is four t-cycles, so the halving is exact and the remainder below
+        // stays at zero on real code paths. It is carried anyway, because silently dropping a
+        // cycle would show up as slow clock drift that is very hard to trace back to here.
+        let divisor = self.cgb.speed.cpu_multiplier();
+        let total = cycles.get() + self.speed_remainder;
+        self.speed_remainder = total % divisor;
+        let advanced = total / divisor;
+
+        self.advance(Cycles(advanced));
+        let out = self.service_events();
+        self.pending.frame_ready |= out.frame_ready;
+    }
+
+    fn open_bus8(&self, addr: u32) -> u8 {
+        self.memory.open_bus8(addr)
+    }
+
+    fn peek8(&self, addr: u32) -> Option<u8> {
+        self.memory.peek8(addr)
+    }
+}
+
+/// The address routing, split out so [`Bus::read8`] and [`Bus::write8`] can record every
+/// access in one place each.
+impl GbSystemBus {
+    fn read_routed(&mut self, addr: u32) -> u8 {
         let addr16 = addr as u16;
         match addr16 {
             JOYP => self.joypad.read(),
@@ -214,7 +284,7 @@ impl Bus for GbSystemBus {
         }
     }
 
-    fn write8(&mut self, addr: u32, value: u8) {
+    fn write_routed(&mut self, addr: u32, value: u8) {
         let addr16 = addr as u16;
         match addr16 {
             JOYP => self.joypad.write(value),
@@ -270,43 +340,6 @@ impl Bus for GbSystemBus {
                 }
             }
         }
-    }
-
-    /// The CPU reports each machine cycle here as it happens.
-    ///
-    /// Advancing the clock is only half of it: the due events have to *fire* too. A timer
-    /// that overflows during an instruction must have overflowed by the time that same
-    /// instruction reads `TIMA` a cycle later, and moving the clock without draining the
-    /// scheduler would leave the read seeing a stale value — which is worse than the lump-sum
-    /// accounting this replaced, not better.
-    ///
-    /// Charging an instruction's cost at its end is what Blargg's `mem_timing` suite detects;
-    /// draining here is what makes the fix real rather than cosmetic.
-    fn tick(&mut self, cycles: Cycles) {
-        // In double-speed mode the CPU runs twice as fast and *nothing else does*. So the
-        // machine advances half as far per CPU cycle, rather than every scheduled interval
-        // being halved — model it the other way round and the timer, the frame sequencer, and
-        // the PPU all double their rates too, which is the bug this arrangement avoids.
-        //
-        // Every SM83 access is four t-cycles, so the halving is exact and the remainder below
-        // stays at zero on real code paths. It is carried anyway, because silently dropping a
-        // cycle would show up as slow clock drift that is very hard to trace back to here.
-        let divisor = self.cgb.speed.cpu_multiplier();
-        let total = cycles.get() + self.speed_remainder;
-        self.speed_remainder = total % divisor;
-        let advanced = total / divisor;
-
-        self.advance(Cycles(advanced));
-        let out = self.service_events();
-        self.pending.frame_ready |= out.frame_ready;
-    }
-
-    fn open_bus8(&self, addr: u32) -> u8 {
-        self.memory.open_bus8(addr)
-    }
-
-    fn peek8(&self, addr: u32) -> Option<u8> {
-        self.memory.peek8(addr)
     }
 }
 
@@ -497,6 +530,10 @@ impl System for GbSystem {
 
     fn debug(&mut self) -> Option<&mut dyn core_common::DebugTarget> {
         Some(self)
+    }
+
+    fn access_log(&mut self) -> Option<&mut core_common::AccessLog> {
+        Some(&mut self.bus.watch)
     }
 
     fn id(&self) -> &'static str {

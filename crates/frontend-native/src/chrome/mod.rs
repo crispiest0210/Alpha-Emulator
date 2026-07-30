@@ -143,6 +143,7 @@ pub struct Chrome {
     pub debugger_goto: String,
     pub debugger_memory_goto: String,
     pub debugger_add_breakpoint: String,
+    pub debugger_add_watch: String,
 
     /// The keybind editor is waiting for a key press for this action.
     pub capturing: Option<Action>,
@@ -175,6 +176,7 @@ impl Default for Chrome {
             debugger_goto: String::new(),
             debugger_memory_goto: String::new(),
             debugger_add_breakpoint: String::new(),
+            debugger_add_watch: String::new(),
             capturing: None,
         }
     }

@@ -22,8 +22,8 @@ and tested**, not what is planned. It is updated as work lands.
 
 **Three of the four systems are playable.** `cargo xtask dev` opens a window with a ROM library,
 plays a cartridge with video, audio, and keyboard input, and supports quicksave, quickload, rewind,
-an HUD, a keybind editor, screenshots, and an in-app debugger — registers, disassembly, memory, and
-execution breakpoints. The Nintendo DS is the remaining gap (prompt 13).
+an HUD, a keybind editor, screenshots, and an in-app debugger — registers, disassembly, memory,
+execution breakpoints, and read/write watchpoints. The Nintendo DS is the remaining gap (prompt 13).
 
 Component status:
 
@@ -67,10 +67,10 @@ Component status:
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — `Div`, `Sqrt`, `ArcTan2`, `CpuSet`, the waiting calls | done; unhandled calls change nothing rather than guessing |
-| `debugger` — breakpoints, watchpoints, conditions | registry done; execution breakpoints halt a running machine; **watchpoints match but do not halt, and there is no GDB server or tracing yet** |
+| `debugger` — breakpoints, watchpoints, conditions | done; execution breakpoints and watchpoints both halt a running machine; **no GDB server or tracing yet** |
 | `debugger` — snapshot capture (registers, disassembly, memory) | done against `DebugTarget`, so no branch per system |
-| `core-common` — `DebugTarget`, `System::step_instruction` | done; the GB, GBC, and GBA implement introspection, the DS reports it as unavailable |
-| `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, instruction stepping |
+| `core-common` — `DebugTarget`, `System::step_instruction`, `AccessLog` | done; the GB, GBC, and GBA implement introspection and access recording, the DS reports both as unavailable |
+| `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
 
 ### Accuracy suite

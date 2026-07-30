@@ -145,6 +145,10 @@ impl System for GbcSystem {
         self.inner.set_input(input);
     }
 
+    fn access_log(&mut self) -> Option<&mut core_common::AccessLog> {
+        self.inner.access_log()
+    }
+
     fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
         self.inner.debug()
     }

@@ -26,7 +26,7 @@ use crate::frame::{frame_pipe, FrameSubscriber, DEFAULT_DEPTH};
 use crate::input::{input_channel, InputSender};
 use core_common::InputState;
 use crossbeam_channel::{Receiver, Sender};
-use debugger::Snapshot;
+use debugger::{Snapshot, Watchpoint};
 use library::{AppPaths, Platform, RomId};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
@@ -163,6 +163,12 @@ pub enum SessionCommand {
     AddBreakpoint(u32),
     RemoveBreakpoint(u32),
     ClearBreakpoints,
+    /// Watch an address or range for reads or writes.
+    ///
+    /// Unlike an execution breakpoint this needs the bus to be recording, so it is refused with
+    /// [`SessionEvent::DebugUnavailable`] on a system whose bus does not.
+    AddWatchpoint(Watchpoint),
+    RemoveWatchpointsAt(u32),
     /// Advance exactly `n` instructions, then stop. Implies a pause.
     StepInstructions(u32),
     /// The debugger's "set next statement".
@@ -200,6 +206,15 @@ pub enum SessionEvent {
     /// Execution stopped at a breakpoint. The session is paused when this arrives.
     BreakpointHit {
         addr: u32,
+    },
+    /// A watched address was accessed. The session is paused when this arrives.
+    ///
+    /// Reported *after* the instruction that did it, because the access has already happened — where
+    /// an execution breakpoint stops before its instruction runs.
+    WatchpointHit {
+        addr: u32,
+        write: bool,
+        value: u8,
     },
     /// The debugger asked for something this machine cannot offer.
     DebugUnavailable(String),

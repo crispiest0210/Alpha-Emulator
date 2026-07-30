@@ -18,7 +18,7 @@
 //! honest rendering of "reading this would have consequences".
 
 use super::{Chrome, ChromeState, UiAction};
-use frontend_core::{DebugRequest, SessionCommand, SessionStatus};
+use frontend_core::{AccessKind, DebugRequest, SessionCommand, SessionStatus, Watchpoint};
 
 /// Monospace, because a hex viewer whose columns do not line up is not a hex viewer.
 fn mono(text: impl Into<String>) -> egui::RichText {
@@ -368,10 +368,71 @@ fn breakpoints(
             },
         );
     });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Watchpoints").small().weak());
+        // Read and write are separate buttons rather than a mode toggle beside one box: which of the
+        // two you want is the first thing you know, and a toggle you forget to set gives you a
+        // watchpoint that silently never fires.
+        address_box(ui, "watch-write", &mut chrome.debugger_add_watch, |addr| {
+            actions.push(UiAction::Session(SessionCommand::AddWatchpoint(
+                Watchpoint::at(addr, AccessKind::Write),
+            )));
+        });
+        if ui
+            .small_button("on write")
+            .on_hover_text("Break when the address above is written")
+            .clicked()
+        {
+            if let Some(addr) = parse_address(&chrome.debugger_add_watch) {
+                actions.push(UiAction::Session(SessionCommand::AddWatchpoint(
+                    Watchpoint::at(addr, AccessKind::Write),
+                )));
+                chrome.debugger_add_watch.clear();
+            }
+        }
+        if ui
+            .small_button("on read")
+            .on_hover_text("Break when the address above is read")
+            .clicked()
+        {
+            if let Some(addr) = parse_address(&chrome.debugger_add_watch) {
+                actions.push(UiAction::Session(SessionCommand::AddWatchpoint(
+                    Watchpoint::at(addr, AccessKind::Read),
+                )));
+                chrome.debugger_add_watch.clear();
+            }
+        }
+        for watch in &snapshot.watchpoints {
+            let kind = if watch.kind == AccessKind::Write {
+                "w"
+            } else {
+                "r"
+            };
+            let label = if watch.end.saturating_sub(watch.start) <= 1 {
+                format!("{kind} {}", snapshot.format_address(watch.start))
+            } else {
+                format!(
+                    "{kind} {}..{}",
+                    snapshot.format_address(watch.start),
+                    snapshot.format_address(watch.end)
+                )
+            };
+            if ui
+                .small_button(mono(label))
+                .on_hover_text("Click to remove")
+                .clicked()
+            {
+                actions.push(UiAction::Session(SessionCommand::RemoveWatchpointsAt(
+                    watch.start,
+                )));
+            }
+        }
+    });
     ui.label(
         egui::RichText::new(
-            "Watchpoints are registered and matched but do not halt yet — that needs bus \
-             interception, which this stepping loop cannot provide.",
+            "A watchpoint sees the CPU's accesses. The PPU reads VRAM directly and DMA does not go \
+             through the bus, so a watchpoint on VRAM catches the program writing it, not the \
+             hardware reading it.",
         )
         .small()
         .weak(),

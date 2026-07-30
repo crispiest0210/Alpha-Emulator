@@ -87,7 +87,10 @@ pub use library::Platform;
 /// The debugger's snapshot types, for the same reason: the panel that renders them consumes this
 /// crate's session API, and making it depend on `debugger` separately would let it reach the
 /// registry the emulation thread owns.
-pub use debugger::{DisasmLine, MemoryRow, Request as DebugRequest, Snapshot as DebugSnapshot};
+pub use debugger::{
+    AccessKind, Condition, DisasmLine, MemoryRow, Request as DebugRequest,
+    Snapshot as DebugSnapshot, Watchpoint,
+};
 
 #[cfg(test)]
 mod tests;

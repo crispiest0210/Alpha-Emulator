@@ -23,8 +23,8 @@
 
 use cart_common::GbaHeader;
 use core_common::{
-    AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer, InputState, Savable,
-    StateError, StateReader, StateWriter, System,
+    AccessKind, AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer,
+    InputState, Savable, StateError, StateReader, StateWriter, System,
 };
 use cpu_arm7tdmi::{Arm7Tdmi, BootState, Exception, Mode};
 
@@ -70,6 +70,9 @@ pub struct GbaSystemBus {
     pub effects: Effects,
     pub irq: InterruptController,
     pub keypad: Keypad,
+    /// The debugger's access recorder. Records nothing until a watchpoint arms it, and is kept out of
+    /// save states: it is a debugging aid, not machine state.
+    pub watch: AccessLog,
     pub sound: DirectSound,
     pub waits: WaitControl,
 
@@ -104,6 +107,7 @@ impl GbaSystemBus {
             effects: Effects::new(),
             irq: InterruptController::new(),
             keypad: Keypad::new(),
+            watch: AccessLog::new(),
             sound: DirectSound::new(),
             waits: WaitControl::new(),
             framebuffer: Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT),
@@ -331,72 +335,30 @@ fn step(addr: u32, step: crate::dma::AddressStep, unit: u32) -> u32 {
 
 impl Bus for GbaSystemBus {
     fn read8(&mut self, addr: u32) -> u8 {
-        self.charge(addr, 1);
-        match Region::of(addr) {
-            Region::Io => {
-                // Registers are halfwords; a byte read takes its half of one.
-                let half = self.read_io16(addr & !1).unwrap_or(0);
-                if addr & 1 == 0 {
-                    half as u8
-                } else {
-                    (half >> 8) as u8
-                }
-            }
-            Region::Rom { .. } => self.cartridge.read_rom(addr),
-            Region::Sram => self.cartridge.read_save(addr),
-            _ => self.memory.read8(addr).unwrap_or(0),
-        }
+        let value = self.read8_routed(addr);
+        self.watch.record(addr, AccessKind::Read, value);
+        value
     }
 
-    /// A side-effect-free read, for the debugger's memory and disassembly views.
-    ///
-    /// I/O and cartridge save space answer `None`, and that is the honest answer rather than a
-    /// gap. An I/O halfword read here would go through `read_io16`, which is where registers with
-    /// read-side behaviour live; the save space is a flash or EEPROM state machine whose reads are
-    /// commands. Showing `--` for those two regions is correct — a memory viewer that stepped a
-    /// flash chip's state machine to avoid showing `--` would change the bug being investigated.
-    fn peek8(&self, addr: u32) -> Option<u8> {
-        match Region::of(addr) {
-            Region::Io | Region::Sram => None,
-            Region::Rom { .. } => Some(self.cartridge.read_rom(addr)),
-            _ => self.memory.read8(addr),
-        }
-    }
-
+    /// Recorded before the write lands, so the log holds what the CPU asked to store rather than what
+    /// a register chose to keep.
     fn write8(&mut self, addr: u32, value: u8) {
-        self.charge(addr, 1);
-        match Region::of(addr) {
-            Region::Io => {
-                // A byte write to a halfword register is a read-modify-write, which matters for
-                // registers whose other half is live state rather than a copy of what was
-                // written.
-                let base = addr & !1;
-                let current = self.read_io16(base).unwrap_or(0);
-                let merged = if addr & 1 == 0 {
-                    (current & 0xFF00) | value as u16
-                } else {
-                    (current & 0x00FF) | ((value as u16) << 8)
-                };
-                self.write_io16(base, merged);
-                if Self::is_dma_register(base) {
-                    self.run_pending_dma();
-                }
-            }
-            Region::Sram => self.cartridge.write_save(addr, value),
-            // ROM is not writable, and a write there is silently dropped rather than trapped:
-            // games do it during cartridge probing.
-            Region::Rom { .. } => {}
-            _ => {
-                self.memory.write8(addr, value);
-            }
-        }
+        self.watch.record(addr, AccessKind::Write, value);
+        self.write8_routed(addr, value);
     }
 
     fn read16(&mut self, addr: u32) -> u16 {
         let addr = addr & !1;
         self.charge(addr, 2);
         if Region::of(addr) == Region::Io {
-            return self.read_io16(addr).unwrap_or(0);
+            let value = self.read_io16(addr).unwrap_or(0);
+            // As two byte entries, so every entry in the log means the same thing and a watchpoint's
+            // range arithmetic needs no special case for register width. Every other region reaches
+            // `read8` twice and is recorded there.
+            self.watch.record(addr, AccessKind::Read, value as u8);
+            self.watch
+                .record(addr + 1, AccessKind::Read, (value >> 8) as u8);
+            return value;
         }
         u16::from_le_bytes([self.read8(addr), self.read8(addr + 1)])
     }
@@ -406,6 +368,9 @@ impl Bus for GbaSystemBus {
         self.charge(addr, 2);
         match Region::of(addr) {
             Region::Io => {
+                self.watch.record(addr, AccessKind::Write, value as u8);
+                self.watch
+                    .record(addr + 1, AccessKind::Write, (value >> 8) as u8);
                 self.write_io16(addr, value);
                 if Self::is_dma_register(addr) {
                     self.run_pending_dma();
@@ -447,6 +412,72 @@ impl Bus for GbaSystemBus {
 
     fn open_bus8(&self, addr: u32) -> u8 {
         (self.memory.open_bus32() >> ((addr & 3) * 8)) as u8
+    }
+
+    /// A side-effect-free read, for the debugger's memory and disassembly views.
+    ///
+    /// I/O and cartridge save space answer `None`, and that is the honest answer rather than a gap.
+    /// An I/O read here would go through `read_io16`, which is where registers with read-side
+    /// behaviour live; the save space is a Flash or EEPROM state machine whose reads are commands.
+    /// Showing `--` for those two regions is correct — a memory viewer that stepped a Flash chip's
+    /// state machine to avoid showing `--` would change the bug being investigated.
+    fn peek8(&self, addr: u32) -> Option<u8> {
+        match Region::of(addr) {
+            Region::Io | Region::Sram => None,
+            Region::Rom { .. } => Some(self.cartridge.read_rom(addr)),
+            _ => self.memory.read8(addr),
+        }
+    }
+}
+
+/// The byte-access routing, split out so the recording in [`Bus::read8`] and [`Bus::write8`] happens
+/// in exactly one place each rather than in every arm of a region match.
+impl GbaSystemBus {
+    fn read8_routed(&mut self, addr: u32) -> u8 {
+        self.charge(addr, 1);
+        match Region::of(addr) {
+            Region::Io => {
+                // Registers are halfwords; a byte read takes its half of one.
+                let half = self.read_io16(addr & !1).unwrap_or(0);
+                if addr & 1 == 0 {
+                    half as u8
+                } else {
+                    (half >> 8) as u8
+                }
+            }
+            Region::Rom { .. } => self.cartridge.read_rom(addr),
+            Region::Sram => self.cartridge.read_save(addr),
+            _ => self.memory.read8(addr).unwrap_or(0),
+        }
+    }
+
+    fn write8_routed(&mut self, addr: u32, value: u8) {
+        self.charge(addr, 1);
+        match Region::of(addr) {
+            Region::Io => {
+                // A byte write to a halfword register is a read-modify-write, which matters for
+                // registers whose other half is live state rather than a copy of what was
+                // written.
+                let base = addr & !1;
+                let current = self.read_io16(base).unwrap_or(0);
+                let merged = if addr & 1 == 0 {
+                    (current & 0xFF00) | value as u16
+                } else {
+                    (current & 0x00FF) | ((value as u16) << 8)
+                };
+                self.write_io16(base, merged);
+                if Self::is_dma_register(base) {
+                    self.run_pending_dma();
+                }
+            }
+            Region::Sram => self.cartridge.write_save(addr, value),
+            // ROM is not writable, and a write there is silently dropped rather than trapped:
+            // games do it during cartridge probing.
+            Region::Rom { .. } => {}
+            _ => {
+                self.memory.write8(addr, value);
+            }
+        }
     }
 }
 
@@ -594,6 +625,10 @@ impl System for GbaSystem {
     /// was taken.
     fn debug(&mut self) -> Option<&mut dyn core_common::DebugTarget> {
         Some(self)
+    }
+
+    fn access_log(&mut self) -> Option<&mut core_common::AccessLog> {
+        Some(&mut self.bus.watch)
     }
 
     fn step_instruction(&mut self) -> Cycles {

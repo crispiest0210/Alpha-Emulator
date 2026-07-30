@@ -7,7 +7,7 @@
 //! into a third-party core's private object graph, and refusing to expose that path is a
 //! deliberate structural choice, not an oversight.
 
-use crate::debug::DebugTarget;
+use crate::debug::{AccessLog, DebugTarget};
 use crate::{AudioSample, Cycles, Framebuffer, InputState};
 use savestate::{decode_state, encode_state, Savable, StateError};
 use thiserror::Error;
@@ -151,6 +151,15 @@ pub trait System: Savable {
     /// introspect — which is the state the Nintendo DS is in. A frontend shows the debugger panel
     /// as unavailable rather than empty.
     fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
+        None
+    }
+
+    /// The bus's access recorder, for watchpoints.
+    ///
+    /// `None` by default and for any system that has not been given one. A frontend then offers
+    /// execution breakpoints and reports watchpoints as unsupported on that machine, rather than
+    /// accepting one that can never fire.
+    fn access_log(&mut self) -> Option<&mut AccessLog> {
         None
     }
 

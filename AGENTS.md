@@ -202,17 +202,16 @@ its two CPU cores.
   17 (testing).
 - **Mostly done:** prompt 15. The in-app `egui` debugger works — registers, disassembly with the
   program counter highlighted and click-to-toggle breakpoints, a hex viewer with a region jump list,
-  instruction stepping, and execution breakpoints that genuinely halt. Three things remain, in the
-  order they are worth doing:
-  1. **Watchpoints do not halt.** `Breakpoints::check_access` is implemented and tested and nothing
-     calls it from a running machine. Unlike execution breakpoints, this cannot be done between
-     instructions — it needs the `DebugHooks` bus interception prompt 15 describes, which means a
-     touch point in each system's bus.
-  2. **Joypad input is not delivered while a breakpoint is set.** `InputState` applies to a whole
-     frame by the `System` contract and the stepping loop does not run frames. Wants an input setter
-     on `System`.
-  3. The GDB remote-serial-protocol subset and execution tracing, neither started. Prompt 15 itself
-     ranks the GDB server lowest.
+  instruction stepping, execution breakpoints, and read/write/range watchpoints, all of which halt.
+  What remains is the **GDB remote-serial-protocol subset and execution tracing**, neither started;
+  prompt 15 itself ranks the GDB server lowest of everything it asks for.
+
+  The two halting mechanisms are deliberately different and the asymmetry is the interesting part.
+  Execution breakpoints are checked *between* `step_instruction` calls, so no system crate knows
+  breakpoints exist and a detached session pays nothing at all. Watchpoints cannot work that way —
+  only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
+  and the session drains it after each instruction. That costs one branch per bus access whether or
+  not anything is watching. Measuring it is prompt 18's job; nothing claims a number.
 - **Untouched:** prompts 13 (NDS), 18 (performance), 19 (packaging).
 
 ### The biggest gap

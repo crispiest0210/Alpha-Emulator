@@ -1184,6 +1184,186 @@ fn input_reaches_the_machine_while_a_breakpoint_is_set() {
     assert_eq!(addr, 0x0180);
 }
 
+/// A ROM that writes a known value to a known WRAM address, then spins.
+///
+/// `$C123` is far from anything the machine touches on its own, so a watchpoint there fires for this
+/// program and for nothing else — which is the second half of prompt 15's watchpoint criterion:
+/// it must trigger on the expected write *and not on unrelated ones*.
+fn writes_to_wram_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    let code: &[u8] = &[
+        0x3E, 0x5A, //       ld a, $5A
+        0xEA, 0x23, 0xC1, // ld ($C123), a
+        0x18, 0xFE, //       jr -2            ; spin
+    ];
+    rom[0x0100..0x0100 + code.len()].copy_from_slice(code);
+    rom[0x0134..0x013C].copy_from_slice(b"WATCHPT_");
+    rom[0x0147] = 0x00;
+    rom[0x0148] = 0x00;
+    rom[0x014D] = cart_common::GbHeader::header_checksum(&rom);
+    rom
+}
+
+/// Prompt 15's watchpoint criterion: fires on the expected write.
+#[test]
+fn a_write_watchpoint_fires_on_the_write_it_watches() {
+    let fixture = Fixture::new("watchwrite");
+    let rom = fixture.dir.join("watch.gb");
+    std::fs::write(&rom, writes_to_wram_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddWatchpoint(crate::Watchpoint::at(
+        0xC123,
+        crate::AccessKind::Write,
+    )));
+    // The machine is spinning at `jr -2` by now, so nothing will write $C123 again. Reset to run the
+    // store once more with the watchpoint in place.
+    session.send(SessionCommand::Reset);
+
+    let (addr, write, value) = wait_event(&session, "the watchpoint", |event| match event {
+        SessionEvent::WatchpointHit { addr, write, value } => Some((*addr, *write, *value)),
+        SessionEvent::DebugUnavailable(reason) => panic!("the Game Boy records accesses: {reason}"),
+        _ => None,
+    });
+    assert_eq!(addr, 0xC123);
+    assert!(write, "this is a write watchpoint");
+    assert_eq!(value, 0x5A, "and the value the program stored");
+    wait_status(&session, SessionStatus::Paused);
+}
+
+/// The other half of the criterion: it must *not* fire on unrelated accesses.
+#[test]
+fn a_write_watchpoint_ignores_unrelated_writes() {
+    let fixture = Fixture::new("watchquiet");
+    let rom = fixture.dir.join("watch.gb");
+    std::fs::write(&rom, writes_to_wram_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+
+    session.send(SessionCommand::SetDebugAttached(true));
+    // One byte past what the program writes. The machine runs on, touching stack, I/O, and HRAM —
+    // none of which is this address.
+    session.send(SessionCommand::AddWatchpoint(crate::Watchpoint::at(
+        0xC124,
+        crate::AccessKind::Write,
+    )));
+    session.send(SessionCommand::Reset);
+
+    std::thread::sleep(Duration::from_millis(400));
+    for event in session.drain_events() {
+        if let SessionEvent::WatchpointHit { addr, .. } = event {
+            panic!("fired at {addr:#06X}, which nothing writes");
+        }
+    }
+    assert!(
+        session.frames().poll(),
+        "and the machine kept running rather than stopping on nothing"
+    );
+}
+
+#[test]
+fn a_read_watchpoint_fires_on_a_read_of_its_address() {
+    let fixture = Fixture::new("watchread");
+    let rom = fixture.dir.join("watch.gb");
+    // The `ld a, $5A` fetch reads $0101, so a read watchpoint there catches the CPU reading its own
+    // instruction stream — which is a legitimate thing to watch for and needs no special ROM.
+    std::fs::write(&rom, writes_to_wram_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddWatchpoint(crate::Watchpoint::at(
+        0x0101,
+        crate::AccessKind::Read,
+    )));
+    session.send(SessionCommand::Reset);
+
+    let (addr, write) = wait_event(&session, "the read watchpoint", |event| match event {
+        SessionEvent::WatchpointHit { addr, write, .. } => Some((*addr, *write)),
+        _ => None,
+    });
+    assert_eq!(addr, 0x0101);
+    assert!(!write, "a fetch is a read");
+}
+
+#[test]
+fn a_range_watchpoint_catches_a_write_anywhere_inside_it() {
+    let fixture = Fixture::new("watchrange");
+    let rom = fixture.dir.join("watch.gb");
+    std::fs::write(&rom, writes_to_wram_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    // A whole structure, of which $C123 is one field. This is the case a single-address watchpoint
+    // cannot serve and the one people actually want: "something is corrupting this struct".
+    session.send(SessionCommand::AddWatchpoint(crate::Watchpoint::range(
+        0xC100,
+        0xC200,
+        crate::AccessKind::Write,
+    )));
+    session.send(SessionCommand::Reset);
+
+    let addr = wait_event(&session, "the range watchpoint", |event| match event {
+        SessionEvent::WatchpointHit { addr, .. } => Some(*addr),
+        _ => None,
+    });
+    assert!(
+        (0xC100..0xC200).contains(&addr),
+        "{addr:#06X} is outside the watched range"
+    );
+}
+
+#[test]
+fn removing_a_watchpoint_lets_the_machine_run_on() {
+    let fixture = Fixture::new("watchremove");
+    let rom = fixture.dir.join("watch.gb");
+    std::fs::write(&rom, writes_to_wram_rom()).unwrap();
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    wait_frame(&mut session, 2);
+    session.send(SessionCommand::SetDebugAttached(true));
+    session.send(SessionCommand::AddWatchpoint(crate::Watchpoint::at(
+        0xC123,
+        crate::AccessKind::Write,
+    )));
+    session.send(SessionCommand::Reset);
+    wait_event(&session, "the hit", |event| {
+        matches!(event, SessionEvent::WatchpointHit { .. }).then_some(())
+    });
+
+    session.send(SessionCommand::RemoveWatchpointsAt(0xC123));
+    session.send(SessionCommand::SetPaused(false));
+    wait_status(&session, SessionStatus::Running);
+    session.frames().poll();
+    let now = session.frames().current().map(|f| f.number).unwrap_or(0);
+    wait_frame(&mut session, now + 4);
+}
+
 #[test]
 fn a_debug_request_with_no_cartridge_says_so_rather_than_returning_nothing() {
     let fixture = Fixture::new("dbgnorom");
