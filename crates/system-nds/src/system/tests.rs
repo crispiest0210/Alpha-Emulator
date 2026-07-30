@@ -1,7 +1,7 @@
 use super::*;
 use crate::cartridge::HEADER_SIZE;
 use crate::video::CYCLES_PER_FRAME;
-use core_common::{Buttons, TouchPoint};
+use core_common::{Buttons, TouchPoint, AUDIO_SAMPLE_RATE};
 
 /// `b .` — branch to itself, the idle loop every test program ends with.
 const SPIN: u32 = 0xEAFF_FFFE;
@@ -457,10 +457,67 @@ fn stepping_one_instruction_advances_the_machine_a_little() {
 }
 
 #[test]
-fn there_is_no_audio_and_the_system_says_so_rather_than_producing_silence() {
+fn a_frame_produces_a_frames_worth_of_audio() {
     let mut nds = idle();
     nds.step_frame(InputState::default());
-    assert!(nds.take_audio_samples().is_empty());
+    let count = nds.take_audio_samples().len();
+    // 48 kHz over a 59.8261 Hz frame is about 802 samples. Exactness is not the point; producing
+    // roughly the right number every frame is, because the frontend's ring depends on it.
+    assert!(
+        count.abs_diff(802) < 40,
+        "{count} samples for one frame at {AUDIO_SAMPLE_RATE} Hz"
+    );
+    assert!(nds.take_audio_samples().is_empty(), "and draining works");
+}
+
+#[test]
+fn a_program_that_starts_a_sound_channel_is_heard() {
+    // Only the ARM7 can reach the sound hardware, so this is also an end-to-end check that the
+    // ARM7 half of a DS program can do the one job it usually exists for.
+    let arm7 = [
+        // Sample data: a run of loud bytes in the ARM7's own work RAM.
+        load(0, 0x6060_6060),
+        load(1, 0x0380_2000),
+        vec![str_word(0, 1), 0xE2811004, str_word(0, 1)],
+        // SOUNDCNT = master enable, full volume.
+        load(0, (1 << 15) | 0x7F),
+        load(1, 0x0400_0500),
+        vec![str_word(0, 1)],
+        // Channel 0: source, timer, length, then control with the busy bit.
+        load(0, 0x0380_2000),
+        load(1, 0x0400_0404),
+        vec![str_word(0, 1)],
+        load(0, 0xFC00),
+        load(1, 0x0400_0408),
+        vec![str_word(0, 1)],
+        load(0, 2),
+        load(1, 0x0400_040C),
+        vec![str_word(0, 1)],
+        // Busy, centre panning, full volume, PCM8, looping.
+        load(0, 0x8840_007F),
+        load(1, 0x0400_0400),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+    let mut nds = booted(&[SPIN], &arm7);
+    nds.step_frame(InputState::default());
+
+    let samples = nds.take_audio_samples();
+    assert!(
+        samples.iter().any(|s| s.left.abs() > 0.01),
+        "the channel produced nothing"
+    );
+}
+
+#[test]
+fn the_arm9_cannot_reach_the_sound_hardware() {
+    let mut nds = idle();
+    nds.bus.write32(Core::Arm7, 0x0400_0400, 0x8000_007F);
+    assert!(nds.bus.apu.channel_is_busy(0));
+    // The same address on the ARM9 is not the sound hardware and must not disturb it.
+    nds.bus.write32(Core::Arm9, 0x0400_0400, 0);
+    assert!(nds.bus.apu.channel_is_busy(0));
+    assert_eq!(nds.bus.read32(Core::Arm9, 0x0400_0400), 0);
 }
 
 #[test]

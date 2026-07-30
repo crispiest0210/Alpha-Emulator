@@ -362,6 +362,11 @@ fn gba_frames(c: &mut Criterion) {
 /// and says the dynarec decision for it must be measured rather than inherited from the two
 /// already made. This is that measurement's starting point — with no 3D core yet, so it is the
 /// floor rather than the answer.
+///
+/// **Read these against `gba/spin` from the same run, not against the numbers in `README.md`.**
+/// This is the one case here whose absolute time is close enough to its budget that a laptop
+/// under sustained load can move it by 70%, and it has already caused one "regression" that was
+/// nothing of the kind — the untouched GBA case had moved by the same proportion.
 fn nds_frames(c: &mut Criterion) {
     let mut group = c.benchmark_group("nds");
     for (name, rom) in [("idle", nds_idle_rom()), ("rendering", nds_rendering_rom())] {

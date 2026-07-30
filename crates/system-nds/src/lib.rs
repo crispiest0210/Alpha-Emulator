@@ -6,13 +6,16 @@
 //! than its completion; what is here is built the way the GBA was, as tested units assembled
 //! last. See `README.md` for the authoritative status table.
 //!
-//! Implemented so far: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), the
-//! inter-processor communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]),
-//! the two timer blocks ([`timers`]), the two DMA
-//! controllers ([`dma`]), and the video timing ([`video`]).
+//! Implemented: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), both 2D
+//! engines ([`engine2d`]), the sixteen-channel sound hardware ([`apu`]), the inter-processor
+//! communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]), the two timer blocks
+//! ([`timers`]), the two DMA controllers ([`dma`]), the video timing ([`video`]), the keypad and
+//! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
+//! them ([`system`]).
 //!
-//! Not implemented yet: the two 2D engines, the 3D core, the audio hardware,
-//! the cartridge, and the [`core_common::System`] implementation itself.
+//! Not implemented yet: **the 3D core**. Engine A's BG0-as-3D layer draws nothing and lets the
+//! backdrop through, with a test asserting that gap rather than a flat colour that would look
+//! deliberate. There is also no cartridge save chip, and no wifi.
 //!
 //! # Wifi is out of scope
 //!
@@ -22,6 +25,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod apu;
 pub mod cartridge;
 pub mod dma;
 pub mod engine2d;
@@ -34,6 +38,7 @@ pub mod timers;
 pub mod video;
 pub mod vram;
 
+pub use apu::NdsApu;
 pub use cartridge::NdsCartridge;
 pub use dma::DmaController;
 pub use engine2d::{Engine, Engine2d};

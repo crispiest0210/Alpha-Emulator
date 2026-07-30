@@ -260,7 +260,7 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 `README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
 Advance are **playable** — window, audio, input, save states, rewind — with real accuracy coverage,
 and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
-and draws both screens**, with no audio and no 3D core.
+and draws both screens with sound**. It has no 3D core.
 
 - **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
   17 (testing).
@@ -300,9 +300,10 @@ and draws both screens**, with no audio and no 3D core.
   a `.deb` — which is exactly what those tools are for.
 - **Mostly done:** prompt 13 (NDS). The machine boots a `.nds` ROM through direct boot, runs both
   cores, and draws both screens. Everything below the 3D core exists and is unit-tested: two memory
-  maps over one store, all nine VRAM banks, both 2D engines, IPC, interrupts, timers, DMA, video
-  timing, keypad and touchscreen, the card transfer interface, and save states over all of it.
-  **Audio and the 3D core are not started**, and there is no save chip. See "The biggest gap".
+  maps over one store, all nine VRAM banks, both 2D engines, the sixteen-channel sound hardware,
+  IPC, interrupts, timers, DMA, video timing, keypad and touchscreen, the card transfer interface,
+  and save states over all of it. **The 3D core is not started**, and there is no save chip. See
+  "The biggest gap".
 
 ### The four decisions prompt 13 raised, and what was chosen
 
@@ -337,17 +338,18 @@ second instance. Whoever answers it should answer it for both.
 
 ### The biggest gap
 
-**The DS's audio hardware and its 3D core.** Everything else in prompt 13 is done.
+**The DS's 3D core.** Everything else in prompt 13 is done.
 
-- **Audio.** Sixteen PCM channels with several sample formats including ADPCM. Prompt 13 says to
-  implement it directly in `system-nds` rather than forcing it through `apu-shared`, and to evaluate
-  at implementation time whether any primitive is worth factoring out. `take_audio_samples` returns
-  nothing today, which a frontend handles as "no audio this frame" rather than as silence.
-- **The 3D core.** Geometry command FIFO, matrix stack, a software rasteriser, and compositing into
-  engine A's BG0. Prompt 13 calls it the single largest scope item in the project and says to
-  prioritise geometry and texturing correctness over fog and toon shading. Engine A's 3D layer
-  currently draws nothing and lets the backdrop through, with a test asserting that gap — the
-  approximation trap this project keeps refusing.
+Geometry command FIFO, matrix stack, per-vertex lighting, texture mapping, a software rasteriser,
+and compositing into engine A's BG0. Prompt 13 calls it the single largest scope item in the whole
+project and says to prioritise geometry and texturing correctness over fog and toon shading, and to
+document what is deferred. Engine A's 3D layer currently draws nothing and lets the backdrop
+through, with a test asserting that gap — the approximation trap this project keeps refusing.
+
+The sound hardware landed after the assembly did: sixteen channels in `system-nds::apu`, kept out
+of `apu-shared` because prompt 13 says to and because the shapes genuinely do not meet — no
+envelope, no sweep, no length counter, no sequencer, and channels that play sample data out of
+memory rather than synthesising it.
 
 Smaller DS gaps, all recorded in the crate docs where they are made: no save chip (the header does
 not say which of EEPROM or FLASH is fitted, and guessing corrupts saves silently), no KEY1
@@ -356,14 +358,14 @@ per-line sprite budget.
 
 ### Start here
 
-Read `docs/successor-emulator/13-system-nds.md` again — the two remaining items are both in it — and
-then `crates/system-nds/src/lib.rs`, whose Status section is kept current.
+Read `docs/successor-emulator/13-system-nds.md` again — the remaining item is in it — and then
+`crates/system-nds/src/lib.rs`, whose Status section is kept current.
 
-**Audio is the smaller of the two and the better first move.** It has a clear register block, a
-shape prompt 09 already sketched, and it is the difference between "runs a homebrew" and "runs a
-homebrew properly". The 3D core is a much larger unit and should follow the same rule everything
-else here did: geometry FIFO, matrix stack, and rasteriser as separately tested pieces before any of
-it is wired into engine A.
+The 3D core is a large unit and should follow the same rule everything else here did: geometry
+FIFO, matrix stack, and rasteriser as separately tested pieces before any of it is wired into
+engine A. `system-nds` has no `wgpu` dependency and prompt 13 forbids it one, so if the software
+rasteriser turns out to be too slow, the answer is an intermediate command buffer `frontend-native`
+consumes — a cross-crate interface worth agreeing before it is written.
 
 Before optimising the 3D rasteriser, read "Performance" below. **The DS already has a fifth of the
 margin the GBA does** — 3.2x real time against 11.3x, and that is *without* 3D — so the dynarec
@@ -392,8 +394,10 @@ change where anyone looks next:
 
 - **On a Game Boy frame with music, the APU costs more than the PPU** — about a third of the frame
   against a sixth. Not what you would guess for a machine whose job is drawing a picture.
-- **The DS is the tight one, at 3.2x real time**, against 11x to 80x everywhere else — and that is
-  before the 3D core exists. Its first measurement was 1.1x, and the cause was not the two 2D
+- **The DS is the tight one, at about 3.1x real time**, against 11x to 80x everywhere else — and
+  that is before the 3D core exists. Read `nds/` benchmark numbers against `gba/spin` from the
+  *same run*: the DS case is close enough to its budget that a laptop under sustained load moves it
+  by 70%, which has already produced one "regression" that was nothing of the kind. Its first measurement was 1.1x, and the cause was not the two 2D
   engines: turning both displays off saved 1.5%. It was `NdsBus` composing every wide access out of
   byte accesses, so each instruction fetch paid four region decodes. Reading RAM at its real width
   cut a frame by 65%. That is the only optimisation in this project, and it had a measured problem

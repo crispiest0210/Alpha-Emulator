@@ -38,10 +38,11 @@
 //!
 //! # What this machine does not have
 //!
-//! **Audio and the 3D core.** Neither is implemented. [`NdsSystem::take_audio_samples`] returns
-//! nothing rather than silence-shaped noise, and engine A's 3D layer draws nothing. Both are
-//! recorded in `README.md` as unimplemented rather than as partial.
+//! **The 3D core.** Engine A's 3D layer draws nothing and the backdrop shows through, rather than
+//! a flat colour that would look deliberate. Recorded in `README.md` as unimplemented rather than
+//! as partial.
 
+use crate::apu::NdsApu;
 use crate::cartridge::{NdsCartridge, HEADER_MIRROR};
 use crate::dma::{AddressStep, DmaController, Transfer};
 use crate::engine2d::{Engine, Engine2d};
@@ -81,6 +82,10 @@ const ARM9_HANDLER_OFFSET: u32 = 0x3FFC;
 /// Everything both cores share.
 pub struct NdsBus {
     pub memory: NdsMemory,
+    /// The sound hardware. In the ARM7's I/O space only: the ARM9 cannot reach it, which is why
+    /// so much DS software has an ARM7 half whose whole job is playing sounds the ARM9 asks for
+    /// over IPC.
+    pub apu: NdsApu,
     pub vram: Vram,
     pub ipc: Ipc,
     pub cart: NdsCartridge,
@@ -105,6 +110,7 @@ impl NdsBus {
     fn new(arm9_bios: Option<Vec<u8>>, arm7_bios: Option<Vec<u8>>) -> Self {
         Self {
             memory: NdsMemory::new(arm9_bios, arm7_bios),
+            apu: NdsApu::new(),
             vram: Vram::new(),
             ipc: Ipc::new(),
             cart: NdsCartridge::empty(),
@@ -390,6 +396,9 @@ impl NdsBus {
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             return self.cart.read32(addr).unwrap_or(0);
         }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            return self.apu.read32_reg(addr).unwrap_or(0);
+        }
         (self.io_read16(core, addr) as u32) | ((self.io_read16(core, addr + 2) as u32) << 16)
     }
 
@@ -403,6 +412,10 @@ impl NdsBus {
         }
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             self.cart.write32(addr, value);
+            return;
+        }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            self.apu.write32_reg(addr, value);
             return;
         }
         if addr == 0x0400_0180 {
@@ -447,6 +460,9 @@ impl NdsBus {
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             return self.cart.read16(addr).unwrap_or(0);
         }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            return self.apu.read16_reg(addr).unwrap_or(0);
+        }
         if self.engine_a.owns(addr) {
             return self.engine_a.read16(addr).unwrap_or(0);
         }
@@ -488,6 +504,10 @@ impl NdsBus {
         }
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             self.cart.write16(addr, value);
+            return;
+        }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            self.apu.write16_reg(addr, value);
             return;
         }
         if self.engine_a.owns(addr) {
@@ -532,6 +552,9 @@ impl NdsBus {
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             return self.cart.read8(addr).unwrap_or(0);
         }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            return self.apu.read8_reg(addr).unwrap_or(0);
+        }
         match addr {
             0x0400_0240..=0x0400_0249 if core == Core::Arm9 => self.vramcnt_read(addr),
             0x0400_0300 => self.postflg[core as usize],
@@ -555,6 +578,10 @@ impl NdsBus {
         }
         if NdsCartridge::owns(addr) && self.owns_card(core) {
             self.cart.write8(addr, value);
+            return;
+        }
+        if core == Core::Arm7 && NdsApu::owns(addr) {
+            self.apu.write8_reg(addr, value);
             return;
         }
         match addr {
@@ -780,6 +807,10 @@ impl NdsSystem {
 
         let irq9 = self.bus.timers[Core::Arm9 as usize].step(cycles);
         let irq7 = self.bus.timers[Core::Arm7 as usize].step(cycles);
+        // The sound hardware fetches its own sample data, so it needs memory — borrowed as a
+        // separate field rather than through the bus, which is already borrowed mutably here.
+        let NdsBus { apu, memory, .. } = &mut self.bus;
+        apu.step(cycles, memory);
         for (core, mask) in [(Core::Arm9, irq9), (Core::Arm7, irq7)] {
             for channel in 0..4 {
                 if mask & (1 << channel) != 0 {
@@ -1034,6 +1065,7 @@ impl System for NdsSystem {
         self.arm9 = Arm946e::new(BootState::default());
         self.arm7 = Arm7Tdmi::new(BootState::default());
         self.bus.memory.reset();
+        self.bus.apu.reset();
         self.bus.vram = Vram::new();
         self.bus.ipc = Ipc::new();
         self.bus.input.reset();
@@ -1073,10 +1105,7 @@ impl System for NdsSystem {
     }
 
     fn take_audio_samples(&mut self) -> &[AudioSample] {
-        // The audio hardware is not implemented. Returning nothing is what a frontend handles as
-        // "this system produced no audio this frame"; returning silence would claim otherwise.
-        self.audio.clear();
-        &self.audio
+        self.bus.apu.take_samples()
     }
 
     fn save_ram(&self) -> Option<&[u8]> {
@@ -1100,6 +1129,7 @@ impl Savable for NdsSystem {
         self.bus.video.save(w);
         self.bus.engine_a.save(w);
         self.bus.engine_b.save(w);
+        self.bus.apu.save(w);
         for controller in &self.bus.irq {
             controller.save(w);
         }
@@ -1131,6 +1161,7 @@ impl Savable for NdsSystem {
         self.bus.video.load(r)?;
         self.bus.engine_a.load(r)?;
         self.bus.engine_b.load(r)?;
+        self.bus.apu.load(r)?;
         for controller in &mut self.bus.irq {
             controller.load(r)?;
         }

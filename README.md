@@ -18,9 +18,9 @@ and tested**, not what is planned. It is updated as work lands.
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, and draws both screens through the two 2D engines. **No audio and no 3D core**; no save chip. See below |
+| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines, and plays its sixteen sound channels. **No 3D core**; no save chip. See below |
 
-**All four systems boot; three are fully playable.** `cargo xtask dev` opens a window with a ROM
+**All four systems boot with picture and sound; three are fully playable.** `cargo xtask dev` opens a window with a ROM
 library, plays a cartridge with video, audio, and keyboard input, and supports quicksave,
 quickload, rewind, an HUD, a keybind editor, screenshots, and an in-app debugger — registers,
 disassembly, memory, execution breakpoints, and read/write watchpoints.
@@ -30,7 +30,10 @@ disassembly, memory, execution breakpoints, and read/write watchpoints.
 Prompt 13 is explicit that its v1 bar is "boots and runs a meaningful set of commercial-quality
 homebrew and simple commercial titles correctly", not parity. This is the start of DS support.
 
-**Implemented:** the dual-CPU memory map including the runtime-configurable shared-WRAM split; all
+**Implemented:** sixteen-channel sound — PCM8, PCM16, IMA-ADPCM, the six PSG square channels and
+the two noise channels, with per-channel rate, volume, volume divider, panning, and loop modes,
+mixed to the frontend's 48 kHz; the dual-CPU memory map including the runtime-configurable
+shared-WRAM split; all
 nine VRAM banks and every mapping their control registers can select; both 2D engines with
 background modes 0-5 (text, affine, and all three extended types), sprites at 4 and 8 bpp in both
 mapping arrangements with flips, affine, double-size, semi-transparent, bitmap and object-window
@@ -41,7 +44,6 @@ and save states covering all of it.
 
 **Not implemented, and visibly so rather than approximated:**
 
-- **Audio.** `take_audio_samples` returns nothing rather than silence.
 - **The 3D core.** Engine A's BG0-as-3D layer draws nothing and the backdrop shows through. There
   is a test asserting that gap, because a flat colour there would look deliberate.
 - **Save chips.** DS cartridges carry EEPROM or FLASH on the auxiliary SPI bus and the header does
@@ -104,7 +106,8 @@ Component status:
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
 | `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no save chip, no KEY1** |
-| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM and draws both screens. **No audio, no 3D core** |
+| `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
+| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM, draws both screens, and produces audio. **No 3D core** |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
 
@@ -136,13 +139,14 @@ ROMs are far fewer than the Game Boy family's, most target hardware this build d
 wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
 as fetchable artifacts. What the DS *is* verified by instead:
 
-- **224 unit tests in `system-nds`**, covering every module against the register behaviour it
+- **249 unit tests in `system-nds`**, covering every module against the register behaviour it
   implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
   timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
 - **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing
   code direct boot loaded, the ARM7 writing where only it can see, the two cores exchanging a word
   through the FIFO with each side spinning on its own status flag, a vblank interrupt reaching a
-  handler with no BIOS present, and a program that maps a VRAM bank and puts a colour on screen.
+  handler with no BIOS present, a program that maps a VRAM bank and puts a colour on screen, and an
+  ARM7 program that starts a sound channel and is heard.
 - **A determinism test**: two machines given the same ROM and input agree byte for byte after four
   frames, which is prompt 13's dual-CPU constraint checked rather than asserted.
 - **A save-state round trip** that is a fixed point and that continues identically from a restore.
@@ -334,6 +338,7 @@ that produced them rather than in prose that can drift from them.
 | dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
 | Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
 | Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
+| Nintendo DS, the same with the sound hardware wired in | ≈5 440 µs | ≈3.1x |
 
 Three findings worth surfacing:
 
