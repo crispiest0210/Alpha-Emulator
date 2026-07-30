@@ -272,3 +272,76 @@ fn memory_round_trips_through_a_save_state() {
     assert_eq!(restored.split(), WramSplit::Arm9First);
     assert_eq!(restored.read8_arm9(0x0B00_0000), Some(0xAA));
 }
+
+#[test]
+fn a_wide_read_agrees_with_four_byte_reads() {
+    // The wide path exists for speed and must not become a second, differently-behaved decode.
+    let mut m = mem();
+    m.write_wide_arm9(0x0200_0100, 0x1234_5678, 4);
+    assert_eq!(m.read_wide_arm9(0x0200_0100, 4), Some(0x1234_5678));
+    assert_eq!(m.read_wide_arm9(0x0200_0100, 2), Some(0x5678));
+    for (i, expected) in [0x78u8, 0x56, 0x34, 0x12].into_iter().enumerate() {
+        assert_eq!(m.read8_arm9(0x0200_0100 + i as u32), Some(expected));
+    }
+    // And the same memory from the other core.
+    assert_eq!(m.read_wide_arm7(0x0200_0100, 4), Some(0x1234_5678));
+}
+
+#[test]
+fn the_wide_path_reaches_palette_and_oam_where_the_byte_path_cannot() {
+    // Byte writes to both are dropped on the DS, so a wide write composed from byte writes
+    // would be dropped too — which is exactly the bug that kept the ARM9 from writing VRAM.
+    let mut m = mem();
+    assert!(m.write_wide_arm9(0x0500_0000, 0x7C1F, 2));
+    assert_eq!(m.read_wide_arm9(0x0500_0000, 2), Some(0x7C1F));
+    assert!(m.write_wide_arm9(0x0700_0000, 0xDEAD_BEEF, 4));
+    assert_eq!(m.read_wide_arm9(0x0700_0000, 4), Some(0xDEAD_BEEF));
+
+    m.write8_arm9(0x0500_0000, 0xFF);
+    assert_eq!(m.read_wide_arm9(0x0500_0000, 2), Some(0x7C1F), "still");
+}
+
+#[test]
+fn the_wide_path_hands_io_vram_and_the_cartridge_back_the_same_way() {
+    let mut m = mem();
+    for addr in [0x0400_0000, 0x0600_0000, 0x0800_0000, 0x0A00_0000] {
+        assert_eq!(m.read_wide_arm9(addr, 4), None, "{addr:#X}");
+        assert!(!m.write_wide_arm9(addr, 0, 4), "{addr:#X}");
+    }
+    assert_eq!(m.read_wide_arm7(0x0400_0000, 4), None);
+}
+
+#[test]
+fn a_wide_read_of_nothing_widens_the_open_bus() {
+    let mut m = mem();
+    m.set_open_bus9(0x1234_5678);
+    assert_eq!(m.read_wide_arm9(0x0B00_0000, 4), Some(0x1234_5678));
+    assert_eq!(m.read_wide_arm9(0x0B00_0000, 2), Some(0x5678));
+}
+
+#[test]
+fn a_wide_read_at_the_top_of_a_bios_falls_back_rather_than_running_off_the_end() {
+    let mut bios = vec![0u8; ARM9_BIOS_SIZE];
+    bios[ARM9_BIOS_SIZE - 4..].copy_from_slice(&0xAABB_CCDDu32.to_le_bytes());
+    let mut m = NdsMemory::new(Some(bios), None);
+    m.set_open_bus9(0xFFFF_FFFF);
+    assert_eq!(m.read_wide_arm9(0xFFFF_7FFC, 4), Some(0xAABB_CCDD));
+    // One word past the end is open bus, not a panic.
+    assert_eq!(m.read_wide_arm9(0xFFFF_8000, 4), Some(0xFFFF_FFFF));
+}
+
+#[test]
+fn the_wide_path_honours_the_shared_wram_split() {
+    let mut m = mem();
+    m.write_wide_arm9(0x0300_0000, 0xAAAA_AAAA, 4);
+    m.write_wide_arm9(0x0300_4000, 0xBBBB_BBBB, 4);
+    m.set_split(WramSplit::Arm9Second);
+    assert_eq!(m.read_wide_arm9(0x0300_0000, 4), Some(0xBBBB_BBBB));
+    assert_eq!(m.read_wide_arm7(0x0300_0000, 4), Some(0xAAAA_AAAA));
+
+    m.set_split(WramSplit::Arm7All);
+    m.set_open_bus9(0);
+    assert_eq!(m.read_wide_arm9(0x0300_0000, 4), Some(0), "nothing mapped");
+    assert!(m.write_wide_arm9(0x0300_0000, 0, 4), "accepted and dropped");
+    assert_eq!(m.read_wide_arm7(0x0300_0000, 4), Some(0xAAAA_AAAA));
+}

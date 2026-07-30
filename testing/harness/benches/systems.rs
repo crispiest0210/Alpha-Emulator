@@ -248,6 +248,61 @@ fn gba_spin_rom() -> Vec<u8> {
     rom
 }
 
+/// A DS cartridge whose ARM9 half fills a VRAM bank through display mode 2 and then spins, and
+/// whose ARM7 half spins.
+///
+/// Display mode 2 is the shortest path to a screen the 2D engine actually reads every line, so
+/// this measures the compositor rather than an idle machine — the DS equivalent of the Game Boy's
+/// `rendering` case rather than of its `lcd_only` one.
+fn nds_rendering_rom() -> Vec<u8> {
+    nds_rom(true)
+}
+
+/// The same machine with both displays off, so the difference between the two is what the 2D
+/// compositor costs.
+fn nds_idle_rom() -> Vec<u8> {
+    nds_rom(false)
+}
+
+fn nds_rom(display: bool) -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    rom[..12].copy_from_slice(b"BENCH DS\0\0\0\0");
+    let put = |rom: &mut Vec<u8>, at: usize, v: u32| {
+        rom[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    };
+    put(&mut rom, 0x20, 0x4000);
+    put(&mut rom, 0x24, 0x0200_0000);
+    put(&mut rom, 0x28, 0x0200_0000);
+    put(&mut rom, 0x30, 0x6000);
+    put(&mut rom, 0x34, 0x0380_0000);
+    put(&mut rom, 0x38, 0x0380_0000);
+    put(&mut rom, 0x3C, 4);
+
+    // mov r0,#0x80 / mov r1,#0x04000240 (built up) / strb — VRAMCNT_A into the LCDC window.
+    // Then DISPCNT = display mode 2, then spin.
+    let mode = if display { 0xE3A0_0802 } else { 0xE3A0_0000 };
+    let program: [u32; 12] = [
+        0xE3A0_0080, // mov r0, #0x80
+        0xE3A0_1040, // mov r1, #0x40
+        0xE381_1C02, // orr r1, r1, #0x200
+        0xE381_1301, // orr r1, r1, #0x04000000
+        0xE5C1_0000, // strb r0, [r1]
+        mode,        // mov r0, #0x00020000 (display mode 2) or #0 (display off)
+        0xE3A0_1301, // mov r1, #0x04000000
+        0xE581_0000, // str r0, [r1]
+        0xEAFF_FFFE, // b .
+        0xEAFF_FFFE,
+        0xEAFF_FFFE,
+        0xEAFF_FFFE,
+    ];
+    for (i, word) in program.iter().enumerate() {
+        put(&mut rom, 0x4000 + i * 4, *word);
+    }
+    put(&mut rom, 0x2C, (program.len() * 4) as u32);
+    put(&mut rom, 0x6000, 0xEAFF_FFFE);
+    rom
+}
+
 // --- the benchmarks --------------------------------------------------------------------------
 
 /// Run `frames` frames, draining audio as a real frontend does.
@@ -298,6 +353,24 @@ fn gba_frames(c: &mut Criterion) {
     bench_frame(&mut group, "spin", || {
         Box::new(system_gba::GbaSystem::new(rom.clone(), None).expect("a hand-built cartridge"))
     });
+    group.finish();
+}
+
+/// The Nintendo DS.
+///
+/// Prompt 18 expects this to be the first system in the project that actually needs optimising,
+/// and says the dynarec decision for it must be measured rather than inherited from the two
+/// already made. This is that measurement's starting point — with no 3D core yet, so it is the
+/// floor rather than the answer.
+fn nds_frames(c: &mut Criterion) {
+    let mut group = c.benchmark_group("nds");
+    for (name, rom) in [("idle", nds_idle_rom()), ("rendering", nds_rendering_rom())] {
+        bench_frame(&mut group, name, move || {
+            let mut nds = system_nds::NdsSystem::default();
+            nds.load_cartridge(&rom).expect("a hand-built cartridge");
+            Box::new(nds)
+        });
+    }
     group.finish();
 }
 
@@ -443,6 +516,7 @@ criterion_group!(
     benches,
     gb_frames,
     gba_frames,
+    nds_frames,
     corpus_frames,
     watchpoint_overhead,
     instruction_dispatch,

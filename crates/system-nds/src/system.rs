@@ -222,6 +222,22 @@ impl NdsBus {
         0xFF
     }
 
+    #[inline]
+    fn memory_read_wide(&self, core: Core, addr: u32, bytes: u32) -> Option<u32> {
+        match core {
+            Core::Arm9 => self.memory.read_wide_arm9(addr, bytes),
+            Core::Arm7 => self.memory.read_wide_arm7(addr, bytes),
+        }
+    }
+
+    #[inline]
+    fn memory_write_wide(&mut self, core: Core, addr: u32, value: u32, bytes: u32) -> bool {
+        match core {
+            Core::Arm9 => self.memory.write_wide_arm9(addr, value, bytes),
+            Core::Arm7 => self.memory.write_wide_arm7(addr, value, bytes),
+        }
+    }
+
     fn memory_read8(&self, core: Core, addr: u32) -> Option<u8> {
         match core {
             Core::Arm9 => self.memory.read8_arm9(addr),
@@ -265,6 +281,12 @@ impl NdsBus {
     }
 
     fn read16(&mut self, core: Core, addr: u32) -> u16 {
+        // RAM first, and in one go. This is the common case by a very large margin — every
+        // instruction fetch lands here — and composing it from byte reads measured as the
+        // dominant cost of a DS frame, ahead of both 2D engines put together.
+        if let Some(value) = self.memory_read_wide(core, addr, 2) {
+            return value as u16;
+        }
         if (0x0400_0000..0x0500_0000).contains(&addr) || addr & !3 == 0x0410_0010 {
             return self.io_read16(core, addr);
         }
@@ -284,6 +306,9 @@ impl NdsBus {
     }
 
     fn write16(&mut self, core: Core, addr: u32, value: u16) {
+        if self.memory_write_wide(core, addr, value as u32, 2) {
+            return;
+        }
         if (0x0400_0000..0x0500_0000).contains(&addr) || addr & !3 == 0x0410_0010 {
             self.io_write16(core, addr, value);
             return;
@@ -313,6 +338,9 @@ impl NdsBus {
     }
 
     fn read32(&mut self, core: Core, addr: u32) -> u32 {
+        if let Some(value) = self.memory_read_wide(core, addr, 4) {
+            return value;
+        }
         if (0x0400_0000..0x0500_0000).contains(&addr) || addr & !3 == 0x0410_0010 {
             return self.io_read32(core, addr);
         }
@@ -320,6 +348,9 @@ impl NdsBus {
     }
 
     fn write32(&mut self, core: Core, addr: u32, value: u32) {
+        if self.memory_write_wide(core, addr, value, 4) {
+            return;
+        }
         if (0x0400_0000..0x0500_0000).contains(&addr) || addr & !3 == 0x0410_0010 {
             self.io_write32(core, addr, value);
             return;

@@ -339,6 +339,103 @@ impl NdsMemory {
         })
     }
 
+    /// A halfword or word from the ARM9's view, read from the owning region in one go.
+    ///
+    /// Not composed from [`read8_arm9`](Self::read8_arm9). An instruction fetch is a word read,
+    /// and composing one costs four region decodes and four bounds checks for a value that lives
+    /// in one array — which measured as the dominant cost of a DS frame, well ahead of the two 2D
+    /// engines. Callers pass aligned addresses, and every region here is a power of two at least
+    /// four bytes long, so the masked index cannot straddle the end of one.
+    #[inline]
+    pub fn read_wide_arm9(&self, addr: u32, bytes: u32) -> Option<u32> {
+        let (slice, index) = match Arm9Region::of(addr) {
+            Arm9Region::MainRam => (&self.main_ram, (addr as usize) & (MAIN_RAM_SIZE - 1)),
+            Arm9Region::SharedWram => match self.split.arm9_offset(addr) {
+                Some(offset) => (&self.shared_wram, offset),
+                None => return Some(wide_open_bus(self.open_bus9, bytes)),
+            },
+            Arm9Region::Palette => (&self.palette, (addr as usize) & (PALETTE_SIZE - 1)),
+            Arm9Region::Oam => (&self.oam, (addr as usize) & (OAM_SIZE - 1)),
+            Arm9Region::Bios => match &self.arm9_bios {
+                Some(bios) if (addr - ARM9_BIOS_BASE) as usize + bytes as usize <= bios.len() => {
+                    (bios, (addr - ARM9_BIOS_BASE) as usize)
+                }
+                _ => return Some(wide_open_bus(self.open_bus9, bytes)),
+            },
+            Arm9Region::Unmapped => return Some(wide_open_bus(self.open_bus9, bytes)),
+            Arm9Region::Io | Arm9Region::Vram | Arm9Region::GbaRom | Arm9Region::GbaRam => {
+                return None
+            }
+        };
+        Some(gather(slice, index, bytes))
+    }
+
+    /// The same, from the ARM7's view.
+    #[inline]
+    pub fn read_wide_arm7(&self, addr: u32, bytes: u32) -> Option<u32> {
+        let (slice, index) = match Arm7Region::of(addr) {
+            Arm7Region::Bios => match &self.arm7_bios {
+                Some(bios) if addr as usize + bytes as usize <= bios.len() => (bios, addr as usize),
+                _ => return Some(wide_open_bus(self.open_bus7, bytes)),
+            },
+            Arm7Region::MainRam => (&self.main_ram, (addr as usize) & (MAIN_RAM_SIZE - 1)),
+            Arm7Region::SharedWram => match self.split.arm7_offset(addr) {
+                Some(offset) => (&self.shared_wram, offset),
+                None => (&self.arm7_wram, (addr as usize) & (ARM7_WRAM_SIZE - 1)),
+            },
+            Arm7Region::Arm7Wram => (&self.arm7_wram, (addr as usize) & (ARM7_WRAM_SIZE - 1)),
+            Arm7Region::Unmapped | Arm7Region::Wifi => {
+                return Some(wide_open_bus(self.open_bus7, bytes))
+            }
+            Arm7Region::Io | Arm7Region::Vram | Arm7Region::GbaRom | Arm7Region::GbaRam => {
+                return None
+            }
+        };
+        Some(gather(slice, index, bytes))
+    }
+
+    /// Write a halfword or word through the ARM9's view, in one go.
+    ///
+    /// Palette RAM and OAM are included here, and *not* in the byte path: the DS drops byte
+    /// writes to both, so a wide write composed from byte writes would be dropped as well.
+    #[inline]
+    pub fn write_wide_arm9(&mut self, addr: u32, value: u32, bytes: u32) -> bool {
+        let (slice, index) = match Arm9Region::of(addr) {
+            Arm9Region::MainRam => (&mut self.main_ram, (addr as usize) & (MAIN_RAM_SIZE - 1)),
+            Arm9Region::SharedWram => match self.split.arm9_offset(addr) {
+                Some(offset) => (&mut self.shared_wram, offset),
+                None => return true,
+            },
+            Arm9Region::Palette => (&mut self.palette, (addr as usize) & (PALETTE_SIZE - 1)),
+            Arm9Region::Oam => (&mut self.oam, (addr as usize) & (OAM_SIZE - 1)),
+            Arm9Region::Bios | Arm9Region::Unmapped => return true,
+            Arm9Region::Io | Arm9Region::Vram | Arm9Region::GbaRom | Arm9Region::GbaRam => {
+                return false
+            }
+        };
+        scatter(slice, index, value, bytes);
+        true
+    }
+
+    /// The same, from the ARM7's view.
+    #[inline]
+    pub fn write_wide_arm7(&mut self, addr: u32, value: u32, bytes: u32) -> bool {
+        let (slice, index) = match Arm7Region::of(addr) {
+            Arm7Region::MainRam => (&mut self.main_ram, (addr as usize) & (MAIN_RAM_SIZE - 1)),
+            Arm7Region::SharedWram => match self.split.arm7_offset(addr) {
+                Some(offset) => (&mut self.shared_wram, offset),
+                None => (&mut self.arm7_wram, (addr as usize) & (ARM7_WRAM_SIZE - 1)),
+            },
+            Arm7Region::Arm7Wram => (&mut self.arm7_wram, (addr as usize) & (ARM7_WRAM_SIZE - 1)),
+            Arm7Region::Bios | Arm7Region::Unmapped | Arm7Region::Wifi => return true,
+            Arm7Region::Io | Arm7Region::Vram | Arm7Region::GbaRom | Arm7Region::GbaRam => {
+                return false
+            }
+        };
+        scatter(slice, index, value, bytes);
+        true
+    }
+
     /// Read a byte from the ARM7's view, or `None` where this module owns nothing.
     pub fn read8_arm7(&self, addr: u32) -> Option<u8> {
         Some(match Arm7Region::of(addr) {
@@ -427,6 +524,39 @@ impl NdsMemory {
             }
             _ => self.write8_arm9(addr, low) && self.write8_arm9(addr + 1, high),
         }
+    }
+}
+
+/// Little-endian gather of two or four bytes.
+#[inline]
+fn gather(slice: &[u8], index: usize, bytes: u32) -> u32 {
+    if bytes == 2 {
+        u16::from_le_bytes([slice[index], slice[index + 1]]) as u32
+    } else {
+        u32::from_le_bytes([
+            slice[index],
+            slice[index + 1],
+            slice[index + 2],
+            slice[index + 3],
+        ])
+    }
+}
+
+#[inline]
+fn scatter(slice: &mut [u8], index: usize, value: u32, bytes: u32) {
+    for i in 0..bytes as usize {
+        slice[index + i] = (value >> (i * 8)) as u8;
+    }
+}
+
+/// Open bus, widened. A word read of nothing returns the whole last word; a halfword read returns
+/// the half that lines up with the address, which the caller has already aligned.
+#[inline]
+fn wide_open_bus(word: u32, bytes: u32) -> u32 {
+    if bytes == 2 {
+        word & 0xFFFF
+    } else {
+        word
     }
 }
 

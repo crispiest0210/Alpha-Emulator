@@ -18,12 +18,38 @@ and tested**, not what is planned. It is updated as work lands.
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. The frontend already lists `.nds` files and greys them out rather than pretending otherwise |
+| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, and draws both screens through the two 2D engines. **No audio and no 3D core**; no save chip. See below |
 
-**Three of the four systems are playable.** `cargo xtask dev` opens a window with a ROM library,
-plays a cartridge with video, audio, and keyboard input, and supports quicksave, quickload, rewind,
-an HUD, a keybind editor, screenshots, and an in-app debugger — registers, disassembly, memory,
-execution breakpoints, and read/write watchpoints. The Nintendo DS is the remaining gap (prompt 13).
+**All four systems boot; three are fully playable.** `cargo xtask dev` opens a window with a ROM
+library, plays a cartridge with video, audio, and keyboard input, and supports quicksave,
+quickload, rewind, an HUD, a keybind editor, screenshots, and an in-app debugger — registers,
+disassembly, memory, execution breakpoints, and read/write watchpoints.
+
+### What the Nintendo DS does and does not do
+
+Prompt 13 is explicit that its v1 bar is "boots and runs a meaningful set of commercial-quality
+homebrew and simple commercial titles correctly", not parity. This is the start of DS support.
+
+**Implemented:** the dual-CPU memory map including the runtime-configurable shared-WRAM split; all
+nine VRAM banks and every mapping their control registers can select; both 2D engines with
+background modes 0-5 (text, affine, and all three extended types), sprites at 4 and 8 bpp in both
+mapping arrangements with flips, affine, double-size, semi-transparent, bitmap and object-window
+modes, extended palettes, windows, alpha blending, brightness effects and master brightness;
+IPCSYNC and both FIFOs; both interrupt controllers; eight timers; eight DMA channels; the keypad
+and the touchscreen behind the ARM7's SPI bus; the Slot-1 card transfer interface; direct boot;
+and save states covering all of it.
+
+**Not implemented, and visibly so rather than approximated:**
+
+- **Audio.** `take_audio_samples` returns nothing rather than silence.
+- **The 3D core.** Engine A's BG0-as-3D layer draws nothing and the backdrop shows through. There
+  is a test asserting that gap, because a flat colour there would look deliberate.
+- **Save chips.** DS cartridges carry EEPROM or FLASH on the auxiliary SPI bus and the header does
+  not say which; guessing wrong corrupts a save silently, so no save file is written at all.
+- **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
+  card present looks like.
+- Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
+  and the per-line sprite budget.
 
 Component status:
 
@@ -70,6 +96,15 @@ Component status:
 | `debugger` — breakpoints, watchpoints, conditions | done; execution breakpoints and watchpoints both halt a running machine; **no GDB server or tracing yet** |
 | `debugger` — snapshot capture (registers, disassembly, memory) | done against `DebugTarget`, so no branch per system |
 | `core-common` — `DebugTarget`, `System::step_instruction`, `AccessLog` | done; the GB, GBC, and GBA implement introspection and access recording, the DS reports both as unavailable |
+| `system-nds` memory map — two views over one store, shared-WRAM split, open bus per core | done and tested |
+| `system-nds` VRAM — nine banks, every `VRAMCNT` mapping, overlap, precomputed page table | done and tested |
+| `system-nds` IPC — `IPCSYNC`, both FIFOs, edge-triggered interrupts | done and tested; driven end to end by two real programs on the two cores |
+| `system-nds` interrupt controllers, timers, DMA | done and tested; per-core source masks, 21-bit ARM9 DMA counts |
+| `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
+| `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
+| `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
+| `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no save chip, no KEY1** |
+| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM and draws both screens. **No audio, no 3D core** |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
 
@@ -274,6 +309,8 @@ that produced them rather than in prose that can drift from them.
 | Game Boy, rendering + four APU channels | 361 µs | 46x |
 | Game Boy Advance, ARM instructions straight from ROM | 1 486 µs | 11.3x |
 | dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
+| Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
+| Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
 
 Three findings worth surfacing:
 
@@ -282,8 +319,19 @@ Three findings worth surfacing:
   the Game Boy ever needs to be faster.
 - **No dynamic recompiler, for either CPU core**, on the evidence rather than by preference. A dynarec
   replaces dispatch and nothing else, and the worst measured workload on each system already runs at
-  46x and 11.3x real time. The Nintendo DS decision is deferred rather than inherited — prompt 18
-  expects it to be the case that actually needs help, and there is nothing to measure yet.
+  46x and 11.3x real time.
+- **The Nintendo DS has a fifth of the margin the GBA does, and prompt 18 was right about it.** At
+  3.2x real time against the other systems' 11x to 80x, it is by a wide margin the tightest — and
+  that is *without* the 3D core. The dynarec question stays open for it rather than being inherited
+  from the two answers above; it needs re-asking once the 3D rasteriser exists, since that is the
+  workload prompt 18 expects to be the real problem.
+
+  The first measurement was 15.0 ms against a 16.71 ms budget — 1.1x, barely real time. The cause
+  was not the two 2D engines: turning both displays off saved 1.5%. It was that `NdsBus` composed
+  every halfword and word access out of byte accesses, so each instruction fetch cost four region
+  decodes. Reading and writing RAM at its real width dropped a frame from 15.2 ms to 5.28 ms, a
+  **65% reduction**, measured before and after with `cargo bench -p harness --bench systems`. That
+  is the only optimisation in the project so far, and it had a measured problem behind it.
 - **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame and +4.5% of a GBA
   one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
   overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
