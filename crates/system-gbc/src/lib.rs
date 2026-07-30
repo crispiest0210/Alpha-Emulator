@@ -607,3 +607,131 @@ mod integration_tests {
         );
     }
 }
+
+/// Dump what a CGB game has actually put in VRAM, OAM, and palette RAM.
+///
+/// Not a test — it asserts nothing and is `#[ignore]`d. It is kept because it is what cracked
+/// cgb-acid2: reasoning about the rendered picture had stalled, and one dump of the OBJ palettes
+/// beside the OAM flags made both bugs obvious in about a minute. OBJ palette 5 held exactly the two
+/// colours missing from the output, and the banner's eight sprites all named palette 3 while drawing
+/// through palette 0.
+///
+/// Same shape as `system-gba`'s `trace_gba_suite_entry`, and kept for the same reason: reach for it
+/// before reasoning about a colour bug from the picture alone.
+///
+/// One trap it embeds: rows here are *map* rows. With `SCY` non-zero they are not screen rows, and
+/// the first version of this printed the wrong 32 bytes and sent me after the wrong tiles.
+///
+/// ```sh
+/// cargo test -p system-gbc --release -- --ignored --nocapture cgb_acid2_attribute_dump
+/// ```
+#[cfg(test)]
+mod cgb_acid2_diagnostic {
+    use super::*;
+    use ppu_tile2d::PaletteSource;
+
+    #[test]
+    #[ignore = "diagnostic; needs the fetched corpus and prints rather than asserts"]
+    fn cgb_acid2_attribute_dump() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testing/test-roms/gbc/cgb-acid2.gbc"
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("cgb-acid2 is not fetched; run `cargo xtask fetch-test-roms`");
+            return;
+        };
+        let mut system = GbcSystem::new(bytes, None).expect("the ROM parses");
+        for _ in 0..60 {
+            System::step_frame(&mut system, InputState::default());
+        }
+
+        let inner = system.inner();
+        // Read from the PPU directly, not through `peek8`: peeking I/O is refused on purpose, and
+        // the first version of this diagnostic printed five `None`s and told me nothing.
+        let ppu = &inner.bus().ppu;
+        println!(
+            "LCDC {:02X}  bg_map_high {}  window_enable {}  window_map_high {}  obj_tall {}",
+            ppu.lcdc,
+            ppu.lcdc & 0x08 != 0,
+            ppu.lcdc & 0x20 != 0,
+            ppu.lcdc & 0x40 != 0,
+            ppu.lcdc & 0x04 != 0
+        );
+        println!(
+            "SCY {} SCX {} WY {} WX {} VBK {}",
+            ppu.scy,
+            ppu.scx,
+            ppu.wy,
+            ppu.wx,
+            inner.bus().memory.vram_bank()
+        );
+
+        // OAM: the eyes and mouth are sprites, and the two colours missing from our output are
+        // OBJ palette 5's. So which palette each sprite *names* is the question.
+        println!("\nOAM entries that are on screen (y, x, tile, flags):");
+        let (_, oam) = inner.bus().memory.vram_and_oam();
+        for index in 0..40usize {
+            let e = &oam[index * 4..index * 4 + 4];
+            if e[0] == 0 {
+                continue;
+            }
+            let flags = e[3];
+            println!(
+                "  {index:>2}  y {:>3} x {:>3} tile {:02X} flags {:02X}                   palette {}  bank {}  flipx {}  flipy {}  behind_bg {}",
+                e[0] as i32 - 16,
+                e[1] as i32 - 8,
+                e[2],
+                flags,
+                flags & 0x07,
+                (flags >> 3) & 1,
+                (flags >> 5) & 1,
+                (flags >> 6) & 1,
+                (flags >> 7) & 1
+            );
+        }
+
+        let vram = inner.bus().memory.vram();
+        const VRAM_BANK_SIZE: usize = 0x2000;
+        // Both maps, both banks. Which map the banner is drawn from is part of what this answers,
+        // so guessing one would risk dumping the wrong 32 bytes and concluding the wrong thing.
+        // Map rows, not screen rows: with SCY = 32 the screen is four tile rows down the map, and
+        // the first version of this dump printed screen rows and so read the wrong 32 bytes.
+        for (name, base) in [("map low 0x9800", 0x1800usize), ("map high 0x9C00", 0x1C00)] {
+            for row in [4usize, 9, 10, 12, 13] {
+                let offset = base + row * 32;
+                let tiles: Vec<String> = (0..20)
+                    .map(|col| format!("{:02X}", vram[offset + col]))
+                    .collect();
+                let attrs: Vec<String> = (0..20)
+                    .map(|col| format!("{:02X}", vram[VRAM_BANK_SIZE + offset + col]))
+                    .collect();
+                println!("{name} row {row:>2} tiles {}", tiles.join(" "));
+                println!("{name} row {row:>2} attrs {}", attrs.join(" "));
+            }
+        }
+
+        // The palettes the attributes are selecting between. An attribute naming palette 3 is only
+        // meaningful if palette 3 has been written.
+        println!("\nBG palettes (as RGBA):");
+        for palette in 0..8u8 {
+            let colours: Vec<String> = (0..4u8)
+                .map(|index| {
+                    let c = inner.bus().cgb.palettes.lookup_bg(palette, index);
+                    format!("{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+                })
+                .collect();
+            println!("  bg{palette} {}", colours.join(" "));
+        }
+        println!("OBJ palettes:");
+        for palette in 0..8u8 {
+            let colours: Vec<String> = (0..4u8)
+                .map(|index| {
+                    let c = inner.bus().cgb.palettes.lookup_sprite(palette, index);
+                    format!("{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+                })
+                .collect();
+            println!("  ob{palette} {}", colours.join(" "));
+        }
+    }
+}

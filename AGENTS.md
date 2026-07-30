@@ -258,19 +258,14 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
 - **Alpha blending on the GBA** uses the backdrop as the lower layer, because the scanline buffer
   keeps only the winning pixel. The general case needs a second buffer or a second pass.
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
-- **cgb-acid2 fails against its published reference**, with a diagnosis rather than a shrug — see
-  `testing/harness/src/corpus.rs` for the exact clusters and substitutions. Short version: 898 of
-  23 040 pixels, stable across frame counts, confined to the banner, the eyes, and the mouth; the
-  bitmaps are right and the colours are not, and two mid shades of yellow never appear at all. The
-  next experiment is to peek VRAM bank 1's map area at the banner's tile positions and see whether
-  the attribute bytes are zero (the game's writes are not landing) or non-zero (the fetch ignores
-  them) — the debugger panel can now do that, or an `#[ignore]`d test can dump it. Closing this
-  makes cgb-acid2 the only end-to-end check of CGB tile attributes, the second VRAM bank, and CGB
-  sprite priority.
-- **dmg-acid2 passes**, pixel-exact against its reference. That comparison is worth copying for any
-  future rendering ROM: `frontend-headless run --frames 60 --save-frame out.png`, fetch the
-  reference, compare. The one trap is that the reference is 2-bit greyscale, so a decoder has to
-  *scale* samples to 8 bits rather than shifting them left.
+- **`OPRI` is not modelled.** A real CGB can be asked through it to order sprites by X coordinate —
+  the DMG rule — while running in colour mode. Nothing reads it, so a game that sets it gets
+  colour-mode ordering. No corpus ROM exercises it and no known game relies on it.
+- **dmg-acid2 and cgb-acid2 both pass**, pixel-exact. That comparison is worth copying for any future
+  rendering ROM: `frontend-headless run --frames 60 --save-frame out.png`, fetch the reference,
+  compare. Two traps, both paid for: dmg-acid2's reference is 2-bit greyscale, so a decoder must
+  *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
+  rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
 - Mosaic, EEPROM saves, and the GBA's object window are not implemented.
 
 ### Tools worth knowing about before you start

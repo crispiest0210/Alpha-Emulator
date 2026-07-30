@@ -129,7 +129,25 @@ impl TilemapSource for GbTilemap<'_> {
     }
 }
 
-/// The DMG picture processing unit.
+/// The picture processing unit, for every machine in the Game Boy family.
+///
+/// # Where the CGB differs, and where getting it wrong is silent
+///
+/// Three things are gated on [`GbModel`] rather than forked into a second PPU, and all three were
+/// wrong at some point in a way that produced a complete, plausible, *wrong* picture rather than an
+/// error — which is why cgb-acid2's reference comparison is load-bearing:
+///
+/// - **Tile attributes.** A CGB reads a second byte from VRAM bank 1 beside each map cell, carrying
+///   palette, bank, flips, and a priority bit. See [`crate::cgb::TileAttributes`].
+/// - **Sprite attributes.** The same byte in OAM means different things: on a DMG bit 4 picks
+///   OBP0 or OBP1, on a CGB bits 0-2 pick one of eight palettes and bit 3 picks the tile's VRAM
+///   bank.
+/// - **Sprite ordering.** A DMG puts the smaller X in front; a CGB uses OAM index alone.
+///
+/// **`OPRI` is not modelled.** A real CGB can be asked, through that register, to use the DMG's
+/// X-coordinate ordering while running in colour mode. Nothing here reads it, so a game that sets it
+/// gets colour-mode ordering. No test ROM in the corpus exercises it and no known game relies on it,
+/// but it is a difference, so it is written down rather than left to be rediscovered.
 #[derive(Debug, Clone)]
 pub struct GbPpu {
     pub lcdc: u8,
@@ -241,7 +259,7 @@ impl GbPpu {
             } else {
                 SpriteRule::SpriteDecides
             };
-            self.render_sprites_for_line(line, vram, oam, rule);
+            self.render_sprites_for_line(model, line, vram, oam, rule);
         }
 
         // With the background blanked a DMG shows white, not the palette's colour 0: the layer
@@ -315,7 +333,14 @@ impl GbPpu {
         self.window_line = self.window_line.saturating_add(1);
     }
 
-    fn render_sprites_for_line(&mut self, line: u8, vram: &[u8], oam: &[u8], rule: SpriteRule) {
+    fn render_sprites_for_line(
+        &mut self,
+        model: GbModel,
+        line: u8,
+        vram: &[u8],
+        oam: &[u8],
+        rule: SpriteRule,
+    ) {
         let height: u32 = if self.has(lcdc::OBJ_TALL) { 16 } else { 8 };
 
         // The OAM scan takes the first ten candidates in OAM order and stops. Which ten are
@@ -344,6 +369,23 @@ impl GbPpu {
             }
             let attributes = oam[entry + 3];
 
+            // The attribute byte means two different things depending on the machine, and reading
+            // it the DMG way on a CGB is silent: it yields palette 0 for every sprite and ignores
+            // the tile bank, so the picture is complete and wrong. That is what cgb-acid2's
+            // "HELLO WORLD!" banner caught — eight sprites naming OBJ palette 3, all drawn through
+            // palette 0, the right shapes in the wrong colours.
+            //
+            //   DMG: bit 4 selects OBP0 or OBP1. There is one VRAM bank and no others.
+            //   CGB: bits 0-2 are one of eight OBJ palettes, and bit 3 selects the VRAM bank the
+            //        sprite's tile data comes from.
+            //
+            // Bits 5, 6, and 7 — the flips and the behind-background bit — mean the same on both.
+            let (palette, tile_bank) = if model.uses_tile_attributes() {
+                (attributes & 0x07, ((attributes >> 3) & 1) as usize)
+            } else {
+                ((attributes >> 4) & 1, 0)
+            };
+
             found[count] = (
                 x,
                 index,
@@ -352,8 +394,10 @@ impl GbPpu {
                     y,
                     width: 8,
                     height,
-                    tile_offset: tile as usize * 16,
-                    palette: (attributes >> 4) & 1,
+                    // The bank is folded into the offset, exactly as the background's attribute
+                    // path does it, so nothing downstream needs to know banks exist.
+                    tile_offset: tile as usize * 16 + tile_bank * memory::VRAM_BANK_SIZE,
+                    palette,
                     flip_x: attributes & 0x20 != 0,
                     flip_y: attributes & 0x40 != 0,
                     behind_background: attributes & 0x80 != 0,
@@ -370,8 +414,15 @@ impl GbPpu {
 
         // On a DMG the sprite with the smaller X is in front, and OAM order breaks ties. A
         // stable sort on X alone gives both, since the candidates are already in OAM order.
+        //
+        // A CGB running a colour game does *not* use X: priority is OAM index alone, lower first,
+        // which is the order the candidates are already in. So the sort is skipped rather than
+        // replaced. (`OPRI` can ask a CGB for the DMG rule; it is not modelled, and a game that
+        // sets it would get colour-mode priority — see the crate docs.)
         let selected = &mut found[..count];
-        selected.sort_by_key(|(x, _, _)| *x);
+        if !model.uses_tile_attributes() {
+            selected.sort_by_key(|(x, _, _)| *x);
+        }
 
         let sprites: Vec<Sprite> = selected.iter().map(|(_, _, sprite)| *sprite).collect();
         render_sprites(

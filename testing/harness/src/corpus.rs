@@ -495,41 +495,27 @@ pub const CGB_ROMS: &[TestRom] = &[
         convention: Convention::Framebuffer,
         hardware: Hardware::Cgb,
         max_frames: 60,
-        // Compared against the published reference image and **898 of 23 040 pixels differ**
-        // (3.90%). Not a timing artefact: the count is identical at 30, 60, 120, 300, and 600
-        // frames. Not a global palette problem either — 22 142 pixels match exactly, including
-        // the whole lower half of the screen.
+        // **Validated against the published reference image**: all 23 040 pixels match. Same
+        // procedure as dmg-acid2 above, with the reference at
+        // `https://raw.githubusercontent.com/mattcurrie/cgb-acid2/master/img/reference.png`.
         //
-        // The differences fall in three clusters, given as 8x8 tiles:
+        // Getting here found two bugs, both of them the same shape: a CGB read the DMG way. Neither
+        // produced an error, a panic, or a blank screen — each produced a complete, plausible,
+        // wrong picture, which is why only a reference comparison could catch them.
         //
-        //   row  0, cols  4-8 and 10-14   the banner behind "HELLO WORLD!"
-        //   rows 5-6, cols 6-8 and 11-13  the eyes
-        //   rows 8-9, cols 6-7 and 9-10   the nose and mouth
+        //   1. Sprite attributes were decoded with the DMG's rule. Bit 4 selects OBP0 or OBP1 on a
+        //      DMG; on a CGB bits 0-2 are one of eight OBJ palettes and bit 3 selects the VRAM bank
+        //      the tile data comes from. Every sprite therefore drew through OBJ palette 0 with
+        //      bank 0 tiles. This ROM's "HELLO WORLD!" banner is eight sprites naming palette 3,
+        //      and they came out the right shapes in the wrong colours.
+        //   2. Sprites were ordered by X coordinate. That is the DMG rule; a CGB running a colour
+        //      game orders by OAM index alone. Worth 12 pixels here — a small dot that should have
+        //      been hidden behind another sprite.
         //
-        // And two colours present in the reference never appear in our output at all:
-        // `(115, 115, 0)` and `(173, 173, 0)` — both mid shades of the face's yellow. In the
-        // differing areas we draw only black and full yellow where the reference has blues,
-        // greens, and those two dark yellows, the commonest substitutions being
-        // `(0,0,0) -> (107,189,255)` 312 times and `(255,255,0) -> (0,0,255)` 186 times.
-        //
-        // Read together that says something in those regions is being composited through the
-        // wrong palette — falling back to palette 0, which for this ROM *is* black and yellow —
-        // rather than the one its tile or sprite attribute selects. Since the rest of the screen
-        // is exact, the attribute decode works in general; what is wrong is narrower than that.
-        // The eyes and mouth are sprites and the banner is background, so whatever it is affects
-        // both paths.
-        //
-        // No `expected_hash` until it matches: recording the hash of a wrong picture would turn
-        // this from a tracked bug into a permanently green wrong answer.
-        expected_hash: None,
-        expected_failure: Some(
-            "898 of 23 040 pixels differ from the published reference, stable across frame \
-             counts, in three clusters — the banner, the eyes, and the mouth — with two mid \
-             shades of yellow never produced at all. Those regions are drawn through palette 0 \
-             instead of the palette their attribute selects; the rest of the screen is \
-             pixel-exact, so the attribute decode is right in general and the fault is \
-             narrower. See the comment above for the exact clusters and substitutions",
-        ),
+        // This is now the only end-to-end check of CGB tile attributes, the second VRAM bank, OBJ
+        // palettes, and CGB sprite priority, which is exactly what it was predicted to become.
+        expected_hash: Some("71a4a863fe5bcde0"),
+        expected_failure: None,
         licence: "MIT (Matt Currie)",
     },
     TestRom {

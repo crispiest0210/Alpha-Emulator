@@ -15,8 +15,8 @@ and tested**, not what is planned. It is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, and 9 of 12 `dmg_sound` sub-tests — see below |
-| Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` renders but is unvalidated |
+| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
+| Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
 | Nintendo DS | ❌ | ❌ | ❌ | Both CPU cores done; nothing else. The frontend already lists `.nds` files and greys them out rather than pretending otherwise |
 
@@ -39,14 +39,14 @@ Component status:
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules and both tile-mapping arrangements |
-| `system-gb` PPU — background, window, sprites | done, scanline-accurate; **dmg-acid2 output unvalidated** |
+| `system-gb` PPU — background, window, sprites | done, scanline-accurate; dmg-acid2 validated pixel-exact |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done and driven from the window; keyboard only, gamepads are future work |
 | `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
 | `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
-| `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass |
+| `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass, cgb-acid2 validated pixel-exact; **`OPRI` not modelled** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
 | `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
 | `library` — SQLite index, watched folders, reconciliation | done; a moved file is recognised by content hash and keeps its row |
@@ -92,8 +92,7 @@ Current Game Boy results:
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
 | `gba-suite` arm, thumb, memory | **pass** |
-| dmg-acid2 | **passes** — pixel-exact against the published reference |
-| cgb-acid2 | fails — 898 of 23 040 pixels, diagnosed; see below |
+| dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
 
 Open gaps, each tracked with the specific reason:
 
@@ -116,14 +115,13 @@ Open gaps, each tracked with the specific reason:
   validated end to end rather than argued for. The hash is recorded in the corpus along with the
   commands to redo the comparison; the reference image is fetched, never committed, same rule as
   the ROMs.
-- **cgb-acid2 fails**, and now with a diagnosis instead of a shrug: 898 of 23 040 pixels differ,
-  identically at 30, 60, 120, 300, and 600 frames. Everything outside three clusters — the banner
-  behind "HELLO WORLD!", the eyes, and the mouth — is pixel-exact. In those clusters the *bitmaps*
-  are right and the colours are not: the banner is the same shape drawn through black-and-yellow
-  where the reference uses blues, and two mid shades of yellow never appear anywhere in our output.
-  That points at the palette a tile or sprite attribute selects being dropped in a narrow case,
-  not at the attribute decode in general. The mouth is the exception and differs in pixel data,
-  not just colour. Details in `testing/harness/src/corpus.rs`.
+- **cgb-acid2 now passes too**, which makes it the only end-to-end check of CGB tile attributes,
+  the second VRAM bank, OBJ palettes, and CGB sprite priority. Getting there found two real bugs,
+  both the same shape — a CGB read the DMG way, producing a complete and plausible wrong picture
+  rather than an error. Sprite attributes were decoded with the DMG's rule, so every sprite drew
+  through OBJ palette 0 with bank 0 tiles; and sprites were ordered by X coordinate, which is the
+  DMG rule where a CGB orders by OAM index. Neither would have been caught by anything except a
+  reference comparison.
 
 Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
 they leave there names the exact rule that failed. `cargo test -p harness --release --
@@ -138,10 +136,10 @@ suite. Between them they found two real bugs that no amount of unit testing woul
 the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed into
 bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
 
-The Game Boy Color's colour rendering, speed switch, and VRAM DMA are still checked against
-hardware documentation and unit tests rather than a reference: `cgb_sound` exercises the APU
-and the boot path, but validating cgb-acid2's output is what would cover the PPU. The Mooneye
-CGB suite is not in the corpus yet either.
+The Game Boy Color's colour *rendering* is now validated against a reference — that is what
+cgb-acid2 covers. Its speed switch and VRAM DMA are still checked against hardware documentation
+and unit tests only, `OPRI` is not modelled at all, and the Mooneye CGB suite is not in the corpus
+yet.
 
 There is now a GBA to run them on, which there was not before.
 
