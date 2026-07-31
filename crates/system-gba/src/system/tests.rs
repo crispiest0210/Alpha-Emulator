@@ -417,3 +417,28 @@ fn a_frame_takes_longer_when_the_cartridge_is_configured_slower() {
          costs more cycles per instruction: {slow} against {fast}"
     );
 }
+
+/// Print the machine's state after running a ROM for a while.
+///
+/// `TRACE_ROM=/path/to.gba cargo test -p system-gba --release -- --ignored --nocapture dump_state`
+///
+/// The companion to `trace_gba_suite_entry`: that one answers "where did it go wrong", this one
+/// answers "what is it doing now", which is the question a game that runs and draws nothing poses.
+#[test]
+#[ignore]
+fn dump_state() {
+    let Ok(path) = std::env::var("TRACE_ROM") else {
+        eprintln!("set TRACE_ROM to a ROM path");
+        return;
+    };
+    let rom = std::fs::read(&path).expect("the ROM");
+    let mut system = GbaSystem::new(rom, None).expect("a cartridge");
+    let mut run = 0u32;
+    for target in [1u32, 10, 60, 200] {
+        while run < target {
+            system.step_frame(InputState::default());
+            run += 1;
+        }
+        println!("--- after {target} frames ---\n{}", system.state_dump());
+    }
+}

@@ -245,6 +245,22 @@ impl Arm7Tdmi {
 
     /// Switch mode, keeping banked storage indexed rather than copied.
     #[inline]
+    /// Leave an exception: restore `CPSR` from the current mode's `SPSR`, then jump.
+    ///
+    /// This is what `subs pc, lr, #4` and `movs pc, lr` do, and the restore is the part that
+    /// matters — it is what puts the interrupt mask back the way the interrupted code had it. A
+    /// handler that returns without it leaves the core in the exception's mode with interrupts
+    /// still masked, which presents as a machine that takes exactly one interrupt and then never
+    /// another.
+    pub fn exception_return(&mut self, pc: u32) {
+        if let Some(spsr) = self.regs.spsr(self.cpsr.mode()) {
+            self.cpsr = spsr;
+            self.set_mode(spsr.mode());
+        }
+        let aligned = if self.cpsr.thumb() { pc & !1 } else { pc & !3 };
+        self.regs.set_pc(aligned);
+    }
+
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         self.cpsr.set_mode(mode);
     }

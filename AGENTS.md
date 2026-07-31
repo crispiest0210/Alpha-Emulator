@@ -253,6 +253,21 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   `Option<RewindBuffer>` instead.
 - **Under `--data-dir`, `AppPaths::rooted_at` relocates everything.** Use it whenever trying a
   frontend change; a bug in the import path should not be discovered against a real library.
+- **A GBA `SWI` is a different encoding in each instruction set, and almost every commercial game
+  is Thumb.** The BIOS HLE originally intercepted only the ARM form, so a real game's calls fell
+  through to an unmapped vector — Pokémon Emerald ran at full speed with a black screen and no
+  error. There is nothing to guess at in the Thumb form: it is `1101 1111 imm8`, one encoding, no
+  condition field.
+- **HLE'ing an interrupt means emulating the BIOS's *wrapper*, not just jumping to the handler.**
+  The BIOS pushes `r0-r3,r12,lr`, calls the game's handler with `LR` pointing at its own epilogue,
+  and returns with `subs pc, lr, #4` — and that last step is what restores `CPSR` and unmasks
+  interrupts. Jumping straight to the handler leaves its `bx lr` returning into the interrupted
+  code while still in IRQ mode with interrupts masked: the machine takes exactly one interrupt,
+  then runs on and wanders into unmapped memory.
+- **`GbaSystem::state_dump`** is the tool for "it runs and draws nothing": the program counter, the
+  display control register, the interrupt registers, and the handler pointer, on one page.
+  `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state` prints
+  it at four points in a run, which is what turned that black screen into three specific bugs.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

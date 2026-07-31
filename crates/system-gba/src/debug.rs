@@ -90,6 +90,50 @@ impl DebugTarget for GbaSystem {
     }
 }
 
+/// A one-page dump of the machine, for when a game runs and shows nothing.
+///
+/// The Game Boy Advance version of the tool `AGENTS.md` says to reach for before reading pixels.
+/// A game that is executing happily and drawing nothing is the hardest failure to attribute from
+/// the picture alone, and the answer is almost always in one of these fields: the display is off,
+/// the CPU is halted waiting for an interrupt nothing raises, or the interrupt handler pointer was
+/// never written.
+impl GbaSystem {
+    pub fn state_dump(&mut self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let cpu = self.cpu();
+        let _ = writeln!(
+            out,
+            "pc={:08X} thumb={} halted={} cpsr_irq_masked={}",
+            core_common::CpuIntrospect::program_counter(cpu),
+            cpu.is_thumb(),
+            core_common::CpuIntrospect::is_halted(cpu),
+            cpu.cpsr.irq_disabled()
+        );
+        let dispcnt = self.bus_mut().read16(0x0400_0000);
+        let _ = writeln!(
+            out,
+            "DISPCNT={dispcnt:04X} mode={} forced_blank={} bg_enable={:04b} obj={}",
+            dispcnt & 7,
+            dispcnt & (1 << 7) != 0,
+            (dispcnt >> 8) & 0xF,
+            dispcnt & (1 << 12) != 0
+        );
+        let dispstat = self.bus_mut().read16(0x0400_0004);
+        let vcount = self.bus_mut().read16(0x0400_0006);
+        let _ = writeln!(out, "DISPSTAT={dispstat:04X} VCOUNT={vcount}");
+        let ie = self.bus_mut().read16(0x0400_0200);
+        let iflags = self.bus_mut().read16(0x0400_0202);
+        let ime = self.bus_mut().read16(0x0400_0208);
+        let _ = writeln!(out, "IE={ie:04X} IF={iflags:04X} IME={ime:04X}");
+        // The address the BIOS reads to find the game's own handler. Zero here means every
+        // interrupt is discarded, which presents as a game that waits forever.
+        let handler = self.bus_mut().read32(crate::irq::HLE_HANDLER_POINTER);
+        let _ = writeln!(out, "IRQ handler pointer = {handler:08X}");
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -535,27 +535,45 @@ impl GbaSystem {
     ///
     /// With a real BIOS supplied this does nothing and the exception is taken normally.
     fn intercept_bios_call(&mut self) -> bool {
-        if self.bus.memory.has_bios() || self.cpu.is_thumb() {
-            // The Thumb form is `SWI imm8` at a different encoding; games use the ARM form for
-            // these calls, and guessing at the other one is worse than not handling it.
+        if self.bus.memory.has_bios() {
             return false;
         }
         let pc = self.cpu.regs.pc();
-        let opcode = self.bus.read32(pc);
-        // `cond 1111 imm24`. Bits 24-27 identify the instruction; the 24 below them are the
-        // comment, so the mask must not reach into them. Only the always-condition is handled:
-        // a conditional `SWI` is vanishingly rare and would need the flag check duplicated here.
-        if opcode & 0x0F00_0000 != 0x0F00_0000 || opcode >> 28 != 0xE {
-            return false;
-        }
 
-        let comment = ((opcode >> 16) & 0xFF) as u8;
+        // Both instruction sets, because a game may be in either and most of them are in Thumb.
+        //
+        // Skipping the Thumb form is not a small gap. Almost every commercial GBA game is
+        // compiled to Thumb — it is the smaller encoding and the one the cartridge bus favours —
+        // so a machine that only answers ARM `SWI`s answers almost none of the calls a real game
+        // makes. Pokémon Emerald ran at full speed with a black screen for exactly this reason:
+        // its first BIOS call fell through to an unmapped vector and the machine sat there.
+        let (comment, width) = if self.cpu.is_thumb() {
+            let opcode = self.bus.read16(pc & !1);
+            // `1101 1111 imm8`. One encoding, no condition field, and the comment is the low
+            // byte — there is nothing to guess at here.
+            if opcode & 0xFF00 != 0xDF00 {
+                return false;
+            }
+            ((opcode & 0xFF) as u8, 2)
+        } else {
+            let opcode = self.bus.read32(pc & !3);
+            // `cond 1111 imm24`. Bits 24-27 identify the instruction; the 24 below them are the
+            // comment, so the mask must not reach into them. Only the always-condition is
+            // handled: a conditional `SWI` is vanishingly rare and would need the flag check
+            // duplicated here.
+            if opcode & 0x0F00_0000 != 0x0F00_0000 || opcode >> 28 != 0xE {
+                return false;
+            }
+            (((opcode >> 16) & 0xFF) as u8, 4)
+        };
+
         let effect = bios::dispatch(&mut self.cpu, &mut self.bus, comment);
         if effect.halt {
             self.cpu.halt();
         }
-        // Step over the instruction the BIOS would have returned from.
-        self.cpu.regs.set_pc(pc.wrapping_add(4));
+        // Step over the instruction the BIOS would have returned from — two bytes in Thumb, four
+        // in ARM.
+        self.cpu.regs.set_pc(pc.wrapping_add(width));
         true
     }
 
@@ -588,15 +606,81 @@ impl GbaSystem {
         if handler == 0 {
             return;
         }
-        // Enter the exception properly — banked registers, mode, and mask all change — then
-        // redirect the program counter to the game's handler, which is the one thing the BIOS
-        // would have done between the two.
+
+        // Enter the exception properly — banked registers, mode, and mask all change.
         let lr = self.cpu.regs.pc().wrapping_add(4);
         self.cpu.enter_exception(Exception::Irq, lr);
+
+        // Then stand in for the BIOS's *wrapper*, which is the part that matters and the part
+        // that was missing. A real BIOS does not jump to the game's handler and hope: it pushes
+        // the registers the ARM procedure standard lets a callee clobber, calls the handler with
+        // `LR` pointing at its own epilogue, and on return restores them and leaves the exception
+        // with `subs pc, lr, #4` — which is what puts `CPSR` back and unmasks interrupts.
+        //
+        // Jumping straight to the handler instead leaves its `bx lr` returning into the
+        // *interrupted code* while still in IRQ mode with interrupts masked. The machine then
+        // runs on, never takes another interrupt, and wanders off into unmapped memory. That is
+        // exactly how Pokémon Emerald reached a white screen and stayed there.
+        let mut sp = self.cpu.regs.read(Mode::Irq, 13);
+        for value in [
+            self.cpu.reg(0),
+            self.cpu.reg(1),
+            self.cpu.reg(2),
+            self.cpu.reg(3),
+            self.cpu.reg(12),
+            lr,
+        ]
+        .into_iter()
+        .rev()
+        {
+            sp = sp.wrapping_sub(4);
+            self.bus.write32(sp, value);
+        }
+        self.cpu.regs.write(Mode::Irq, 13, sp);
+        // `LR` is the epilogue's address rather than the return address, which is what makes the
+        // handler's `bx lr` come back here instead of into the interrupted code.
+        self.cpu.regs.write(Mode::Irq, 14, HLE_IRQ_RETURN);
         self.cpu.regs.set_pc(handler);
         self.cpu.set_irq_line(false);
     }
+
+    /// The other half of the wrapper: unwind and leave the exception.
+    ///
+    /// Recognised by the program counter reaching [`HLE_IRQ_RETURN`], which is an address inside
+    /// the BIOS that nothing else can be executing — with no BIOS supplied the region is unmapped,
+    /// so the only way to arrive there is the `LR` planted above.
+    fn intercept_bios_irq_return(&mut self) -> bool {
+        if self.bus.memory.has_bios() || self.cpu.regs.pc() != HLE_IRQ_RETURN {
+            return false;
+        }
+        let mut sp = self.cpu.regs.read(Mode::Irq, 13);
+        let mut popped = [0u32; 6];
+        for slot in &mut popped {
+            *slot = self.bus.read32(sp);
+            sp = sp.wrapping_add(4);
+        }
+        let [r0, r1, r2, r3, r12, lr] = popped;
+        self.cpu.regs.write(Mode::Irq, 13, sp);
+        self.cpu.set_reg(0, r0);
+        self.cpu.set_reg(1, r1);
+        self.cpu.set_reg(2, r2);
+        self.cpu.set_reg(3, r3);
+        self.cpu.set_reg(12, r12);
+
+        // `subs pc, lr, #4`: restore the saved status register and resume where the interrupt
+        // struck. Restoring `CPSR` is the step that unmasks interrupts again, so leaving it out
+        // is what makes a machine take exactly one interrupt and then no more.
+        self.cpu.exception_return(lr.wrapping_sub(4));
+        true
+    }
 }
+
+/// Where the HLE's interrupt wrapper returns to.
+///
+/// Inside the BIOS region, which is unmapped when no BIOS is supplied — so no game can reach it
+/// except through the `LR` the wrapper plants. The exact value is the address the real BIOS
+/// returns to, which makes a trace of this machine line up with a trace of hardware.
+const HLE_IRQ_RETURN: u32 = 0x0000_0138;
 
 fn boot_state(has_bios: bool) -> BootState {
     if has_bios {
@@ -633,6 +717,9 @@ impl System for GbaSystem {
 
     fn step_instruction(&mut self) -> Cycles {
         self.service_interrupt();
+        if self.intercept_bios_irq_return() {
+            return Cycles(3);
+        }
         if self.intercept_bios_call() {
             // The call is answered without running the instruction, so it costs nothing beyond
             // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
