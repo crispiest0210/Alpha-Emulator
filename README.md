@@ -119,6 +119,7 @@ Component status:
 | `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
 | `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM, draws both screens, and produces audio |
 | `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |
+| `system-nds` diagnostics — VRAM bank map, per-layer decode, dual-core state dump | done and tested; side-effect free, so a dump can be taken from anywhere |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
 
@@ -150,7 +151,7 @@ ROMs are far fewer than the Game Boy family's, most target hardware this build d
 wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
 as fetchable artifacts. What the DS *is* verified by instead:
 
-- **307 unit tests in `system-nds`**, covering every module against the register behaviour it
+- **313 unit tests in `system-nds`**, covering every module against the register behaviour it
   implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
   timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
 - **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing

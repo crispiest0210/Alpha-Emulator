@@ -355,7 +355,7 @@ is evidence and polish rather than hardware.
   shininess table, and `BOX_TEST`. Prompt 13 explicitly ranks these below geometry and texturing,
   which is the order they were done in.
 
-Everything above is small next to what has landed. `system-nds` is 307 tests over twelve modules
+Everything above is small next to what has landed. `system-nds` is 313 tests over thirteen modules
 and the machine boots, draws both screens in 2D and 3D, plays sound, and can be single-stepped in
 the in-app debugger.
 
@@ -469,6 +469,14 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
 - **The debugger panel** (`cargo xtask dev -- <rom>`, then "Debugger") shows registers, disassembly
   with click-to-toggle breakpoints, a hex viewer, and watchpoints. Attaching with no breakpoints set
   costs nothing, so it is safe to leave open while a game runs.
+- **`NdsSystem::graphics_dump` and `NdsSystem::cores_dump`**, in `crates/system-nds/src/diagnostics.rs`,
+  are the DS's version of the trick below and the first thing to reach for when a DS ROM misbehaves.
+  The graphics dump prints where all nine VRAM banks went, which spaces have a bank in them, the
+  shared-WRAM split, both engines' `DISPCNT` decode, and — the useful part — **what each background
+  layer currently is**, which depends on the mode *and* on two `BGxCNT` bits whose meaning changes
+  with it. The cores dump prints both program counters, both interrupt states, how many words are
+  waiting in each FIFO, and the video position: when a DS ROM appears to hang, nine times in ten
+  one core is spinning on a flag the other was supposed to set, and that tells you which.
 - **`cgb_acid2_attribute_dump`** in `crates/system-gbc/src/lib.rs` dumps VRAM maps, OAM flags, and
   both palette sets from a running machine. It is what cracked cgb-acid2 in about a minute after
   reasoning from the rendered picture had stalled — reach for it before staring at pixels. Its rows

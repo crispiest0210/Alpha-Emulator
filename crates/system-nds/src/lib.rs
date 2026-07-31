@@ -30,6 +30,7 @@
 pub mod apu;
 pub mod cartridge;
 pub mod debug;
+pub mod diagnostics;
 pub mod dma;
 pub mod engine2d;
 pub mod gpu3d;
