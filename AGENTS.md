@@ -361,8 +361,29 @@ second instance. Whoever answers it should answer it for both.
 
 ### The biggest gap
 
-**Accuracy coverage for the DS, and a save chip.** Prompt 13's scope is built; what is missing now
-is evidence and polish rather than hardware.
+**A commercial Game Boy Advance game does not reach its title screen.** This displaced the DS items
+below on 2026-07-31 and is the thing to work on next.
+
+Pokémon Emerald used to run at 102% speed with a black screen and no error output. Three bugs were
+behind it and all three are fixed — see the two new entries under "Gotchas that cost real time" —
+so it now executes game code with interrupts working, enables a background layer, and draws its
+intro sequence. It then stops short of the title screen.
+
+Start with `GbaSystem::state_dump`, which exists for exactly this and is described under "Tools
+worth knowing about". It reports the program counter, `DISPCNT`, the interrupt registers, and the
+handler pointer; run it with `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored
+--nocapture dump_state`. That is what turned the black screen into three named bugs in about ten
+minutes, and reasoning about the picture had got nowhere before it.
+
+Two candidates worth checking early, neither confirmed: **EEPROM saves are reported absent rather
+than emulated**, and a game whose save-detection probe never answers can stall in its boot path;
+and **PSG mixing is not wired**, so a game driving music through the four PSG channels gets
+silence, which is a separate defect that will look like the same one.
+
+### The gaps behind it
+
+**Accuracy coverage for the DS, and DS polish.** Prompt 13's scope is built; what is missing there
+is evidence rather than hardware.
 
 - **Nothing DS-shaped is in the accuracy corpus.** `README.md` says why and lists what stands in
   for it. That is honest but it is not the same bar the Game Boy family is held to, and the next

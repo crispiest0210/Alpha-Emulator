@@ -28,13 +28,38 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. BIOS calls are emulated in both instruction sets, including the five decompressors every commercial game uses. No PSG mixing, mosaic, or EEPROM yet |
+| Game Boy Advance | ✅ | ⚠️ | ✅ | Passes all three `gba-suite` ROMs and runs homebrew at a measured 100% speed. **A commercial game does not yet reach its title screen** — see below. BIOS calls work in both instruction sets, decompressors included. No PSG mixing, mosaic, or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
-**All four systems boot with picture and sound; three are fully playable.** The application has a
+**All four systems boot with picture and sound.** The Game Boy and Game Boy Color are the two
+held to a full accuracy bar; see the notes below each of the other two. The application has a
 ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
 a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
 viewer, breakpoints, and watchpoints.
+
+### Where the Game Boy Advance actually is
+
+`gba-suite`'s three ROMs pass, hand-built homebrew runs at a measured 100% speed, and the
+component list below is genuinely implemented. But a **commercial game does not yet reach its
+title screen**, and that is worth stating plainly rather than leaving to be discovered.
+
+Pokémon Emerald was the test case. It used to run at full speed with a black screen and no error
+output at all; three bugs were behind that, all now fixed — the BIOS interception ignored Thumb
+(which is what almost every commercial game is compiled to), the interrupt HLE skipped the BIOS's
+return wrapper so the machine took exactly one interrupt and then none, and eleven BIOS calls were
+missing including all five decompressors. It now executes game code with interrupts working,
+enables a background layer, and draws its intro sequence — then stops short of the title screen.
+
+Whatever remains is a *specific* further gap rather than a mystery, and the tool for finding it is
+already here:
+
+```sh
+TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state
+```
+
+That prints the program counter, `DISPCNT`, the interrupt registers, and the handler pointer at
+four points in a run. It is what turned "black screen" into three named bugs, and it is the first
+thing to reach for.
 
 ### What the Nintendo DS does and does not do
 
