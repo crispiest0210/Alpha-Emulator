@@ -275,9 +275,10 @@ and draws both screens with sound and 3D**.
   breakpoints exist and a detached session pays nothing at all. Watchpoints cannot work that way —
   only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
   and the session drains it after each instruction. That costs one branch per bus access whether or
-  not anything is watching — **+1.7% of a Game Boy frame and +4.5% of a GBA one**, measured under
-  prompt 18. See "Performance" below: the cost is kept deliberately and recorded as a deviation from
-  prompt 15's "zero measurable overhead" constraint rather than reported as compliance.
+  not anything is watching — **+1.7% of a Game Boy frame, +4.5% of a GBA one, and +3.7% of a DS one**, measured under
+  prompt 18, and **+3.7% of a Nintendo DS one**. See "Performance" below: the cost is kept
+  deliberately and recorded as a deviation from prompt 15's "zero measurable overhead" constraint
+  rather than reported as compliance.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
@@ -354,8 +355,14 @@ is evidence and polish rather than hardware.
   shininess table, and `BOX_TEST`. Prompt 13 explicitly ranks these below geometry and texturing,
   which is the order they were done in.
 
-Everything above is small next to what has landed. `system-nds` is 294 tests over eleven modules
-and the machine boots, draws both screens in 2D and 3D, and plays sound.
+Everything above is small next to what has landed. `system-nds` is 307 tests over twelve modules
+and the machine boots, draws both screens in 2D and 3D, plays sound, and can be single-stepped in
+the in-app debugger.
+
+One thing the debugger does *not* do, and it is a frontend question as much as a core one: it shows
+the **ARM9 only**. `DebugTarget` has one register list, one program counter, one address space, and
+inventing a "which core" concept means changing the panel and making every breakpoint say which
+core it belongs to. Worth doing; not worth pretending is done. See `system-nds::debug`.
 
 Smaller DS gaps, all recorded in the crate docs where they are made: no save chip (the header does
 not say which of EEPROM or FLASH is fitted, and guessing corrupts saves silently), no KEY1

@@ -57,8 +57,8 @@ use crate::video::{VideoEvent, VideoTiming, FRAMEBUFFER_HEIGHT, SCREEN_HEIGHT, S
 use crate::vram::{self, Vram};
 use crate::Core;
 use core_common::{
-    AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer, InputState, Savable,
-    StateError, StateReader, StateWriter, System,
+    AccessKind, AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, DebugTarget, FrameOutput,
+    Framebuffer, InputState, Savable, StateError, StateReader, StateWriter, System,
 };
 use cpu_arm7tdmi::{Arm7Tdmi, BootState, Exception, Mode};
 use cpu_arm946e::Arm946e;
@@ -108,6 +108,12 @@ pub struct NdsBus {
     exmemcnt: u16,
     /// Set while a core has executed a halt instruction and is waiting for an interrupt.
     halted: [bool; 2],
+    /// The debugger's access recorder. Records nothing until a watchpoint arms it.
+    ///
+    /// Only the ARM9's accesses reach it, because the debugger shows the ARM9: an ARM7 access
+    /// appearing here would fire a watchpoint whose cause the user cannot see. The core is a
+    /// literal in each bus view, so the ARM7's views compile the check away entirely.
+    pub watch: AccessLog,
 }
 
 impl NdsBus {
@@ -136,6 +142,7 @@ impl NdsBus {
             powcnt1: 0x0203,
             exmemcnt: 0,
             halted: [false; 2],
+            watch: AccessLog::new(),
         }
     }
 
@@ -154,37 +161,65 @@ impl NdsBus {
 /// The core is a type parameter of the view rather than a field so the address decode below
 /// compiles to a straight-line dispatch per core rather than a branch on every access.
 macro_rules! core_view {
-    ($name:ident, $core:expr) => {
+    ($name:ident, $core:expr, $records:expr) => {
         pub struct $name<'a>(pub &'a mut NdsBus);
+
+        impl $name<'_> {
+            /// Record an access for the debugger, if this view is the one being watched.
+            ///
+            /// `$records` is a literal per view, so this compiles to nothing at all in the ARM7's
+            /// and to one predictable branch in the ARM9's.
+            #[inline(always)]
+            fn watch(&mut self, addr: u32, kind: AccessKind, value: u8) {
+                if $records {
+                    self.0.watch.record(addr, kind, value);
+                }
+            }
+        }
 
         impl Bus for $name<'_> {
             #[inline]
             fn read8(&mut self, addr: u32) -> u8 {
-                self.0.read8(($core), addr)
+                let value = self.0.read8(($core), addr);
+                self.watch(addr, AccessKind::Read, value);
+                value
             }
 
             #[inline]
             fn write8(&mut self, addr: u32, value: u8) {
+                self.watch(addr, AccessKind::Write, value);
                 self.0.write8(($core), addr, value);
             }
 
             #[inline]
             fn read16(&mut self, addr: u32) -> u16 {
-                self.0.read16(($core), addr & !1)
+                let value = self.0.read16(($core), addr & !1);
+                self.watch(addr & !1, AccessKind::Read, value as u8);
+                self.watch((addr & !1) + 1, AccessKind::Read, (value >> 8) as u8);
+                value
             }
 
             #[inline]
             fn write16(&mut self, addr: u32, value: u16) {
+                self.watch(addr & !1, AccessKind::Write, value as u8);
+                self.watch((addr & !1) + 1, AccessKind::Write, (value >> 8) as u8);
                 self.0.write16(($core), addr & !1, value);
             }
 
             #[inline]
             fn read32(&mut self, addr: u32) -> u32 {
-                self.0.read32(($core), addr & !3)
+                let value = self.0.read32(($core), addr & !3);
+                for i in 0..4u32 {
+                    self.watch((addr & !3) + i, AccessKind::Read, (value >> (i * 8)) as u8);
+                }
+                value
             }
 
             #[inline]
             fn write32(&mut self, addr: u32, value: u32) {
+                for i in 0..4u32 {
+                    self.watch((addr & !3) + i, AccessKind::Write, (value >> (i * 8)) as u8);
+                }
                 self.0.write32(($core), addr & !3, value);
             }
 
@@ -209,8 +244,8 @@ macro_rules! core_view {
     };
 }
 
-core_view!(Arm9View, Core::Arm9);
-core_view!(Arm7View, Core::Arm7);
+core_view!(Arm9View, Core::Arm9, true);
+core_view!(Arm7View, Core::Arm7, false);
 
 impl NdsBus {
     /// The single address decode, shared by both views.
@@ -218,7 +253,7 @@ impl NdsBus {
     /// Written as one function taking the core rather than two, because the two maps agree
     /// about most of themselves and two copies would drift. Where they differ, the difference is
     /// a `match` on `core` at exactly the place it applies.
-    fn read8(&mut self, core: Core, addr: u32) -> u8 {
+    pub(crate) fn read8(&mut self, core: Core, addr: u32) -> u8 {
         if let Some(byte) = self.memory_read8(core, addr) {
             return byte;
         }
@@ -269,7 +304,7 @@ impl NdsBus {
         }
     }
 
-    fn write8(&mut self, core: Core, addr: u32, value: u8) {
+    pub(crate) fn write8(&mut self, core: Core, addr: u32, value: u8) {
         let handled = match core {
             Core::Arm9 => self.memory.write8_arm9(addr, value),
             Core::Arm7 => self.memory.write8_arm7(addr, value),
@@ -722,6 +757,37 @@ impl NdsSystem {
         &self.bus
     }
 
+    pub fn bus_mut(&mut self) -> &mut NdsBus {
+        &mut self.bus
+    }
+
+    pub fn arm9(&self) -> &Arm946e {
+        &self.arm9
+    }
+
+    pub fn arm9_mut(&mut self) -> &mut Arm946e {
+        &mut self.arm9
+    }
+
+    pub fn arm7(&self) -> &Arm7Tdmi {
+        &self.arm7
+    }
+
+    /// A side-effect-free read through the ARM9's view, TCMs included.
+    ///
+    /// The TCMs sit between the core and the bus, so an address inside one never reaches the bus.
+    /// A debugger that read the bus instead would show a game's stack — which lives in DTCM — as
+    /// whatever main RAM holds there.
+    pub fn peek_arm9(&self, addr: u32) -> Option<u8> {
+        if self.arm9.itcm.responds_to_read(addr) {
+            return Some(self.arm9.itcm.read8(addr));
+        }
+        if self.arm9.dtcm.responds_to_read(addr) {
+            return Some(self.arm9.dtcm.read8(addr));
+        }
+        self.bus.peek8(Core::Arm9, addr)
+    }
+
     /// Do what the firmware does: copy both binaries into RAM, fabricate the blocks software
     /// expects to find there, and point each core at its entry.
     fn direct_boot(&mut self) {
@@ -1153,6 +1219,15 @@ impl System for NdsSystem {
         self.bus.apu.take_samples()
     }
 
+    /// The debugger sees the ARM9. See [`crate::debug`] for why, and for what that leaves out.
+    fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
+        Some(self)
+    }
+
+    fn access_log(&mut self) -> Option<&mut AccessLog> {
+        Some(&mut self.bus.watch)
+    }
+
     fn save_ram(&self) -> Option<&[u8]> {
         self.bus.cart.save_ram()
     }
@@ -1194,6 +1269,8 @@ impl Savable for NdsSystem {
         w.write_i64(self.arm9_debt);
         w.write_i64(self.arm7_debt);
         w.write_u64(self.frame_cycles);
+        // The access log is not saved: it holds what one instruction did, and a save state is
+        // taken between instructions. Carrying it would be saving the debugger, not the machine.
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {

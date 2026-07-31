@@ -12,7 +12,7 @@
 //! communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]), the two timer blocks
 //! ([`timers`]), the two DMA controllers ([`dma`]), the video timing ([`video`]), the keypad and
 //! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
-//! them ([`system`]).
+//! them ([`system`]). The in-app debugger works against it through [`debug`], on the ARM9.
 //!
 //! Not implemented: a cartridge save chip, wifi, and the 3D core's rarer effects — fog, edge
 //! marking, anti-aliasing, shadow polygons, and the toon table. Prompt 13 explicitly ranks those
@@ -29,6 +29,7 @@
 
 pub mod apu;
 pub mod cartridge;
+pub mod debug;
 pub mod dma;
 pub mod engine2d;
 pub mod gpu3d;

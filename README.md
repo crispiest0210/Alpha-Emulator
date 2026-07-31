@@ -104,7 +104,7 @@ Component status:
 | `system-gba` HLE BIOS — `Div`, `Sqrt`, `ArcTan2`, `CpuSet`, the waiting calls | done; unhandled calls change nothing rather than guessing |
 | `debugger` — breakpoints, watchpoints, conditions | done; execution breakpoints and watchpoints both halt a running machine; **no GDB server or tracing yet** |
 | `debugger` — snapshot capture (registers, disassembly, memory) | done against `DebugTarget`, so no branch per system |
-| `core-common` — `DebugTarget`, `System::step_instruction`, `AccessLog` | done; the GB, GBC, and GBA implement introspection and access recording, the DS reports both as unavailable |
+| `core-common` — `DebugTarget`, `System::step_instruction`, `AccessLog` | done; all four systems implement introspection and access recording |
 | `system-nds` memory map — two views over one store, shared-WRAM split, open bus per core | done and tested |
 | `system-nds` VRAM — nine banks, every `VRAMCNT` mapping, overlap, precomputed page table | done and tested |
 | `system-nds` IPC — `IPCSYNC`, both FIFOs, edge-triggered interrupts | done and tested; driven end to end by two real programs on the two cores |
@@ -117,7 +117,8 @@ Component status:
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
 | `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
 | `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
-| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM, draws both screens, and produces audio. **No 3D core** |
+| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM, draws both screens, and produces audio |
+| `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
 
@@ -149,7 +150,7 @@ ROMs are far fewer than the Game Boy family's, most target hardware this build d
 wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
 as fetchable artifacts. What the DS *is* verified by instead:
 
-- **294 unit tests in `system-nds`**, covering every module against the register behaviour it
+- **307 unit tests in `system-nds`**, covering every module against the register behaviour it
   implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
   timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
 - **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing
@@ -373,7 +374,7 @@ Three findings worth surfacing:
   **65% reduction**, measured before and after with `cargo bench -p harness --bench systems`. That
   is the only optimisation in the project so far, and it had a measured problem behind it.
 - **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame and +4.5% of a GBA
-  one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
+  one and +3.7% of a DS one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
   overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
   leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
   deliberate deviation with the number, not as compliance.
