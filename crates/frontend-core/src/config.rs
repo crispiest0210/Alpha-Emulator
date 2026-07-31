@@ -70,6 +70,41 @@ impl Default for AudioConfig {
     }
 }
 
+/// The hardware the interface is dressed as.
+///
+/// Named after the consoles rather than after "light" and "dark" because that is what a user
+/// choosing one is actually picking, and because two of them are light and two dark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeChoice {
+    /// Off-white shell, cool silver trim, a soft blue accent.
+    #[default]
+    DsLite,
+    /// The Game Boy Advance's indigo-violet.
+    Gba,
+    /// The original DS's titanium grey with an amber accent.
+    DsPhat,
+    /// The original Game Boy's olive-green LCD.
+    GameBoy,
+}
+
+impl ThemeChoice {
+    pub const ALL: [ThemeChoice; 4] = [
+        ThemeChoice::DsLite,
+        ThemeChoice::Gba,
+        ThemeChoice::DsPhat,
+        ThemeChoice::GameBoy,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeChoice::DsLite => "DS Lite",
+            ThemeChoice::Gba => "Game Boy Advance",
+            ThemeChoice::DsPhat => "Nintendo DS",
+            ThemeChoice::GameBoy => "Game Boy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VideoConfig {
@@ -82,6 +117,12 @@ pub struct VideoConfig {
     /// is the frontend's business, and it is a setting because the right value depends on how
     /// large the window is.
     pub dual_screen_gap: u32,
+    /// Which hardware the interface is dressed as.
+    ///
+    /// Presentation only, and stored here rather than in `frontend-native` because a setting the
+    /// user can change belongs with the rest of them — the *colours* live in the frontend, since
+    /// `frontend-core` may not depend on a UI framework.
+    pub theme: ThemeChoice,
 }
 
 impl Default for VideoConfig {
@@ -90,6 +131,7 @@ impl Default for VideoConfig {
             scaling: ScalingMode::Nearest,
             hud_visible: false,
             dual_screen_gap: 8,
+            theme: ThemeChoice::default(),
         }
     }
 }

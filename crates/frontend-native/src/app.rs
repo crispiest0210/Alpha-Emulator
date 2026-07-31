@@ -122,6 +122,9 @@ impl App {
         );
 
         let egui_ctx = egui::Context::default();
+        // The interface is dressed as hardware rather than left on egui's defaults. One palette
+        // decides every colour; see `chrome::theme`. Applied again whenever the setting changes.
+        crate::chrome::theme::apply(&egui_ctx, config.video.theme.into());
         let renderer = Renderer::new(egui_ctx.clone());
 
         let mut app = Self {
@@ -392,6 +395,10 @@ impl App {
             }
             UiAction::SetPauseOnFocusLoss(on) => self.config.emulation.pause_on_focus_loss = on,
             UiAction::SetDualScreenGap(gap) => self.config.video.dual_screen_gap = gap,
+            UiAction::SetTheme(theme) => {
+                self.config.video.theme = theme;
+                crate::chrome::theme::apply(&self.egui_ctx, theme.into());
+            }
             UiAction::SetRewind(rewind) => {
                 self.config.rewind = rewind;
                 self.session.send(SessionCommand::SetRewindConfig(rewind));
@@ -648,6 +655,11 @@ impl App {
             // panel is what makes the layout's rectangle and the drawn rectangle the same number.
             egui::CentralPanel::no_frame().show(root, |ui| {
                 let available = ui.available_rect_before_wrap();
+                // The bezel. Painted before the screens rather than set as a panel fill, so the
+                // layout's rectangle and the drawn rectangle stay the same number — which is the
+                // reason the panel is frameless in the first place.
+                let bezel = crate::chrome::theme::Palette::from(self.config.video.theme).bezel;
+                ui.painter().rect_filled(available, 0.0, bezel);
                 self.layout = layout::compute(
                     framebuffer,
                     self.loaded
@@ -881,7 +893,7 @@ fn idle_message(ui: &mut egui::Ui, loaded: bool) {
             egui::RichText::new(if loaded {
                 "waiting for the first frame…"
             } else {
-                "Drop a .gb, .gbc, or .gba file here, or pick one from the library."
+                "Drop a .gb, .gbc, .gba, or .nds file here, or pick one from the library."
             })
             .weak(),
         );

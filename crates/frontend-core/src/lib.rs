@@ -67,7 +67,9 @@ pub mod png;
 pub mod session;
 
 pub use audio::{channel, AudioConsumer, AudioProducer, Resampler, DEFAULT_CAPACITY};
-pub use config::{AudioConfig, Config, EmulationConfig, RewindConfig, ScalingMode, VideoConfig};
+pub use config::{
+    AudioConfig, Config, EmulationConfig, RewindConfig, ScalingMode, ThemeChoice, VideoConfig,
+};
 pub use frame::{frame_pipe, Frame, FramePublisher, FrameSubscriber};
 pub use input::{
     input_channel, Action, BindError, ChromeAction, InputReceiver, InputSender, InputTracker,

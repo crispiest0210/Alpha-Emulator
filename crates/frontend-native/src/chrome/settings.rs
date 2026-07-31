@@ -37,6 +37,28 @@ pub fn window(
 }
 
 fn video(ui: &mut egui::Ui, state: &ChromeState<'_>, actions: &mut Vec<UiAction>) {
+    ui.label(egui::RichText::new("Appearance").strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Theme");
+        for theme in frontend_core::ThemeChoice::ALL {
+            if ui
+                .selectable_label(state.config.video.theme == theme, theme.label())
+                .clicked()
+            {
+                actions.push(UiAction::SetTheme(theme));
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "Each one is the colour scheme of the hardware it is named after. The screen sits on \
+             a dark bezel whichever is chosen.",
+        )
+        .small()
+        .weak(),
+    );
+
+    ui.add_space(6.0);
     ui.label(egui::RichText::new("Video").strong());
     ui.horizontal(|ui| {
         ui.label("Scaling");

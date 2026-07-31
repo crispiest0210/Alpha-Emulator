@@ -21,6 +21,7 @@ mod keybinds;
 mod library_view;
 mod settings;
 mod states;
+pub mod theme;
 
 pub use debugger_view::request as debug_request;
 pub use keybinds::resolve_capture;
@@ -64,6 +65,8 @@ pub enum UiAction {
     SetFastForwardSpeed(f32),
     SetPauseOnFocusLoss(bool),
     SetDualScreenGap(u32),
+    /// Which hardware the interface is dressed as.
+    SetTheme(frontend_core::ThemeChoice),
     SetRewind(RewindConfig),
 
     Rebind {
