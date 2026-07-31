@@ -400,21 +400,79 @@ fn a_rom_access_that_continues_from_the_last_one_is_cheaper() {
 }
 
 #[test]
-fn a_frame_takes_longer_when_the_cartridge_is_configured_slower() {
+fn an_instruction_costs_what_the_hardware_charges_for_it() {
+    // The check that would have caught the worst bug this system has had. Every access was being
+    // charged between three and six times — once by the wait-state table, again by each halfword
+    // the access decomposed into, again by each byte under that, and a whole second time because
+    // the `SWI` interception fetched the opcode through the bus before the CPU fetched it itself.
+    // An ARM data-processing instruction in internal WRAM cost 13 cycles instead of 1.
+    //
+    // Nothing failed. The emulator still ran at 100% of a *frame*, because a frame is a fixed
+    // number of cycles however few instructions fit in it — so what a commercial game lost was
+    // nine tenths of its processor, and what that looked like was a game that boots, draws its
+    // intro, and then appears to hang.
+    fn cost_at(pc: u32, instruction: u32) -> u64 {
+        let mut gba = system();
+        gba.bus_mut().write32(pc, instruction);
+        gba.cpu_mut().regs.set_pc(pc);
+        gba.bus_mut().take_pending_waits();
+        gba.step_instruction().get()
+    }
+
+    // `add r0, r0, r0`, fetched from internal WRAM: a 32-bit bus with no wait states, so the
+    // whole instruction is the one cycle its single sequential fetch takes.
+    assert_eq!(cost_at(0x0300_1000, 0xE080_0000), 1, "internal WRAM");
+
+    // The same instruction from external WRAM, which is a 16-bit bus with two wait states: two
+    // accesses at three cycles each.
+    assert_eq!(cost_at(0x0200_1000, 0xE080_0000), 6, "external WRAM");
+}
+
+#[test]
+fn the_bios_call_check_does_not_fetch_the_opcode_a_second_time() {
+    // It runs before every instruction and is only asking a question. Reading through the bus
+    // charged the access, moved the cartridge's sequential-access latch, and recorded a
+    // watchpoint entry — all for an instruction that is not a `SWI` and never was.
+    let mut gba = system();
+    gba.bus_mut().write32(0x0300_1000, 0xE080_0000);
+    gba.cpu_mut().regs.set_pc(0x0300_1000);
+    gba.bus_mut().take_pending_waits();
+
+    gba.step_instruction();
+    assert_eq!(
+        gba.bus_mut().next_sequential_address(),
+        0x0300_1004,
+        "the latch should sit just past the one fetch the CPU made"
+    );
+}
+
+#[test]
+fn a_slower_cartridge_gets_through_less_code_in_a_frame() {
     // The whole point of the wait-state table: the same code at two speeds.
-    fn frame_cycles(waitcnt: u16) -> u64 {
+    //
+    // Measured as instructions per frame rather than cycles per frame. A frame is 197120 cycles
+    // whatever the cartridge is set to — the video timing decides that, not the CPU — so the
+    // cycle count only ever differed by however far the last instruction overshot the boundary.
+    // That is a rounding artefact, and it went to zero the moment instructions stopped costing
+    // ten times what they should.
+    fn instructions_per_frame(waitcnt: u16) -> u32 {
         let mut gba = system();
         gba.bus_mut().write16(crate::waitstates::WAITCNT, waitcnt);
-        gba.step_frame(InputState::default()).cycles_elapsed.get()
+        let mut count = 0;
+        while !gba.bus().video.in_vblank() && count < 1_000_000 {
+            gba.step_instruction();
+            count += 1;
+        }
+        count
     }
 
     // Setting 2 is the fastest first access, setting 3 the slowest.
-    let fast = frame_cycles(2 << 2);
-    let slow = frame_cycles(3 << 2);
+    let fast = instructions_per_frame(2 << 2);
+    let slow = instructions_per_frame(3 << 2);
     assert!(
-        slow > fast,
-        "a slower cartridge should reach vertical blanking in fewer instructions, so a frame \
-         costs more cycles per instruction: {slow} against {fast}"
+        slow < fast,
+        "a slower cartridge should get through fewer instructions before vertical blanking: \
+         {slow} against {fast}"
     );
 }
 
@@ -434,11 +492,167 @@ fn dump_state() {
     let rom = std::fs::read(&path).expect("the ROM");
     let mut system = GbaSystem::new(rom, None).expect("a cartridge");
     let mut run = 0u32;
-    for target in [1u32, 10, 60, 200] {
+    for target in [1u32, 10, 60, 200, 400, 600, 900] {
         while run < target {
             system.step_frame(InputState::default());
             run += 1;
         }
         println!("--- after {target} frames ---\n{}", system.state_dump());
+    }
+}
+
+/// Find the loop a stalled ROM is spinning in, and disassemble it.
+///
+/// `TRACE_ROM=/path/to.gba TRACE_FRAMES=400 cargo test -p system-gba --release --
+/// --ignored --nocapture trace_stall`
+///
+/// `dump_state` answers "what is it doing now" one frame at a time, which is enough to see that a
+/// program counter is not moving on. This answers the question after it: *which* instructions it is
+/// not moving on from. It runs to `TRACE_FRAMES`, then single-steps a frame's worth of instructions
+/// recording every program counter, and prints the hottest addresses disassembled.
+///
+/// A stalled GBA game is almost always spinning on a flag some piece of hardware was supposed to
+/// set, and the load in the loop body names the register that did not.
+#[test]
+#[ignore]
+fn trace_stall() {
+    let Ok(path) = std::env::var("TRACE_ROM") else {
+        eprintln!("set TRACE_ROM to a ROM path");
+        return;
+    };
+    let frames: u32 = std::env::var("TRACE_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    let rom = std::fs::read(&path).expect("the ROM");
+    let mut system = GbaSystem::new(rom, None).expect("a cartridge");
+    for _ in 0..frames {
+        system.step_frame(InputState::default());
+    }
+    println!("--- after {frames} frames ---\n{}", system.state_dump());
+
+    // One frame's worth of instructions is enough for a loop to show up hundreds of times while a
+    // program still making progress spreads over thousands of distinct addresses.
+    // The instruction set has to be recorded with the address: which decoder applies is machine
+    // state at the moment of the fetch, and a Thumb address disassembled as ARM is plausible
+    // nonsense rather than an error.
+    let mut seen: std::collections::BTreeMap<(u32, bool), (u32, u32)> =
+        std::collections::BTreeMap::new();
+    let mut halted = 0u32;
+    for _ in 0..200_000 {
+        if core_common::DebugTarget::is_halted(&system) {
+            halted += 1;
+            system.step_instruction();
+            continue;
+        }
+        let pc = core_common::DebugTarget::program_counter(&system);
+        let thumb = system.cpu().is_thumb();
+        let cost = system.step_instruction().get() as u32;
+        let slot = seen.entry((pc, thumb)).or_insert((0, 0));
+        slot.0 += 1;
+        slot.1 += cost;
+    }
+    println!("{halted} of 200000 steps were spent halted");
+    {
+        let mut cycles = 0u64;
+        for _ in 0..200_000 {
+            cycles += system.step_instruction().get();
+        }
+        // 280896 cycles is one Game Boy Advance frame.
+        println!(
+            "200000 instructions cost {cycles} cycles = {:.2} frames",
+            cycles as f64 / 280_896.0
+        );
+    }
+
+    let mut hot: Vec<_> = seen.iter().map(|(k, (n, c))| (*n, *k, *c)).collect();
+    hot.sort_unstable_by(|a, b| b.cmp(a));
+    println!(
+        "{} distinct program counters over 200000 instructions",
+        hot.len()
+    );
+    // Split by region, because a game with a working sound driver spends most of its instructions
+    // in the mixer it copied into internal WRAM, and that buries the ROM loop that is the question.
+    for (label, base) in [
+        ("ROM", 0x0800_0000u32),
+        ("EWRAM", 0x0200_0000),
+        ("IWRAM", 0x0300_0000),
+    ] {
+        println!("--- hottest in {label} ---");
+        for (count, (addr, thumb), cost) in hot
+            .iter()
+            .filter(|(_, (a, _), _)| a & 0xFF00_0000 == base)
+            .take(12)
+        {
+            let each = *cost as f64 / *count as f64;
+            println!(
+                "  {count:6}x {each:5.1}cy  {}",
+                disassemble_at(&system, *addr, *thumb)
+            );
+        }
+    }
+
+    // Where the instructions went by 4 KiB page, which is what shows a main loop that has stopped
+    // covering ground: a running game touches dozens of pages a frame.
+    let mut pages: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for (count, (addr, _), _) in &hot {
+        *pages.entry(addr & !0xFFF).or_insert(0) += count;
+    }
+    let mut pages: Vec<_> = pages.into_iter().map(|(a, n)| (n, a)).collect();
+    pages.sort_unstable_by(|a, b| b.cmp(a));
+    println!("--- instructions by 4 KiB page ({} pages) ---", pages.len());
+    for (count, page) in pages.iter().take(20) {
+        println!("  {count:6}x {page:08X}");
+        for (n, (addr, thumb), c) in hot
+            .iter()
+            .filter(|(_, (a, _), _)| a & !0xFFF == *page)
+            .take(3)
+        {
+            let each = *c as f64 / *n as f64;
+            println!(
+                "        {n:6}x {each:5.1}cy  {}",
+                disassemble_at(&system, *addr, *thumb)
+            );
+        }
+    }
+
+    // Consecutive addresses are the loop body; printing it in order is what makes the flag it is
+    // spinning on readable.
+    if let Some((_, (hottest, thumb), _)) = hot.first() {
+        let width = if *thumb { 2 } else { 4 };
+        println!("--- around {hottest:08X} ---");
+        for i in -8i32..12 {
+            let addr = hottest.wrapping_add((i * width) as u32);
+            println!("  {}", disassemble_at(&system, addr, *thumb));
+        }
+    }
+}
+
+#[cfg(test)]
+fn disassemble_at(system: &GbaSystem, addr: u32, thumb: bool) -> String {
+    use core_common::{Bus, Disassemble};
+    use cpu_arm7tdmi::{ArmDisassembler, ThumbDisassembler};
+
+    let width = if thumb { 2 } else { 4 };
+    let mut bytes = [0u8; 4];
+    for (offset, slot) in bytes.iter_mut().take(width).enumerate() {
+        let Some(byte) = system.bus().peek8(addr.wrapping_add(offset as u32)) else {
+            return format!("{addr:08X}  <unreadable>");
+        };
+        *slot = byte;
+    }
+    let bytes = &bytes[..width];
+    let decoded = if thumb {
+        ThumbDisassembler.disassemble(bytes, addr)
+    } else {
+        ArmDisassembler.disassemble(bytes, addr)
+    };
+    let word = match width {
+        2 => format!("    {:04X}", u16::from_le_bytes([bytes[0], bytes[1]])),
+        _ => format!("{:08X}", u32::from_le_bytes(bytes.try_into().unwrap())),
+    };
+    match decoded {
+        Some(i) => format!("{addr:08X}  {word}  {}", i.text),
+        None => format!("{addr:08X}  {word}  ??"),
     }
 }

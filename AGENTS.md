@@ -264,6 +264,17 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   interrupts. Jumping straight to the handler leaves its `bx lr` returning into the interrupted
   code while still in IRQ mode with interrupts masked: the machine takes exactly one interrupt,
   then runs on and wanders into unmapped memory.
+- **A cycle-accounting bug fails no test and looks exactly like a hang.** The GBA charged every
+  memory access three to six times over — an ARM instruction in IWRAM cost 13 cycles against
+  hardware's 1, and 49 from ROM against 6. Every test passed and the emulator held a measured 100%
+  speed throughout, because **a frame is a fixed number of cycles however few instructions fit
+  inside it**. What a commercial game loses is nine tenths of its processor, and what that looks
+  like is a frozen picture with the CPU visibly running. Three causes compounded: the `SWI`
+  interception read the opcode through the bus before the CPU fetched the same word; `read32`
+  charged and then charged again in each `read16` and each `read8` it decomposed into; and the
+  wait-state table's cost includes the access's first cycle, which the CPU core's S/N/I count
+  already had. **Charge once, at the width the CPU asked for, and charge only the waiting.**
+  `an_instruction_costs_what_the_hardware_charges_for_it` pins it.
 - **`GbaSystem::state_dump`** is the tool for "it runs and draws nothing": the program counter, the
   display control register, the interrupt registers, and the handler pointer, on one page.
   `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state` prints
@@ -361,24 +372,26 @@ second instance. Whoever answers it should answer it for both.
 
 ### The biggest gap
 
-**A commercial Game Boy Advance game does not reach its title screen.** This displaced the DS items
-below on 2026-07-31 and is the thing to work on next.
+**A commercial Game Boy Advance game now reaches its title screen**, as of 2026-07-31. Pokémon
+Emerald boots through the GAME FREAK logo, the whole intro, and the Rayquaza scene to "PRESS
+START", with backgrounds, sprites, affine effects, and the M4A sound driver running. The bug that
+had been holding it there was cycle accounting, not graphics — see the first entry under "Gotchas
+that cost real time", which is the one worth reading before touching any timing code on any system.
 
-Pokémon Emerald used to run at 102% speed with a black screen and no error output. Three bugs were
-behind it and all three are fixed — see the two new entries under "Gotchas that cost real time" —
-so it now executes game code with interrupts working, enables a background layer, and draws its
-intro sequence. It then stops short of the title screen.
+What is left on the GBA is smaller and specific:
 
-Start with `GbaSystem::state_dump`, which exists for exactly this and is described under "Tools
-worth knowing about". It reports the program counter, `DISPCNT`, the interrupt registers, and the
-handler pointer; run it with `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored
---nocapture dump_state`. That is what turned the black screen into three named bugs in about ten
-minutes, and reasoning about the picture had got nowhere before it.
+- **The title screen's "EMERALD" wordmark renders as a dither pattern**, and the sky behind it is
+  the wrong hue. Both look like colour-effect gaps rather than missing geometry, so the alpha
+  blending item under "Smaller, well-defined items" — it uses the backdrop as the lower layer,
+  because the scanline buffer keeps only the winning pixel — is the first suspect.
+- **Nothing past the title screen has been looked at.** Pressing start, the save-file load, and the
+  overworld are all unexercised. `EEPROM saves are reported absent rather than emulated` and
+  Emerald is a FLASH cartridge, so the save path is the next thing likely to bite.
+- **PSG mixing is not wired**, so a game driving music through the four PSG channels gets silence.
+  Emerald's music comes through direct sound so this did not block it, but it is still a real gap
+  and it needs the design decision under "Smaller, well-defined items" made first.
 
-Two candidates worth checking early, neither confirmed: **EEPROM saves are reported absent rather
-than emulated**, and a game whose save-detection probe never answers can stall in its boot path;
-and **PSG mixing is not wired**, so a game driving music through the four PSG channels gets
-silence, which is a separate defect that will look like the same one.
+The DS items below are the other candidate for what to do next; neither displaces the other.
 
 ### The gaps behind it
 
@@ -515,6 +528,17 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   the program counter leaves ROM and prints the instructions before it. It takes a `TRACE_ROM`
   environment variable. Three separate bugs this session were found with it in minutes, after
   reasoning about them had failed.
+- **`trace_stall`**, beside it, is for the case `state_dump` cannot answer: a machine that is
+  executing happily and getting nowhere. `TRACE_ROM=<rom> TRACE_FRAMES=600 cargo test -p system-gba
+  --release -- --ignored --nocapture trace_stall` runs to a chosen frame and profiles the next
+  200 000 instructions — hottest addresses disassembled in the instruction set they were *fetched*
+  in, a breakdown by 4 KiB page, the loop body around the hottest address, how many steps went to a
+  halted CPU, and **the average cycle cost of each instruction**. Three of those columns each
+  answered a different question in one run: the page breakdown said the game's main loop was
+  running seven times where it should run a hundred and sixty, and the cycle column said why.
+  Recording the instruction set alongside the address is not optional — `DebugTarget::disassemble`
+  uses the CPU's *current* T bit, so a profile printed after the fact decodes half of it wrongly
+  and the result is plausible rather than obviously broken.
 - `dmg_sound_results` in `testing/harness/src/tests.rs` prints what the memory-protocol sound
   ROMs actually reported, rather than just pass or fail.
 - **The debugger panel** (`cargo xtask dev -- <rom>`, then "Debugger") shows registers, disassembly

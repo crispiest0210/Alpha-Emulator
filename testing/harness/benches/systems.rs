@@ -48,7 +48,7 @@
 //! | `gb/rendering_audio` | 361 µs | 46x |
 //! | `corpus/dmg_acid2` | 243 µs | 69x |
 //! | `corpus/cgb_acid2` | 258 µs | 65x |
-//! | `gba/spin` | 1 486 µs | 11.3x |
+//! | `gba/spin` | 2 665 µs | 6.3x |
 //! | `corpus/gba_suite_arm` | 269 µs | 62x |
 //!
 //! **Where a Game Boy frame goes.** Baseline 210 µs; tile fetch and compositing add 36 µs (+17%);
@@ -57,10 +57,17 @@
 //! suggests for a machine whose whole job is to draw a picture, and it is the first place to look if
 //! the Game Boy ever needs to be faster.
 //!
-//! **The GBA's two numbers differ by 5.5x** because they are different workloads, not because one is
-//! wrong. `gba/spin` executes ARM instructions back to back out of cartridge ROM, paying a wait state
-//! on every fetch; `gba_suite_arm` spends most of its time in tighter loops. The pessimistic one is
-//! the one the target should be judged against, and it is the 11.3x.
+//! **The GBA's two numbers differ because they are different workloads**, not because one is wrong.
+//! `gba/spin` executes ARM instructions back to back out of cartridge ROM, paying a wait state on
+//! every fetch; `gba_suite_arm` spends most of its time in tighter loops. The pessimistic one is the
+//! one the target should be judged against, and it is the 6.3x.
+//!
+//! **`gba/spin` was 1 486 µs and 11.3x until 2026-07-31, and that number was not real.** The machine
+//! was charging every memory access three to six times over, so a frame only got through about 7 900
+//! instructions where it should get through 32 855. The emulator was not fast; the emulated machine
+//! was slow, and a frame is a fixed number of cycles either way. Fixing the accounting made the same
+//! ROM 4.2x more work per frame. Read any GBA number recorded before that date as measuring a
+//! different workload, not a faster emulator.
 //!
 //! ## Dynamic recompilation: no, for both cores
 //!
@@ -73,10 +80,12 @@
 //! - **SM83: no.** The worst measured Game Boy workload runs at 46x real time. Even eliminating
 //!   dispatch entirely — impossible — could not turn 46x into anything a player notices, and the
 //!   apportionment above says the APU would become the bottleneck long before dispatch did.
-//! - **ARM7TDMI: no.** The pessimistic, dispatch-bound `gba/spin` workload runs at 11.3x. Prompt 18's
-//!   stated GBA target is full speed *including* 2x and 4x fast-forward; 11.3x clears 4x with room
-//!   for the 8x nobody asked for. A JIT's correctness and maintenance cost is substantial and would
-//!   buy headroom that is already there.
+//! - **ARM7TDMI: no, and by a smaller margin than this file used to claim.** The pessimistic,
+//!   dispatch-bound `gba/spin` workload runs at 6.3x, not the 11.3x recorded before the cycle
+//!   accounting was fixed — the old figure was a machine executing a quarter of the instructions it
+//!   should have. Prompt 18's stated GBA target is full speed *including* 2x and 4x fast-forward, and
+//!   6.3x still clears 4x. The answer does not change, but the headroom behind it is half what it
+//!   was, so this is worth re-asking if the GBA ever gains work per frame.
 //! - **NDS: deferred, with nothing to measure.** Prompt 18 expects this to be the case that actually
 //!   needs help — two CPUs and a software 3D rasteriser — and prompt 13 has not been started. The
 //!   decision is not "no", it is "not yet measurable", and it must not be inherited from the two
@@ -103,7 +112,7 @@
 //! - **Checking in the CPU** cannot work — the CPU does not know which addresses are watched, and
 //!   teaching it would put the debugger inside the hot trait `core-common` keeps minimal.
 //!
-//! So the cost is accepted deliberately: 4.5% of an 11.3x margin, against watchpoints working in the
+//! So the cost is accepted deliberately: 4.5% of a 6.3x margin, against watchpoints working in the
 //! build people actually have. Recorded here as a **deviation from prompt 15's constraint**, with the
 //! number, rather than reported as compliance. Reproduce it by commenting out the two `record` calls
 //! in `system-gb`'s `read8`/`write8` (six in `system-gba`, which records its halfword I/O paths
@@ -118,7 +127,7 @@
 //!
 //! Deliberately. Prompt 18 requires every optimisation to be justified by a before/after benchmark,
 //! and the corollary is that an optimisation with no problem behind it should not be written. Every
-//! system meets its target with between 11x and 80x of margin. The workflow is here so that the first
+//! system meets its target with between 3x and 80x of margin. The workflow is here so that the first
 //! change that *does* need justifying can be justified — and so the APU finding above is on record for
 //! whoever eventually needs the Game Boy to be faster.
 
@@ -240,11 +249,24 @@ fn gb_rendering_audio_rom() -> Vec<u8> {
 ///
 /// The GBA's PPU work happens whether or not the program sets anything up, so this is not an "idle"
 /// case in the way the Game Boy's is — it is the baseline cost of a GBA frame.
+///
+/// # Why it ends in a branch
+///
+/// It did not, and for as long as the machine over-charged every memory access that did not show:
+/// a frame only got through about 7 900 instructions, so the program counter never reached the end
+/// of the 8 192 here. Once cycle accounting was fixed a frame ran 32 855 instructions, the run fell
+/// off the end of the cartridge, and 94% of what the benchmark timed was the CPU grinding through
+/// unmapped memory at one cycle an instruction. The number that produced was four times too slow
+/// and measured nothing anyone cares about. The branch keeps the workload inside the cartridge,
+/// which is the whole point of this case.
 fn gba_spin_rom() -> Vec<u8> {
     let mut rom = Vec::with_capacity(0x8000);
-    for _ in 0..0x2000 {
+    for _ in 0..0x1FFF {
         rom.extend_from_slice(&0xE3A0_0000u32.to_le_bytes());
     }
+    // `b -0x8000`, back to the first instruction. One non-sequential fetch every 8 191 sequential
+    // ones, so the case stays what it says it is: back-to-back sequential cartridge fetches.
+    rom.extend_from_slice(&0xEAFF_DFFEu32.to_le_bytes());
     rom
 }
 

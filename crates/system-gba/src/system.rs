@@ -17,9 +17,15 @@
 //!
 //! # Wait states are charged, not assumed
 //!
-//! Each access asks [`WaitControl`] what it cost and reports that through [`Bus::tick`], the
-//! same arrangement the Game Boy uses. A flat cost would make a game linked into the slow ROM
-//! window run at the speed of one linked into the fast one.
+//! Each access asks [`WaitControl`] what it cost, and the cycles it waited beyond the one the CPU
+//! core already counted are accumulated and charged with the instruction. A flat cost would make a
+//! game linked into the slow ROM window run at the speed of one linked into the fast one.
+//!
+//! Charging happens exactly once per access, in the [`Bus`] method the CPU called — see
+//! [`GbaSystemBus::charge`] for why both halves of that sentence are load-bearing. Getting either
+//! wrong does not fail a test: the emulator still produces frames at 100% speed, because a frame is
+//! a fixed number of cycles however few instructions fit inside it. What a game loses is processor
+//! time, and what that looks like is a title screen that never arrives.
 
 use cart_common::GbaHeader;
 use core_common::{
@@ -125,19 +131,47 @@ impl GbaSystemBus {
     /// A ROM access that continues from the previous address is cheaper, because the cartridge
     /// bus keeps its latch — so this tracks where the last one ended rather than asking the
     /// caller, which would mean every call site knowing about cartridge timing.
+    ///
+    /// # Why this adds one cycle less than the access costs
+    ///
+    /// The two halves of the machine's cycle count meet here, and they overlap by exactly one
+    /// cycle per access. The ARM7TDMI core reports an instruction as a count of S, N, and I
+    /// cycles summed at one each — so the *access itself* is already in the number
+    /// [`Cpu::step`](core_common::Cpu::step) returns. [`WaitControl::cost`] then reports what the
+    /// same access costs including that first cycle. Adding both charged every access twice.
+    ///
+    /// So the instruction's cost is `cpu_cycles + Σ(cost − 1)`: the core's own accounting, plus
+    /// the cycles each access *waited* beyond the one the core already counted. An ARM
+    /// data-processing instruction in internal WRAM then costs the 1 cycle hardware charges,
+    /// and the same instruction fetched from the cartridge at the default wait-state setting
+    /// costs 6, which is two 16-bit accesses at two wait states each.
+    ///
+    /// # Why this is called once per access and not once per byte
+    ///
+    /// A 32-bit access to a 16-bit bus is two bus cycles, and `cost` already says so. Charging
+    /// again inside the halfword and byte routing this decomposes into counted the same access up
+    /// to six times: a word read from internal WRAM cost 6 cycles rather than 1.
     fn charge(&mut self, addr: u32, width: u32) {
         let access = if addr == self.next_sequential {
             Access::Sequential
         } else {
             Access::NonSequential
         };
-        self.pending_waits += self.waits.cost(addr, width, access);
+        self.pending_waits += self.waits.cost(addr, width, access).saturating_sub(1);
         self.next_sequential = addr.wrapping_add(width);
     }
 
     /// Take the wait-state cycles owed since the last call.
     pub fn take_pending_waits(&mut self) -> u32 {
         std::mem::take(&mut self.pending_waits)
+    }
+
+    /// The address a following access would have to start at to count as sequential.
+    ///
+    /// Exposed so a test can say how many accesses actually happened, which is the only externally
+    /// visible trace of an access that should not have been made at all.
+    pub fn next_sequential_address(&self) -> u32 {
+        self.next_sequential
     }
 
     /// Advance every clocked subsystem and act on what they report.
@@ -335,53 +369,27 @@ fn step(addr: u32, step: crate::dma::AddressStep, unit: u32) -> u32 {
 
 impl Bus for GbaSystemBus {
     fn read8(&mut self, addr: u32) -> u8 {
-        let value = self.read8_routed(addr);
-        self.watch.record(addr, AccessKind::Read, value);
-        value
+        self.charge(addr, 1);
+        self.read8_routed(addr)
     }
 
     /// Recorded before the write lands, so the log holds what the CPU asked to store rather than what
     /// a register chose to keep.
     fn write8(&mut self, addr: u32, value: u8) {
-        self.watch.record(addr, AccessKind::Write, value);
+        self.charge(addr, 1);
         self.write8_routed(addr, value);
     }
 
     fn read16(&mut self, addr: u32) -> u16 {
         let addr = addr & !1;
         self.charge(addr, 2);
-        if Region::of(addr) == Region::Io {
-            let value = self.read_io16(addr).unwrap_or(0);
-            // As two byte entries, so every entry in the log means the same thing and a watchpoint's
-            // range arithmetic needs no special case for register width. Every other region reaches
-            // `read8` twice and is recorded there.
-            self.watch.record(addr, AccessKind::Read, value as u8);
-            self.watch
-                .record(addr + 1, AccessKind::Read, (value >> 8) as u8);
-            return value;
-        }
-        u16::from_le_bytes([self.read8(addr), self.read8(addr + 1)])
+        self.read16_routed(addr)
     }
 
     fn write16(&mut self, addr: u32, value: u16) {
         let addr = addr & !1;
         self.charge(addr, 2);
-        match Region::of(addr) {
-            Region::Io => {
-                self.watch.record(addr, AccessKind::Write, value as u8);
-                self.watch
-                    .record(addr + 1, AccessKind::Write, (value >> 8) as u8);
-                self.write_io16(addr, value);
-                if Self::is_dma_register(addr) {
-                    self.run_pending_dma();
-                }
-            }
-            Region::Rom { .. } => {}
-            Region::Sram => self.cartridge.write_save(addr, value as u8),
-            _ => {
-                self.memory.write16(addr, value);
-            }
-        }
+        self.write16_routed(addr, value);
     }
 
     /// A 32-bit access is two halfword accesses, never four byte accesses.
@@ -391,17 +399,23 @@ impl Bus for GbaSystemBus {
     /// across its halfword, so a word store would write each byte and then immediately overwrite
     /// it with the next. Storing 1 landed as 0. `gba-suite`'s memory test caught it on the
     /// third check; every 32-bit palette and VRAM write in every game would have been wrong.
+    ///
+    /// The decomposition goes through the *routing* helpers rather than through [`Bus::read16`],
+    /// because the width the wait-state table wants is the one the CPU asked for: `cost` already
+    /// knows a word on a 16-bit bus is two bus cycles, and charging the halves as well counted
+    /// every access twice more.
     fn read32(&mut self, addr: u32) -> u32 {
         let addr = addr & !3;
-        // The two halfword reads below charge themselves, and the second is sequential by
-        // construction — which is exactly what the wait-state table says a word access costs.
-        (self.read16(addr) as u32) | ((self.read16(addr.wrapping_add(2)) as u32) << 16)
+        self.charge(addr, 4);
+        (self.read16_routed(addr) as u32)
+            | ((self.read16_routed(addr.wrapping_add(2)) as u32) << 16)
     }
 
     fn write32(&mut self, addr: u32, value: u32) {
         let addr = addr & !3;
-        self.write16(addr, value as u16);
-        self.write16(addr.wrapping_add(2), (value >> 16) as u16);
+        self.charge(addr, 4);
+        self.write16_routed(addr, value as u16);
+        self.write16_routed(addr.wrapping_add(2), (value >> 16) as u16);
     }
 
     fn tick(&mut self, _cycles: Cycles) {
@@ -430,11 +444,79 @@ impl Bus for GbaSystemBus {
     }
 }
 
-/// The byte-access routing, split out so the recording in [`Bus::read8`] and [`Bus::write8`] happens
-/// in exactly one place each rather than in every arm of a region match.
+/// Routing without timing: where an access *goes*, separated from what it costs.
+///
+/// The split exists because the two answers have different shapes. A 32-bit access is one access to
+/// the wait-state table and two halfword accesses to the memory behind it, and before these were
+/// separated the decomposition charged the table again at every level — six times for a word.
+/// Charging happens once, in the [`Bus`] method the CPU called; everything below here only moves
+/// bytes and records them.
 impl GbaSystemBus {
+    /// An instruction word, read without charging for it or recording it.
+    ///
+    /// `None` where an instruction cannot be: I/O registers and the cartridge save window are the
+    /// two regions [`Bus::peek8`] refuses, because reading them has side effects.
+    fn peek16(&self, addr: u32) -> Option<u16> {
+        Some(u16::from_le_bytes([
+            self.peek8(addr)?,
+            self.peek8(addr + 1)?,
+        ]))
+    }
+
+    fn peek32(&self, addr: u32) -> Option<u32> {
+        Some((self.peek16(addr)? as u32) | ((self.peek16(addr + 2)? as u32) << 16))
+    }
+
+    fn read16_routed(&mut self, addr: u32) -> u16 {
+        if Region::of(addr) == Region::Io {
+            let value = self.read_io16(addr).unwrap_or(0);
+            // As two byte entries, so every entry in the log means the same thing and a watchpoint's
+            // range arithmetic needs no special case for register width.
+            self.watch.record(addr, AccessKind::Read, value as u8);
+            self.watch
+                .record(addr + 1, AccessKind::Read, (value >> 8) as u8);
+            return value;
+        }
+        u16::from_le_bytes([self.read8_routed(addr), self.read8_routed(addr + 1)])
+    }
+
+    fn write16_routed(&mut self, addr: u32, value: u16) {
+        match Region::of(addr) {
+            Region::Io => {
+                self.watch.record(addr, AccessKind::Write, value as u8);
+                self.watch
+                    .record(addr + 1, AccessKind::Write, (value >> 8) as u8);
+                self.write_io16(addr, value);
+                if Self::is_dma_register(addr) {
+                    self.run_pending_dma();
+                }
+            }
+            Region::Rom { .. } => {}
+            Region::Sram => self.cartridge.write_save(addr, value as u8),
+            _ => {
+                // Not the two byte writes: a byte written to palette RAM or VRAM is doubled across
+                // its halfword by the 16-bit bus quirk, so writing the halves in turn would leave
+                // the second overwriting the first.
+                self.watch.record(addr, AccessKind::Write, value as u8);
+                self.watch
+                    .record(addr + 1, AccessKind::Write, (value >> 8) as u8);
+                self.memory.write16(addr, value);
+            }
+        }
+    }
+
     fn read8_routed(&mut self, addr: u32) -> u8 {
-        self.charge(addr, 1);
+        let value = self.read8_inner(addr);
+        self.watch.record(addr, AccessKind::Read, value);
+        value
+    }
+
+    fn write8_routed(&mut self, addr: u32, value: u8) {
+        self.watch.record(addr, AccessKind::Write, value);
+        self.write8_inner(addr, value);
+    }
+
+    fn read8_inner(&mut self, addr: u32) -> u8 {
         match Region::of(addr) {
             Region::Io => {
                 // Registers are halfwords; a byte read takes its half of one.
@@ -451,8 +533,7 @@ impl GbaSystemBus {
         }
     }
 
-    fn write8_routed(&mut self, addr: u32, value: u8) {
-        self.charge(addr, 1);
+    fn write8_inner(&mut self, addr: u32, value: u8) {
         match Region::of(addr) {
             Region::Io => {
                 // A byte write to a halfword register is a read-modify-write, which matters for
@@ -534,6 +615,15 @@ impl GbaSystem {
     /// after 84,701 correct instructions of `gba-suite`.
     ///
     /// With a real BIOS supplied this does nothing and the exception is taken normally.
+    ///
+    /// # Why the opcode is peeked rather than read
+    ///
+    /// This runs before *every* instruction, and it is only asking a question — the CPU is about to
+    /// fetch the same word itself. Reading it through the bus fetched it twice: charged twice
+    /// against the wait-state table, latched into the cartridge's sequential-access address twice,
+    /// and recorded in the watchpoint log twice. That doubling was most of why an ARM instruction in
+    /// internal WRAM cost 13 cycles instead of 1, which starved every commercial game of about nine
+    /// tenths of its processor.
     fn intercept_bios_call(&mut self) -> bool {
         if self.bus.memory.has_bios() {
             return false;
@@ -548,7 +638,9 @@ impl GbaSystem {
         // makes. Pokémon Emerald ran at full speed with a black screen for exactly this reason:
         // its first BIOS call fell through to an unmapped vector and the machine sat there.
         let (comment, width) = if self.cpu.is_thumb() {
-            let opcode = self.bus.read16(pc & !1);
+            let Some(opcode) = self.bus.peek16(pc & !1) else {
+                return false;
+            };
             // `1101 1111 imm8`. One encoding, no condition field, and the comment is the low
             // byte — there is nothing to guess at here.
             if opcode & 0xFF00 != 0xDF00 {
@@ -556,7 +648,9 @@ impl GbaSystem {
             }
             ((opcode & 0xFF) as u8, 2)
         } else {
-            let opcode = self.bus.read32(pc & !3);
+            let Some(opcode) = self.bus.peek32(pc & !3) else {
+                return false;
+            };
             // `cond 1111 imm24`. Bits 24-27 identify the instruction; the 24 below them are the
             // comment, so the mask must not reach into them. Only the always-condition is
             // handled: a conditional `SWI` is vanishingly rare and would need the flag check

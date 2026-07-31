@@ -28,7 +28,7 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ⚠️ | ✅ | Passes all three `gba-suite` ROMs and runs homebrew at a measured 100% speed. **A commercial game does not yet reach its title screen** — see below. BIOS calls work in both instruction sets, decompressors included. No PSG mixing, mosaic, or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **Pokémon Emerald boots through its intro to the title screen**, with backgrounds, sprites, and affine effects — see below for what is still wrong there. BIOS calls work in both instruction sets, decompressors included. No PSG mixing, mosaic, or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
 **All four systems boot with picture and sound.** The Game Boy and Game Boy Color are the two
@@ -39,27 +39,54 @@ viewer, breakpoints, and watchpoints.
 
 ### Where the Game Boy Advance actually is
 
-`gba-suite`'s three ROMs pass, hand-built homebrew runs at a measured 100% speed, and the
-component list below is genuinely implemented. But a **commercial game does not yet reach its
-title screen**, and that is worth stating plainly rather than leaving to be discovered.
+`gba-suite`'s three ROMs pass, and **Pokémon Emerald now boots through the GAME FREAK logo, the
+full intro sequence, and the Rayquaza scene to its title screen** — backgrounds, sprites, affine
+scaling, palette fades, and the M4A sound driver all running.
 
-Pokémon Emerald was the test case. It used to run at full speed with a black screen and no error
-output at all; three bugs were behind that, all now fixed — the BIOS interception ignored Thumb
-(which is what almost every commercial game is compiled to), the interrupt HLE skipped the BIOS's
-return wrapper so the machine took exactly one interrupt and then none, and eleven BIOS calls were
-missing including all five decompressors. It now executes game code with interrupts working,
-enables a background layer, and draws its intro sequence — then stops short of the title screen.
+Getting there took four bugs, and the fourth was the interesting one. The first three were the
+BIOS interception ignoring Thumb (which is what almost every commercial game is compiled to), the
+interrupt HLE skipping the BIOS's return wrapper so the machine took exactly one interrupt and
+then none, and eleven missing BIOS calls including all five decompressors. Fixing those got the
+intro drawing and no further.
 
-Whatever remains is a *specific* further gap rather than a mystery, and the tool for finding it is
-already here:
+The fourth was **the machine charging every memory access between three and six times over**. An
+ARM instruction in internal WRAM cost 13 cycles where hardware charges 1, and 49 from the
+cartridge where hardware charges 6. Nothing failed: every test passed, and the emulator still ran
+at a measured 100% speed, because *a frame is a fixed number of cycles however few instructions
+fit inside it*. What the game lost was about nine tenths of its processor — its sound mixer alone
+took 92% of every frame, and its main loop got seven iterations in the time it should have had a
+hundred and sixty. That looks exactly like a hang, and it is why the title screen never arrived.
+
+Three things compounded to produce it, all now fixed and pinned by
+`an_instruction_costs_what_the_hardware_charges_for_it`:
+
+- The `SWI` interception fetched the opcode through the bus before every instruction, so the CPU's
+  own fetch was the *second* read of the same word. It peeks now.
+- `read32` charged, then delegated to two `read16`s that charged, which delegated to four `read8`s
+  that charged. Charging now happens once, in the `Bus` method the CPU called; everything below it
+  only moves bytes.
+- The wait-state table reports an access's *whole* cost including its first cycle, and the CPU core
+  already counts that cycle in its S/N/I total. The two were added together. Only the waiting is
+  charged now.
+
+What is still wrong on the title screen: the "EMERALD" wordmark renders as a dither pattern rather
+than solid, and the sky behind it is the wrong hue. Both are colour-effect gaps rather than missing
+geometry — the alpha-blending note under "Smaller, well-defined items" in `AGENTS.md` is the first
+suspect.
+
+The tool for any of this is `state_dump`, and its companion for a machine that runs but gets
+nowhere is `trace_stall`:
 
 ```sh
 TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state
+TRACE_ROM=<rom> TRACE_FRAMES=600 cargo test -p system-gba --release -- --ignored --nocapture trace_stall
 ```
 
-That prints the program counter, `DISPCNT`, the interrupt registers, and the handler pointer at
-four points in a run. It is what turned "black screen" into three named bugs, and it is the first
-thing to reach for.
+The first prints the program counter, `DISPCNT`, the interrupt registers, and the handler pointer
+at seven points in a run. The second runs to a chosen frame and then profiles a window of
+instructions — hottest addresses disassembled in the right instruction set, a breakdown by 4 KiB
+page, and the per-instruction cycle cost. The cycle column is what made the fourth bug obvious in
+one line after reasoning from the picture had failed twice.
 
 ### What the Nintendo DS does and does not do
 
@@ -139,7 +166,7 @@ Component status:
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; not yet driven |
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
-| `system-gba` wait states — `WAITCNT`, per-region access cost | done and charged to the CPU per access |
+| `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds plus non-affine sprites draw; **affine sprites not yet composited** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` windows and colour blending | done and applied; alpha blending uses the backdrop as the lower layer |
@@ -398,7 +425,7 @@ that produced them rather than in prose that can drift from them.
 |---|---|---|
 | Game Boy, rendering | 246 µs | 68x |
 | Game Boy, rendering + four APU channels | 361 µs | 46x |
-| Game Boy Advance, ARM instructions straight from ROM | 1 486 µs | 11.3x |
+| Game Boy Advance, ARM instructions straight from ROM | 2 665 µs | 6.3x |
 | dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
 | Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
 | Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
@@ -412,7 +439,13 @@ Three findings worth surfacing:
   the Game Boy ever needs to be faster.
 - **No dynamic recompiler, for either CPU core**, on the evidence rather than by preference. A dynarec
   replaces dispatch and nothing else, and the worst measured workload on each system already runs at
-  46x and 11.3x real time.
+  46x and 6.3x real time.
+
+  The GBA figure was 11.3x until 2026-07-31 and that number was not real: the machine charged every
+  memory access three to six times over, so the same benchmark ROM got through a quarter of the
+  instructions it should have. The emulator was not fast, the emulated machine was slow, and a frame
+  is a fixed number of cycles either way. The decision does not change at 6.3x, but half the headroom
+  behind it was imaginary.
 - **The Nintendo DS has a fifth of the margin the GBA does, and prompt 18 was right about it.** At
   3.2x real time against the other systems' 11x to 80x, it is by a wide margin the tightest — and
   that is *without* the 3D core. The dynarec question stays open for it rather than being inherited
@@ -425,13 +458,13 @@ Three findings worth surfacing:
   decodes. Reading and writing RAM at its real width dropped a frame from 15.2 ms to 5.28 ms, a
   **65% reduction**, measured before and after with `cargo bench -p harness --bench systems`. That
   is the only optimisation in the project so far, and it had a measured problem behind it.
-- **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame and +4.5% of a GBA
-  one and +3.7% of a DS one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
+- **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame, +4.5% of a GBA one,
+  and +3.7% of a DS one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
   overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
   leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
   deliberate deviation with the number, not as compliance.
 
-Nothing has been optimised, deliberately: every system meets its target with 11x to 80x of margin, and
+Nothing has been optimised, deliberately: every system meets its target with 3x to 80x of margin, and
 an optimisation with no problem behind it is not worth its own risk.
 
 ## Architecture
