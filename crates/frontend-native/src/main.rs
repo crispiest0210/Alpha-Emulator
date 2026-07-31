@@ -81,7 +81,7 @@ fn main() -> Result<()> {
 const USAGE: &str = "\
 alpha-emulator [OPTIONS] [ROM]
 
-  ROM                 A .gb, .gbc, or .gba file to import and start playing.
+  ROM                 A .gb, .gbc, .gba, or .nds file to import and start playing.
   --data-dir <PATH>   Use this directory for the library, saves, states, and config
                       instead of the OS-appropriate one.
   --help              Print this and exit.

@@ -144,7 +144,7 @@ fn rom_list(
         ui.label("Nothing imported yet.");
         ui.label(
             egui::RichText::new(
-                "Drop a .gb, .gbc, or .gba file onto the window, or paste a folder path above.",
+                "Drop a .gb, .gbc, .gba, or .nds file onto the window, or paste a folder path above.",
             )
             .small()
             .weak(),

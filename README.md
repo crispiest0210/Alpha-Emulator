@@ -8,52 +8,72 @@ third-party emulator embedded as a black box, and no browser engine in the rende
 Rendering is native GPU (`wgpu` + `winit`), audio is `cpal` fed from a lock-free ring buffer,
 and the emulation core is a pure library with zero UI-framework dependency.
 
+## Quick start
+
+```sh
+cargo xtask setup                       # checks your machine; on Linux it names two packages to install
+cargo xtask dev -- path/to/rom.gba      # build, then play
+```
+
+That is the whole thing on macOS and Windows. The first build takes a few minutes. Bring your own
+ROM — none are included here and none ever will be. **[SETUP.md](SETUP.md)** has the full guide:
+controls, per-OS packages, where saves go, and what to do when something goes wrong.
+
 ## Status
 
-This project is in early development. The table below reflects what is **actually implemented
-and tested**, not what is planned. It is updated as work lands.
+There are no released builds yet, but all four systems run. The table below reflects what is
+**actually implemented and tested**, not what is planned, and is updated as work lands.
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines and the 3D core, plays its sixteen sound channels, and keeps saves. A lower accuracy bar than the rest — see below |
+| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
-**All four systems boot with picture and sound; three are fully playable.** `cargo xtask dev` opens a window with a ROM
-library, plays a cartridge with video, audio, and keyboard input, and supports quicksave,
-quickload, rewind, an HUD, a keybind editor, screenshots, and an in-app debugger — registers,
-disassembly, memory, execution breakpoints, and read/write watchpoints.
+**All four systems boot with picture and sound; three are fully playable.** The application has a
+ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
+a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
+viewer, breakpoints, and watchpoints.
 
 ### What the Nintendo DS does and does not do
 
-Prompt 13 is explicit that its v1 bar is "boots and runs a meaningful set of commercial-quality
-homebrew and simple commercial titles correctly", not parity. This is the start of DS support.
+DS support is real but newer, and is the start of DS emulation here rather than the end of it. The
+bar it was built to is "runs good homebrew and simple commercial titles correctly", not parity with
+hardware.
 
-**Implemented:** the **3D core** — the full geometry command set, four matrix stacks, four-light
-vertex lighting, clipping against all six frustum planes, a perspective-correct software
-rasteriser with a 24-bit depth buffer, all seven texture formats including 4x4 compression, and
-compositing into engine A's BG0 through the ordinary blend unit; sixteen-channel sound — PCM8, PCM16, IMA-ADPCM, the six PSG square channels and
-the two noise channels, with per-channel rate, volume, volume divider, panning, and loop modes,
-mixed to the frontend's 48 kHz; the dual-CPU memory map including the runtime-configurable
-shared-WRAM split; the **cartridge save chip**, whose type is worked out from how the game talks
-to it and which writes no file at all until it is sure; all
-nine VRAM banks and every mapping their control registers can select; both 2D engines with
-background modes 0-5 (text, affine, and all three extended types), sprites at 4 and 8 bpp in both
-mapping arrangements with flips, affine, double-size, semi-transparent, bitmap and object-window
-modes, extended palettes, windows, alpha blending, brightness effects and master brightness;
-IPCSYNC and both FIFOs; both interrupt controllers; eight timers; eight DMA channels; the keypad
-and the touchscreen behind the ARM7's SPI bus; the Slot-1 card transfer interface; direct boot;
-and save states covering all of it.
+**Implemented:**
+
+- **Both CPUs**, interleaved deterministically on one thread, with the runtime-configurable
+  shared-WRAM split and two genuinely different views of memory.
+- **All nine VRAM banks** and every mapping their control registers can select, including two banks
+  claiming one address at once.
+- **Both 2D engines** — background modes 0-5 (text, affine, and all three extended types), sprites
+  at 4 and 8 bits per pixel in both mapping arrangements with flips, rotation, scaling, semi-
+  transparency, bitmap and object-window modes, extended palettes, windows, alpha blending,
+  brightness effects, and master brightness.
+- **The 3D core** — the full geometry command set, four matrix stacks, four-light vertex lighting,
+  clipping against all six frustum planes, a perspective-correct software rasteriser with a 24-bit
+  depth buffer, all seven texture formats including 4x4 compression, and compositing into the 2D
+  layers through the ordinary blend unit.
+- **Sixteen-channel sound** — PCM8, PCM16, IMA-ADPCM, six square-wave channels and two noise
+  channels, with per-channel rate, volume, panning, and loop modes.
+- **The cartridge save chip.** Which chip a cartridge has is not in its header, so it is worked out
+  from how the game talks to it — and nothing is written to disk until that is certain, because a
+  save file of the wrong shape is worse than none.
+- **Input**: the keypad, the two extra buttons only the ARM7 can see, and the touchscreen.
+- IPC (both FIFOs and `IPCSYNC`), both interrupt controllers, eight timers, eight DMA channels, the
+  cartridge transfer interface, direct boot, and save states covering all of it.
 
 **Not implemented, and visibly so rather than approximated:**
 
-- **3D refinements**, which prompt 13 explicitly ranks below geometry and texturing: fog, edge
-  marking, anti-aliasing, shadow polygons (mode 3 renders as ordinary geometry), and the toon and
-  highlight tables (mode 2 falls back to modulation). `BOX_TEST` always answers "visible", because
-  answering "hidden" wrongly removes geometry unrecoverably while answering "visible" wrongly only
-  costs work. The geometry FIFO is reported as never full: hardware stalls the CPU when it fills,
-  and nothing in this project's `Bus` contract can express a bus that blocks a CPU mid-instruction.
+- **3D refinements**, ranked below getting the geometry and textures right: fog, edge marking,
+  anti-aliasing, shadow polygons (which render as ordinary geometry), and the toon and highlight
+  tables (which fall back to plain texturing). `BOX_TEST` always answers "visible" — answering
+  "hidden" wrongly makes geometry disappear with no way to recover it, while answering "visible"
+  wrongly only costs a little work. The geometry command queue is reported as never full, because
+  real hardware stalls the CPU when it fills and nothing in this codebase's bus interface can
+  express a bus that blocks a CPU part-way through an instruction.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
   card present looks like.
 - Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
@@ -229,19 +249,22 @@ Until then, build it: see below.
 
 ## Setup
 
-Requires a Rust toolchain (installed via [rustup](https://rustup.rs); the pinned version is
-selected automatically from `rust-toolchain.toml`).
+You need a Rust toolchain ([rustup](https://rustup.rs) — the pinned version is selected
+automatically) and a ROM file you own. On Linux you also need two sets of development headers,
+which `cargo xtask setup` names for you.
 
 ```sh
-cargo xtask setup                       # checks for required system packages, tells you what to install
-cargo xtask dev                         # build and run the native frontend
-cargo xtask dev -- path/to/rom.gb       # …and start playing a cartridge straight away
+cargo xtask setup                       # checks your machine, prints anything missing
+cargo xtask dev -- path/to/rom.gba      # build, then open that cartridge
+cargo xtask dev                         # …or open with no cartridge and drag one in
 ```
 
-`cargo xtask setup` never downloads or vendors a binary into the repository — if a system
-package is missing it prints the exact `apt`/`dnf`/`pacman` command and exits non-zero.
+The first build takes a few minutes; later ones take seconds. `cargo xtask setup` never downloads
+or vendors a binary into the repository — if a system package is missing it prints the exact
+`apt`/`dnf`/`pacman` command and exits non-zero.
 
-See [SETUP.md](SETUP.md) for per-OS detail.
+**[SETUP.md](SETUP.md) is the full guide**: per-OS packages, controls, where your saves go, and what
+to do when something goes wrong.
 
 ## Developer tasks
 
@@ -279,9 +302,10 @@ contributor needs here is `//!` prose beside the code it describes, so it is wor
 
 ### Playing a game
 
-`cargo xtask dev` opens the application. Drop a `.gb`, `.gbc`, or `.gba` file onto the window — or
+`cargo xtask dev` opens the application. Drop a `.gb`, `.gbc`, `.gba`, or `.nds` file onto the window — or
 paste its path into the library panel's import box — and it is indexed and starts playing. A ROM
-named on the command line does the same in one step.
+named on the command line does the same in one step. On a DS game the lower screen is the
+touchscreen: click and drag on it with the mouse.
 
 The library is a SQLite index, not a directory scan, and that distinction is load-bearing: a title
 you correct, a play count, and a save-state list all survive the file being moved to another folder,
@@ -299,6 +323,7 @@ greyed out and keep their history rather than vanishing.
 | `Backspace` (held) | Rewind |
 | `F1` | HUD |
 | `F2` / `F3` | Quicksave / quickload (slot 0) |
+| `F9` | Debugger panel |
 | `F11` / `F12` | Fullscreen / screenshot |
 | `Escape` | Reset |
 

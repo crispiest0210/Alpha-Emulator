@@ -5,8 +5,9 @@ workflow and the architectural principles this codebase has settled on.
 
 ## Getting started
 
+[SETUP.md](SETUP.md) gets you from a clone to a running emulator. Once that works:
+
 ```sh
-cargo xtask setup    # verifies host system packages, prints install commands if any are missing
 cargo xtask build
 cargo xtask test
 cargo xtask lint     # run this before opening a PR; CI runs exactly the same commands

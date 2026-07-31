@@ -1,43 +1,107 @@
 # Setup
 
-## The short version
+Getting from a fresh clone to playing a cartridge. Three commands on most machines.
+
+## What you need
+
+- **A Rust toolchain**, installed with [rustup](https://rustup.rs). Nothing else — the exact
+  compiler version is pinned in `rust-toolchain.toml` and rustup picks it up on its own. Do not
+  install a specific version by hand and do not override it.
+- **On Linux only**, two sets of development headers. See [Linux](#linux) below; `cargo xtask setup`
+  will tell you exactly which and print the command.
+- **A ROM file you own.** None are included here and none ever will be — see
+  [Where ROMs come from](#where-roms-come-from).
+
+## Get playing
 
 ```sh
-cargo xtask setup
+git clone <this repository>
+cd Alpha-Emulator
+
+cargo xtask setup                          # checks your machine, prints anything missing
+cargo xtask dev -- ~/roms/mygame.gba       # build, then open that cartridge
 ```
 
-That checks your host for everything the build needs and, if something is missing, prints the
-exact install command for your package manager and exits non-zero. It never downloads or
-vendors a binary into the repository — a deliberate constraint, so nothing in `target/` or the
-working tree can ever depend on a library that arrived outside your package manager.
+`cargo xtask setup` prints one `ok` line per requirement and finishes with
+`All required dependencies present.` If something is missing it prints the exact `apt`, `dnf`, or
+`pacman` command for your system and stops. It never downloads anything into the repository.
 
-If it prints nothing but a success line, you are ready:
+It also lists a few optional developer tools as `absent`. Those are for working on the emulator,
+not for playing — you can ignore them.
+
+**The first build takes a few minutes** — it is compiling a GPU stack and an audio stack from
+source. Later builds take seconds.
+
+Leave off the ROM path to open the application with no cartridge:
 
 ```sh
 cargo xtask dev
 ```
 
-## Toolchain
+Then drag a ROM onto the window, or paste its path into the library panel's import box. Either way
+it is added to your library and starts playing.
 
-A Rust toolchain via [rustup](https://rustup.rs). The version is pinned in
-`rust-toolchain.toml` and rustup selects it automatically — you do not need to install a
-specific version by hand, and you should not override it.
+## Which files work
 
-Nothing else is required on any platform beyond the per-OS notes below.
+| Extension | System | State |
+|---|---|---|
+| `.gb` | Game Boy | Fully playable |
+| `.gbc` | Game Boy Color | Fully playable |
+| `.gba` | Game Boy Advance | Fully playable |
+| `.nds` | Nintendo DS | **Partial** — see below |
 
-## Per-OS
+Nintendo DS support is real but newer: games boot, both screens draw in 2D and 3D, sound plays, and
+saves work. It is held to a lower accuracy bar than the other three and some games will misbehave.
+`README.md` lists exactly what is and is not implemented.
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `W` `A` `S` `D` | D-pad |
+| `Space` / `R` | A / B |
+| `T` / `G` / `Q` / `E` | X / Y / L / R (GBA and DS) |
+| `Enter` / `Left Shift` | Start / Select |
+| `P` | Pause |
+| `Tab` (held) | Fast-forward |
+| `Backspace` (held) | Rewind |
+| `F1` | Show the HUD |
+| `F2` / `F3` | Quicksave / quickload |
+| `F9` | Debugger panel |
+| `F11` / `F12` | Fullscreen / screenshot |
+| `Escape` | Reset |
+
+All rebindable in the **Keys** panel. Bindings follow physical key *positions*, so a non-QWERTY
+layout puts them under the same fingers rather than under the same letters.
+
+On the DS, the bottom screen is the touchscreen — click and drag on it with the mouse.
+
+## Where your files go
+
+Saves, save states, settings, and the library index are written to the standard per-user
+application-data directory for your OS. The exact paths are printed in the first two lines of
+output when the application starts.
+
+To keep everything somewhere else — useful for trying a build without touching your real library:
+
+```sh
+cargo run -p frontend-native -- --data-dir /tmp/scratch ~/roms/mygame.gba
+```
+
+Settings and keybindings are plain TOML and safe to edit by hand.
+
+## Per-OS notes
 
 ### macOS
 
-Nothing to install. The system frameworks that `cpal` (audio) and `wgpu`/`winit` (window and
-GPU) need ship with the OS. Xcode Command Line Tools are needed for the linker, and rustup
-prompts for them if they are missing.
+Nothing to install. The frameworks the window, GPU, and audio need ship with the OS. Xcode Command
+Line Tools are needed for the linker; rustup prompts for them if they are missing.
 
 ### Windows
 
-Nothing to install beyond the MSVC toolchain, which rustup installs as part of the default
-`x86_64-pc-windows-msvc` target. No MSYS2 or vcpkg step — the graphics and audio backends bind
-to system DLLs directly.
+Nothing to install beyond the MSVC toolchain, which rustup sets up as part of the default
+`x86_64-pc-windows-msvc` target. No MSYS2 and no vcpkg — the graphics and audio backends bind to
+system DLLs directly.
 
 ### Linux
 
@@ -45,10 +109,10 @@ Two groups of development headers, because two crates link against system librar
 
 | What | Why |
 |---|---|
-| ALSA development headers | `cpal` opens the audio device through ALSA |
-| X11 or Wayland client headers | `winit` creates the window |
+| ALSA development headers | audio output |
+| X11 **or** Wayland client headers | creating the window |
 
-`pkg-config` itself is required — that is how the build locates both.
+`pkg-config` is required too — that is how the build finds both.
 
 ```sh
 # Debian / Ubuntu
@@ -64,49 +128,62 @@ sudo pacman -S alsa-lib pkgconf
 sudo pacman -S libx11 libxkbcommon wayland
 ```
 
-X11 **or** Wayland is enough — `cargo xtask setup` accepts either, and `winit` picks whichever
-your session is running.
+X11 **or** Wayland is enough. `winit` uses whichever your session is running.
 
-These are the same commands `cargo xtask setup` prints, and the same packages CI installs. If
-you change one, change all three: `xtask/src/main.rs`, this file, and
-`.github/workflows/ci.yml`.
+These are the same commands `cargo xtask setup` prints and the same packages CI installs. If you
+change one, change all three: `xtask/src/main.rs`, this file, and `.github/workflows/ci.yml`.
 
-## Test ROMs
+## Where ROMs come from
 
-The accuracy suite runs against test ROMs that are **fetched, never committed**:
+**Yours.** Dump the cartridges you own, or use freely-licensed homebrew. This repository contains no
+commercial ROM, references none, and fetches none, and that is a hard constraint rather than a
+current state of affairs.
 
-```sh
-cargo xtask fetch-test-roms
-cargo xtask test --accuracy
-```
+### Boot ROMs and BIOS images
 
-`testing/test-roms/` is gitignored and nothing in it is ever committed. Without the fetch the
-accuracy tests skip cleanly rather than failing, so a normal `cargo xtask test` works on a
-fresh clone with no network.
+You do not need one. Every system here starts from the documented post-boot register and memory
+state, worked out from community hardware research rather than from any copyrighted image. Supply a
+real boot ROM and it will be used instead; leave it out and everything still runs.
 
-No commercial ROM is vendored, referenced, or fetched by anything in this repository, under any
-circumstance.
+**None is included here and none will be** — their licensing status is not something this project is
+willing to assume is clear.
 
-## Boot ROMs
-
-Every system runs without one. Supply a real boot ROM and it will be used; omit it and the
-emulator jumps straight to the documented post-boot register and memory state, which is derived
-from community hardware research rather than from any copyrighted image.
-
-**No boot ROM is vendored in this repository**, and none will be — their licensing status is
-not something this project assumes is clear.
-
-## Troubleshooting
+## When something goes wrong
 
 **`cargo xtask setup` says a package is missing that I have installed.**
-It asks `pkg-config`, so the *development* package (the one with headers and a `.pc` file) has
-to be installed, not just the runtime library. On Debian-family distributions that is the
-`-dev` suffix; on Fedora, `-devel`.
+It asks `pkg-config`, so the *development* package — headers and a `.pc` file — has to be installed,
+not just the runtime library. Debian-family distributions suffix those `-dev`; Fedora uses `-devel`.
 
-**The build fails linking ALSA on a headless Linux box.**
-The headers are needed even if you never play audio, because `cpal` is compiled in. Install
-`libasound2-dev` (or your distribution's equivalent) — you do not need a sound card.
+**The build fails linking ALSA on a machine with no sound card.**
+The headers are needed regardless, because the audio backend is compiled in either way. Install
+`libasound2-dev` or your distribution's equivalent; you do not need working audio hardware.
+
+**macOS or Windows warns that the application is unsigned.**
+Expected. Nothing here is code-signed or notarised. It is not a sign the build is damaged.
+
+**A game runs but looks or sounds wrong.**
+Check `README.md`'s status tables first — several behaviours are knowingly unimplemented and each is
+listed there rather than left for you to discover. Nintendo DS games in particular are held to a
+lower bar than the rest.
 
 **Something else.**
-`cargo xtask lint` runs exactly what CI runs, so a green local lint and a red CI job means the
+`cargo xtask lint` runs exactly what CI runs. A green local lint with a red CI job means the
 difference is environmental rather than in your change.
+
+## For contributors
+
+Everything above is enough to play. To work on the emulator:
+
+```sh
+cargo xtask test              # unit tests
+cargo xtask lint              # exactly what CI runs — do this before opening a PR
+cargo xtask fetch-test-roms   # the accuracy corpus; never committed, gitignored
+cargo xtask test --accuracy   # the accuracy suite, once the corpus is fetched
+cargo xtask bench             # performance measurements
+```
+
+Without the fetch, the accuracy tests skip cleanly rather than failing, so a plain
+`cargo xtask test` works on a fresh clone with no network.
+
+Read `CONTRIBUTING.md` for the conventions and `AGENTS.md` for the architecture and the reasoning
+behind it.
