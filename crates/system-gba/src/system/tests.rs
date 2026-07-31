@@ -492,12 +492,16 @@ fn dump_state() {
     let rom = std::fs::read(&path).expect("the ROM");
     let mut system = GbaSystem::new(rom, None).expect("a cartridge");
     let mut run = 0u32;
-    for target in [1u32, 10, 60, 200, 400, 600, 900] {
+    for target in [1u32, 60, 400, 1500, 2400, 4400] {
         while run < target {
             system.step_frame(InputState::default());
             run += 1;
         }
-        println!("--- after {target} frames ---\n{}", system.state_dump());
+        println!(
+            "--- after {target} frames ---\n{}{}",
+            system.state_dump(),
+            system.graphics_dump()
+        );
     }
 }
 

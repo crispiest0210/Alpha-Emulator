@@ -523,3 +523,96 @@ fn a_double_size_affine_sprite_covers_twice_the_area() {
     assert_eq!(framebuffer.pixel(0, 4).b, 0xFF, "the margin, horizontally");
     assert_eq!(framebuffer.pixel(6, 4).g, 0xFF, "and the artwork inside it");
 }
+
+#[test]
+fn an_alpha_blend_mixes_with_the_layer_underneath_rather_than_the_backdrop() {
+    // The general case, which used to be approximated by the backdrop because the scanline buffer
+    // keeps only the winning pixel. On Pokémon Emerald's title screen that approximation blended
+    // the whole sky and the Rayquaza artwork against black, so the screen came out brown with no
+    // artwork visible at all — a complete, plausible, wrong picture rather than a missing one.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // the layers' colour index
+    scene.simple_layer(1, 0, 8); // BG1 in front
+    scene.simple_layer(0, 1, 9); // BG0 behind it
+
+    // Half of BG1 over half of whatever is below, and BG0 is the only declared lower target.
+    scene.effects.write16(
+        ereg::BLDCNT,
+        Layer::Bg1.bit() | (1 << 6) | (Layer::Bg0.bit() << 8),
+    );
+    scene.effects.write16(ereg::BLDALPHA, 8 | (8 << 8));
+
+    let blended = scene.render(0).pixel(0, 0);
+    assert_eq!(
+        (blended.r, blended.g, blended.b),
+        (0xFF, 0, 0),
+        "red over red is red; against the blue backdrop it would have come out purple"
+    );
+}
+
+#[test]
+fn an_alpha_blend_is_skipped_when_the_layer_underneath_is_not_a_second_target() {
+    // Hardware writes the top pixel through unchanged rather than blending it with something it
+    // was not told to blend with. Blending anyway is how a layer ends up mixed with the backdrop.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(1, 0, 8);
+    scene.simple_layer(0, 1, 9);
+
+    // BG1 blends, but only against BG2 — which is not in this scene, so nothing blends.
+    scene.effects.write16(
+        ereg::BLDCNT,
+        Layer::Bg1.bit() | (1 << 6) | (Layer::Bg2.bit() << 8),
+    );
+    scene.effects.write16(ereg::BLDALPHA, 0);
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "with both weights at zero, a blend that happened would be black"
+    );
+}
+
+#[test]
+fn a_256_colour_sprite_is_one_byte_a_pixel() {
+    // Bit 13 of attribute 0. Every GBA sprite used to be decoded as 16-colour whatever this said,
+    // and a 256-colour one then came out as a stretched checkerboard — each byte read as two
+    // 4-bit indices — which reads as a corrupt tile rather than as a missing feature. Pokémon
+    // Emerald's "EMERALD VERSION" wordmark is drawn this way.
+    const EIGHT_BIT: u16 = 1 << 13;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(256 + 0x11, GREEN); // sprite palette, colour index 0x11
+
+    // One byte per pixel: 0x11 in all eight columns of every row, which a 4bpp decode would read
+    // as colour 1 in sixteen half-width columns instead.
+    let base = crate::objects::OBJ_TILE_BASE;
+    for byte in 0..64 {
+        scene.vram[base + byte] = 0x11;
+    }
+    scene.oam[0..2].copy_from_slice(&EIGHT_BIT.to_le_bytes());
+    scene.oam[2..4].copy_from_slice(&0u16.to_le_bytes());
+    scene.oam[4..6].copy_from_slice(&0u16.to_le_bytes());
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+    );
+
+    let frame = scene.render(0);
+    for x in 0..8 {
+        assert_eq!(
+            frame.pixel(x, 0).g,
+            0xFF,
+            "column {x} should be the 8-bit index 0x11"
+        );
+    }
+    assert_eq!(
+        frame.pixel(8, 0).b,
+        0xFF,
+        "and the sprite is 8 pixels wide, not 16"
+    );
+}

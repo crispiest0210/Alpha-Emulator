@@ -195,6 +195,9 @@ impl Object {
     /// pixel, which [`Sprite`] does not describe.
     pub fn to_sprite(&self, one_dimensional: bool) -> Sprite {
         Sprite {
+            // 16 or 256 colours, per sprite. One scanline can hold both, which is why this rides on
+            // the sprite rather than on the call.
+            depth: self.depth,
             x: self.x,
             y: self.y,
             width: self.width,

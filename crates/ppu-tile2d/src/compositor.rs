@@ -190,6 +190,14 @@ pub struct Sprite {
     /// 32-tile-wide sheet that each sprite is a window onto, and then the next row is a fixed
     /// distance away regardless of the sprite's width — hence a field rather than a derivation.
     pub row_stride: usize,
+    /// How many bits each of this sprite's pixels takes.
+    ///
+    /// Per sprite rather than per call, because on the Game Boy Advance it genuinely varies: bit 13
+    /// of an OAM entry's first attribute selects 16 or 256 colours, and one scanline can hold both.
+    /// It was a parameter of [`render_sprites`], every GBA sprite was rendered as 16-colour, and a
+    /// 256-colour one came out as a stretched checkerboard — one byte read as two indices — which
+    /// looks like a corrupt tile rather than like an unimplemented feature.
+    pub depth: BitDepth,
 }
 
 /// Composite one scanline of sprites.
@@ -246,7 +254,6 @@ pub fn background_wins(
 pub fn render_sprites(
     sprites: &[Sprite],
     tile_data: &[u8],
-    depth: BitDepth,
     line: u32,
     rule: SpriteRule,
     out: &mut ScanlineBuffer,
@@ -272,6 +279,7 @@ pub fn render_sprites(
         let tile_index_in_sprite = row / 8;
         let row_in_tile = row % 8;
 
+        let depth = sprite.depth;
         for tile_column in 0..(sprite.width / 8) {
             // A horizontal flip reverses which tile column appears where, not just the
             // pixels inside each one.
@@ -585,6 +593,7 @@ mod tests {
 
     fn sprite_at(x: i32, y: i32) -> Sprite {
         Sprite {
+            depth: BitDepth::Two,
             x,
             y,
             width: 8,
@@ -605,7 +614,6 @@ mod tests {
         render_sprites(
             &[sprite_at(4, 0)],
             &tile,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -630,7 +638,6 @@ mod tests {
         render_sprites(
             &[sprite_at(0, 8)],
             &tile,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -645,7 +652,6 @@ mod tests {
         render_sprites(
             &[sprite_at(-4, 0)],
             &tile,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -667,7 +673,6 @@ mod tests {
         render_sprites(
             &[sprite_at(0, 0)],
             &tile,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -697,7 +702,6 @@ mod tests {
         render_sprites(
             &[front, behind],
             &tiles,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -735,7 +739,6 @@ mod tests {
                 ..sprite_at(0, 0)
             }],
             &sprite_tile,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -779,7 +782,6 @@ mod tests {
                 },
             ],
             &tiles,
-            BitDepth::Two,
             0,
             SpriteRule::SpriteDecides,
             &mut line,
@@ -805,25 +807,11 @@ mod tests {
         };
 
         let mut top = ScanlineBuffer::new(8);
-        render_sprites(
-            &[tall],
-            &tiles,
-            BitDepth::Two,
-            3,
-            SpriteRule::SpriteDecides,
-            &mut top,
-        );
+        render_sprites(&[tall], &tiles, 3, SpriteRule::SpriteDecides, &mut top);
         assert_eq!(top.get(0).color, 1, "the upper tile");
 
         let mut bottom = ScanlineBuffer::new(8);
-        render_sprites(
-            &[tall],
-            &tiles,
-            BitDepth::Two,
-            11,
-            SpriteRule::SpriteDecides,
-            &mut bottom,
-        );
+        render_sprites(&[tall], &tiles, 11, SpriteRule::SpriteDecides, &mut bottom);
         assert_eq!(bottom.get(0).color, 3, "the lower tile");
     }
 
@@ -839,14 +827,7 @@ mod tests {
         };
 
         let mut top = ScanlineBuffer::new(8);
-        render_sprites(
-            &[flipped],
-            &tiles,
-            BitDepth::Two,
-            3,
-            SpriteRule::SpriteDecides,
-            &mut top,
-        );
+        render_sprites(&[flipped], &tiles, 3, SpriteRule::SpriteDecides, &mut top);
         assert_eq!(top.get(0).color, 3, "the lower tile is now on top");
     }
 
@@ -863,14 +844,7 @@ mod tests {
         };
 
         let mut line = ScanlineBuffer::new(16);
-        render_sprites(
-            &[wide],
-            &tiles,
-            BitDepth::Two,
-            0,
-            SpriteRule::SpriteDecides,
-            &mut line,
-        );
+        render_sprites(&[wide], &tiles, 0, SpriteRule::SpriteDecides, &mut line);
         // Unflipped this would be tile 0 then tile 1; flipped it is the other way round.
         assert_eq!(line.get(0).color, 3);
         assert_eq!(line.get(8).color, 1);
@@ -953,16 +927,10 @@ mod tests {
         let sprite = Sprite {
             width: 16,
             height: 16,
+            depth: BitDepth::Four,
             ..sprite_at(0, 0)
         };
-        render_sprites(
-            &[sprite],
-            &tile,
-            BitDepth::Four,
-            8,
-            SpriteRule::SpriteDecides,
-            &mut line,
-        );
+        render_sprites(&[sprite], &tile, 8, SpriteRule::SpriteDecides, &mut line);
         assert_ne!(line.get(0).color, 0, "row 8 came from tile 2");
     }
 
@@ -978,16 +946,10 @@ mod tests {
             width: 16,
             height: 16,
             row_stride: 32 * 32,
+            depth: BitDepth::Four,
             ..sprite_at(0, 0)
         };
-        render_sprites(
-            &[sprite],
-            &tile,
-            BitDepth::Four,
-            8,
-            SpriteRule::SpriteDecides,
-            &mut line,
-        );
+        render_sprites(&[sprite], &tile, 8, SpriteRule::SpriteDecides, &mut line);
         assert_ne!(line.get(0).color, 0, "row 8 came from 32 tiles on");
     }
 }

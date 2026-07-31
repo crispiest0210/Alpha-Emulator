@@ -380,10 +380,6 @@ that cost real time", which is the one worth reading before touching any timing 
 
 What is left on the GBA is smaller and specific:
 
-- **The title screen's "EMERALD" wordmark renders as a dither pattern**, and the sky behind it is
-  the wrong hue. Both look like colour-effect gaps rather than missing geometry, so the alpha
-  blending item under "Smaller, well-defined items" — it uses the backdrop as the lower layer,
-  because the scanline buffer keeps only the winning pixel — is the first suspect.
 - **Nothing past the title screen has been looked at.** Pressing start, the save-file load, and the
   overworld are all unexercised. `EEPROM saves are reported absent rather than emulated` and
   Emerald is a FLASH cartridge, so the save path is the next thing likely to bite.
@@ -496,8 +492,12 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   depend on each other. It wants moving into `apu-shared`; the obstacle is that three of its
   behaviours are gated on `GbModel`, which would have to move or be narrowed. Duplicating it is
   the copy-paste this project exists to avoid.
-- **Alpha blending on the GBA** uses the backdrop as the lower layer, because the scanline buffer
-  keeps only the winning pixel. The general case needs a second buffer or a second pass.
+- **Alpha blending on the GBA** now composes its real lower layer, as a second pass over the line
+  with the first-target layers left out. A second `ScanlineBuffer` slot was rejected: that type is
+  shared with the Game Boy, which has no colour effects and would carry the runner-up pixel on every
+  line to no purpose. The pass runs only when an alpha blend is configured. It is exact unless two
+  first-target layers stack, where hardware blends the top with the second and this skips to the
+  third; nothing in the corpus does that.
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
 - **`OPRI` is not modelled.** A real CGB can be asked through it to order sprites by X coordinate —
   the DMG rule — while running in colour mode. Nothing reads it, so a game that sets it gets
@@ -508,6 +508,11 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
   rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
 - Mosaic, EEPROM saves, and the GBA's object window are not implemented.
+- **Sprite bit depth is per sprite, not per call.** It rides on `ppu_tile2d::Sprite` because bit 13
+  of a GBA OAM entry selects 16 or 256 colours and one scanline can hold both. It used to be an
+  argument to `render_sprites` and every GBA sprite was rendered as 16-colour; a 256-colour one came
+  out as a stretched checkerboard, one byte read as two indices, which looks like a corrupt tile
+  rather than an unimplemented feature. Pokémon Emerald's title wordmark is the case that found it.
 - **`cpu-arm946e`'s `TcmBus` used to decompose wide accesses**, because `Bus`'s default `read32`
   composes byte accesses and the wrapper did not override it. Invisible on a bus whose byte and wide
   behaviour agree, and fatal on the DS, where an ARM9 byte write to VRAM, palette RAM, or OAM is

@@ -156,13 +156,58 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     }
     draw_sprites(frame, line, &mut scanline);
 
+    // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass with
+    // the first-target layers left out, rather than by widening `ScanlineBuffer` to keep a
+    // runner-up: that buffer is shared with the Game Boy, which has no colour effects at all and
+    // would carry the second slot on every line to no purpose. The pass only runs when an alpha
+    // blend is actually configured, which is a small minority of lines.
+    //
+    // Exact whenever the layer directly beneath the top pixel is not itself a first target. Where
+    // two first-target layers stack, hardware blends the top with the second and this skips to the
+    // third. Nothing in the corpus does that, and the alternative is keeping every layer's pixel.
+    let under = (frame.effects.blend_mode() == BlendMode::Alpha).then(|| {
+        let mut under = ScanlineBuffer::new(SCREEN_WIDTH as usize);
+        under.clear();
+        for index in frame.backgrounds.draw_order(present) {
+            if frame.effects.is_first_target(Layer::background(index)) {
+                continue;
+            }
+            match kinds[index] {
+                Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut under),
+                Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut under),
+                _ => {}
+            }
+        }
+        if !frame.effects.is_first_target(Layer::Object) {
+            draw_sprites(frame, line, &mut under);
+        }
+        under
+    });
+
     let palette = GbaPalette {
         bytes: frame.palette,
     };
     let backdrop = palette.lookup_bg(0, 0);
     let row = framebuffer.row_mut(line);
     scanline.resolve_into(&palette, backdrop, row);
-    apply_effects(frame, line, &scanline, &palette, backdrop, row);
+    apply_effects(
+        frame,
+        line,
+        &scanline,
+        under.as_ref(),
+        &palette,
+        backdrop,
+        row,
+    );
+}
+
+/// Which layer a buffered pixel came from.
+fn layer_of(indexed: ppu_tile2d::IndexedPixel) -> Layer {
+    match indexed.source {
+        PixelSource::Sprite => Layer::Object,
+        PixelSource::Background => Layer::background(indexed.layer as usize),
+        PixelSource::Backdrop => Layer::Backdrop,
+    }
 }
 
 /// Mask out layers a window excludes, then blend what remains.
@@ -174,6 +219,7 @@ fn apply_effects(
     frame: &Frame<'_>,
     line: u32,
     scanline: &ScanlineBuffer,
+    under: Option<&ScanlineBuffer>,
     palette: &GbaPalette<'_>,
     backdrop: Rgba8,
     row: &mut [u8],
@@ -190,11 +236,7 @@ fn apply_effects(
 
     for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
         let indexed = scanline.get(x);
-        let layer = match indexed.source {
-            PixelSource::Sprite => Layer::Object,
-            PixelSource::Background => Layer::background(indexed.layer as usize),
-            PixelSource::Backdrop => Layer::Backdrop,
-        };
+        let layer = layer_of(indexed);
 
         // The object window is a sprite's *shape* used as a region; sprites drawn into it are
         // not yet distinguished from ordinary ones, so it is reported as never covering rather
@@ -214,16 +256,25 @@ fn apply_effects(
             b: pixel[2],
             a: pixel[3],
         };
-        // An alpha blend needs what is underneath. The scanline buffer keeps only the winning
-        // pixel, so the backdrop stands in — enough for the common case of a layer blended over
-        // the background colour, and honest about not being more than that.
-        let under = if mode == BlendMode::Alpha {
-            let _ = palette;
-            backdrop
-        } else {
-            top
+        // An alpha blend needs what is underneath, and hardware only blends when that lower pixel's
+        // layer is a *second* target — otherwise the top pixel is written through unchanged. The
+        // brightness effects have no lower layer at all, so they pass the top pixel twice.
+        let lower = match mode {
+            BlendMode::Alpha => {
+                let beneath =
+                    under.map_or_else(ppu_tile2d::IndexedPixel::default, |buffer| buffer.get(x));
+                if !frame.effects.is_second_target(layer_of(beneath)) {
+                    continue;
+                }
+                match beneath.source {
+                    PixelSource::Backdrop => backdrop,
+                    PixelSource::Background => palette.lookup_bg(beneath.palette, beneath.color),
+                    PixelSource::Sprite => palette.lookup_sprite(beneath.palette, beneath.color),
+                }
+            }
+            _ => top,
         };
-        write_pixel(pixel, frame.effects.blend(mode, top, under));
+        write_pixel(pixel, frame.effects.blend(mode, top, lower));
     }
 }
 
@@ -347,14 +398,12 @@ fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
         .map(|object| object.to_sprite(one_dimensional))
         .collect();
 
-    // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite
-    // decodes differently from a 16-colour one — but a scanline can hold both, so the depth is
-    // taken from each sprite rather than from the batch. Passed as four-bit here because that
-    // is what the shared entry point takes; eight-bit sprites are a follow-up.
+    // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite decodes
+    // differently from a 16-colour one — but a scanline can hold both, so the depth rides on each
+    // sprite rather than on this call.
     render_sprites(
         &sprites,
         frame.vram,
-        BitDepth::Four,
         line,
         SpriteRule::SpriteDecides,
         scanline,

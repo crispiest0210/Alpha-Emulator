@@ -132,6 +132,100 @@ impl GbaSystem {
         let _ = writeln!(out, "IRQ handler pointer = {handler:08X}");
         out
     }
+
+    /// What the display is actually configured to draw, layer by layer.
+    ///
+    /// The Game Boy Advance's version of `NdsSystem::graphics_dump`, and the thing to reach for when
+    /// a picture arrives but is wrong — as against [`GbaSystem::state_dump`], which answers whether a
+    /// picture is being attempted at all.
+    ///
+    /// The two registers worth having in front of you are `BGxCNT`, whose meaning changes with the
+    /// display mode (layers 2 and 3 are affine in modes 1 and 2, and layer 2 is a bitmap in modes 3
+    /// to 5), and `BLDCNT`, because a colour effect naming the wrong layers produces a complete,
+    /// plausible, wrong picture rather than a missing one.
+    pub fn graphics_dump(&mut self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let bus = self.bus_mut();
+        let dispcnt = bus.read16(0x0400_0000);
+        let mode = dispcnt & 7;
+        let _ = writeln!(
+            out,
+            "DISPCNT={dispcnt:04X} mode={mode} forced_blank={} obj_1d={} windows={}{}{}",
+            dispcnt & (1 << 7) != 0,
+            dispcnt & (1 << 6) != 0,
+            if dispcnt & (1 << 13) != 0 { "0" } else { "-" },
+            if dispcnt & (1 << 14) != 0 { "1" } else { "-" },
+            if dispcnt & (1 << 15) != 0 { "obj" } else { "-" },
+        );
+
+        for layer in 0..4u32 {
+            let enabled = dispcnt & (1 << (8 + layer)) != 0;
+            let cnt = bus.read16(0x0400_0008 + layer * 2);
+            let hofs = bus.read16(0x0400_0010 + layer * 4);
+            let vofs = bus.read16(0x0400_0012 + layer * 4);
+            // Bits 6 and 7 mean different things on an affine layer than on a text one, which is
+            // the decode a reader is most likely to get wrong by hand.
+            let affine = matches!((mode, layer), (1, 2) | (1, 3) | (2, 2) | (2, 3));
+            let bitmap = mode >= 3 && layer == 2;
+            let kind = if bitmap {
+                "bitmap"
+            } else if affine {
+                "affine"
+            } else if mode <= 1 || (mode == 2 && layer < 2) {
+                "text"
+            } else {
+                "not drawn in this mode"
+            };
+            let _ = writeln!(
+                out,
+                "BG{layer} {} {kind} BG{layer}CNT={cnt:04X} priority={} char={:#X} screen={:#X} \
+                 {} size={} scroll=({hofs},{vofs})",
+                if enabled { "on " } else { "off" },
+                cnt & 3,
+                0x0600_0000 + ((cnt as u32 >> 2) & 3) * 0x4000,
+                0x0600_0000 + ((cnt as u32 >> 8) & 0x1F) * 0x800,
+                if cnt & (1 << 7) != 0 { "8bpp" } else { "4bpp" },
+                cnt >> 14,
+            );
+        }
+
+        let bldcnt = bus.read16(0x0400_0050);
+        let bldalpha = bus.read16(0x0400_0052);
+        let bldy = bus.read16(0x0400_0054);
+        let effect = match (bldcnt >> 6) & 3 {
+            0 => "none",
+            1 => "alpha blend",
+            2 => "brighten toward white",
+            _ => "darken toward black",
+        };
+        let _ = writeln!(
+            out,
+            "BLDCNT={bldcnt:04X} effect={effect} first={:06b} second={:06b} \
+             BLDALPHA={bldalpha:04X} (eva={} evb={}) BLDY={} ",
+            bldcnt & 0x3F,
+            (bldcnt >> 8) & 0x3F,
+            bldalpha & 0x1F,
+            (bldalpha >> 8) & 0x1F,
+            bldy & 0x1F,
+        );
+        let _ = writeln!(
+            out,
+            "WININ={:04X} WINOUT={:04X} MOSAIC={:04X}",
+            bus.read16(0x0400_0048),
+            bus.read16(0x0400_004A),
+            bus.read16(0x0400_004C),
+        );
+
+        // The backdrop is palette entry zero and shows wherever nothing else wins, so a whole
+        // screen of one wrong colour is usually this rather than a layer.
+        let _ = write!(out, "palette 0..8 =");
+        for entry in 0..8u32 {
+            let _ = write!(out, " {:04X}", bus.read16(0x0500_0000 + entry * 2));
+        }
+        let _ = writeln!(out);
+        out
+    }
 }
 
 #[cfg(test)]

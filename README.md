@@ -69,10 +69,20 @@ Three things compounded to produce it, all now fixed and pinned by
   already counts that cycle in its S/N/I total. The two were added together. Only the waiting is
   charged now.
 
-What is still wrong on the title screen: the "EMERALD" wordmark renders as a dither pattern rather
-than solid, and the sky behind it is the wrong hue. Both are colour-effect gaps rather than missing
-geometry — the alpha-blending note under "Smaller, well-defined items" in `AGENTS.md` is the first
-suspect.
+The title screen then arrived brown, with no Rayquaza and a dithered smear where "EMERALD VERSION"
+belongs. Two more gaps, both already written down as known and both visible for the first time on a
+real game:
+
+- **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
+  the winning pixel. Emerald blends the whole sky against the artwork behind it, so every pixel of
+  it was mixed with black. The lower layer is now composed as a second pass with the first-target
+  layers left out — and a blend now happens only when that lower pixel's layer is a declared second
+  target, which is what hardware requires and what turns "always blend with something" into "blend
+  with the right thing or not at all".
+- **Every sprite was decoded as 16-colour.** The depth is per sprite on this hardware — bit 13 of an
+  OAM entry — and one scanline can hold both, so it now rides on the sprite rather than on the
+  call. A 256-colour sprite read as 16-colour comes out as a stretched checkerboard, which is what
+  the wordmark was.
 
 The tool for any of this is `state_dump`, and its companion for a machine that runs but gets
 nowhere is `trace_stall`:
@@ -144,7 +154,7 @@ Component status:
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
-| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules and both tile-mapping arrangements |
+| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules, both tile-mapping arrangements, and per-sprite bit depth |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; dmg-acid2 validated pixel-exact |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
@@ -163,13 +173,13 @@ Component status:
 | `system-gba` interrupt controller, timers, 4-channel DMA | done and tested; not yet driven |
 | `system-gba` video timing and bitmap modes 3/4/5 | done and tested; not yet driven |
 | `system-gba` text backgrounds — four layers, map decode, draw order | done and tested; not yet driven |
-| `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; not yet driven |
+| `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |
 | `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds plus non-affine sprites draw; **affine sprites not yet composited** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
-| `system-gba` windows and colour blending | done and applied; alpha blending uses the backdrop as the lower layer |
+| `system-gba` windows and colour blending | done and applied; alpha blending composes the real lower layer in a second pass, and only blends where that layer is a declared second target |
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |

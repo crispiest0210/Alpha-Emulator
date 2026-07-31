@@ -390,6 +390,8 @@ impl GbPpu {
                 x,
                 index,
                 Sprite {
+                    // A Game Boy sprite is always two bits per pixel; there is no other mode.
+                    depth: BitDepth::Two,
                     x,
                     y,
                     width: 8,
@@ -425,14 +427,7 @@ impl GbPpu {
         }
 
         let sprites: Vec<Sprite> = selected.iter().map(|(_, _, sprite)| *sprite).collect();
-        render_sprites(
-            &sprites,
-            vram,
-            BitDepth::Two,
-            line as u32,
-            rule,
-            &mut self.scanline,
-        );
+        render_sprites(&sprites, vram, line as u32, rule, &mut self.scanline);
     }
 
     /// Read a PPU register, or `None` if this module does not own the address.
@@ -479,6 +474,7 @@ impl GbPpu {
 
 /// Filler for the fixed-size candidate array, never rendered.
 const PLACEHOLDER_SPRITE: Sprite = Sprite {
+    depth: BitDepth::Two,
     row_stride: 0,
     x: 0,
     y: 0,
