@@ -1151,9 +1151,11 @@ impl System for NdsSystem {
             }
         }
 
+        let save_ram_dirty = self.bus.cart.save.is_dirty();
+        self.bus.cart.save.clear_dirty();
         FrameOutput {
             cycles_elapsed: Cycles(self.frame_cycles - start),
-            save_ram_dirty: false,
+            save_ram_dirty,
             stopped: false,
         }
     }
@@ -1232,8 +1234,8 @@ impl System for NdsSystem {
         self.bus.cart.save_ram()
     }
 
-    fn load_save_ram(&mut self, _data: &[u8]) -> Result<(), CartridgeError> {
-        Err(CartridgeError::NoSaveRam)
+    fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError> {
+        self.bus.cart.load_save_ram(data)
     }
 }
 

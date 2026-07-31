@@ -18,11 +18,12 @@
 //! - **KEY1 encryption.** The secure area is encrypted with a key derived from the BIOS, which
 //!   this project does not have. Commands are interpreted in the plain, post-`KEY2` form that
 //!   direct-booted software uses; encrypted-mode commands read as `0xFF`.
-//! - **Save chips.** DS cartridges carry EEPROM or FLASH on the auxiliary SPI bus, and the header
-//!   does not say which. Detecting it means a database or heuristics on the save routine, and
-//!   guessing wrong silently corrupts a save. [`NdsCartridge::save_ram`] therefore returns `None`
-//!   and games report no save file rather than writing one that cannot be read back.
+//!
+//! The save chip *is* implemented, in [`crate::save`], and hangs off the auxiliary SPI port this
+//! module owns. Which chip a cartridge has is not in the header and is worked out from how the
+//! game talks to it; see that module for how, and for what it refuses to guess.
 
+use crate::save::SaveChip;
 use core_common::{CartridgeError, Savable, StateError, StateReader, StateWriter};
 
 /// The header is 512 bytes; the part with fields in it is the first 0x170.
@@ -128,6 +129,8 @@ pub struct NdsCartridge {
     rom: Vec<u8>,
     header: Header,
     auxspicnt: u16,
+    /// The last byte the save chip drove back, which `AUXSPIDATA` reads.
+    spi_data: u8,
     romctrl: u32,
     command: [u8; 8],
     /// Words still to be handed back through `CARD_DATA`.
@@ -137,6 +140,8 @@ pub struct NdsCartridge {
     /// command returns all ones — and one code path for all of them is worth the 512 bytes.
     pending: Vec<u32>,
     read_index: usize,
+    /// The save chip on the auxiliary SPI bus.
+    pub save: SaveChip,
 }
 
 impl NdsCartridge {
@@ -146,10 +151,12 @@ impl NdsCartridge {
             rom,
             header,
             auxspicnt: 0,
+            spi_data: 0,
             romctrl: 0,
             command: [0; 8],
             pending: Vec::new(),
             read_index: 0,
+            save: SaveChip::new(),
         })
     }
 
@@ -171,10 +178,12 @@ impl NdsCartridge {
                 arm7_size: 0,
             },
             auxspicnt: 0,
+            spi_data: 0,
             romctrl: 0,
             command: [0; 8],
             pending: Vec::new(),
             read_index: 0,
+            save: SaveChip::new(),
         }
     }
 
@@ -222,9 +231,14 @@ impl NdsCartridge {
         self.rom.get(..HEADER_SIZE).unwrap_or(&[])
     }
 
-    /// No save chip is emulated. See the module docs.
+    /// The save chip's contents, or `None` while its type is still undetermined.
     pub fn save_ram(&self) -> Option<&[u8]> {
-        None
+        self.save.save_ram()
+    }
+
+    /// Install a save file, which settles the chip type from its size.
+    pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError> {
+        self.save.load_file(data)
     }
 
     pub fn owns(addr: u32) -> bool {
@@ -275,9 +289,8 @@ impl NdsCartridge {
     }
 
     pub fn read16(&mut self, addr: u32) -> Option<u16> {
-        // `AUXSPIDATA` is the save chip's data port, and there is no save chip.
         if addr & !1 == reg::AUXSPIDATA {
-            return Some(0);
+            return Some(self.spi_read() as u16);
         }
         let word = self.read32(addr & !3)?;
         Some(if addr & 2 == 0 {
@@ -289,6 +302,7 @@ impl NdsCartridge {
 
     pub fn write16(&mut self, addr: u32, value: u16) -> bool {
         if addr & !1 == reg::AUXSPIDATA {
+            self.spi_transfer(value as u8);
             return true;
         }
         if addr & !1 == reg::AUXSPICNT {
@@ -330,6 +344,24 @@ impl NdsCartridge {
             reg::CARD_DATA => Some(0),
             _ => None,
         }
+    }
+
+    /// Shift a byte through the save chip.
+    ///
+    /// `AUXSPICNT` bit 6 is the chip-select hold: while it is set the transaction continues, and
+    /// the byte it is clear on is the last. That bit is the only thing telling the chip where a
+    /// transaction ends, and it is what makes the length-based detection possible at all.
+    fn spi_transfer(&mut self, byte: u8) {
+        if self.auxspicnt & (1 << 15) == 0 {
+            // The SPI bus is disabled; nothing is connected to shift through.
+            return;
+        }
+        let hold = self.auxspicnt & (1 << 6) != 0;
+        self.spi_data = self.save.transfer(byte, hold);
+    }
+
+    fn spi_read(&self) -> u8 {
+        self.spi_data
     }
 
     fn set_romctrl(&mut self, value: u32) {
@@ -414,7 +446,11 @@ impl NdsCartridge {
     }
 
     pub fn reset(&mut self) {
+        // The save chip is *not* reset: it is the cartridge's battery-backed memory, and a reset
+        // is a reset of the console rather than a new cartridge.
+        self.save.reset();
         self.auxspicnt = 0;
+        self.spi_data = 0;
         self.romctrl = 0;
         self.command = [0; 8];
         self.pending.clear();
@@ -427,6 +463,8 @@ impl Savable for NdsCartridge {
         // The ROM is not written: it is the file on disk, identical across runs, and up to
         // 256 MiB that would otherwise sit in every rewind frame.
         w.write_u16(self.auxspicnt);
+        w.write_u8(self.spi_data);
+        self.save.save(w);
         w.write_u32(self.romctrl);
         w.write_bytes(&self.command);
         w.write_u64(self.pending.len() as u64);
@@ -438,6 +476,8 @@ impl Savable for NdsCartridge {
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.auxspicnt = r.read_u16()?;
+        self.spi_data = r.read_u8()?;
+        Savable::load(&mut self.save, r)?;
         self.romctrl = r.read_u32()?;
         r.read_bytes(&mut self.command)?;
         let count = r.read_u64()? as usize;

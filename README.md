@@ -18,7 +18,7 @@ and tested**, not what is planned. It is updated as work lands.
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines and the 3D core, and plays its sixteen sound channels. No save chip, and a lower accuracy bar than the rest — see below |
+| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines and the 3D core, plays its sixteen sound channels, and keeps saves. A lower accuracy bar than the rest — see below |
 
 **All four systems boot with picture and sound; three are fully playable.** `cargo xtask dev` opens a window with a ROM
 library, plays a cartridge with video, audio, and keyboard input, and supports quicksave,
@@ -36,7 +36,8 @@ rasteriser with a 24-bit depth buffer, all seven texture formats including 4x4 c
 compositing into engine A's BG0 through the ordinary blend unit; sixteen-channel sound — PCM8, PCM16, IMA-ADPCM, the six PSG square channels and
 the two noise channels, with per-channel rate, volume, volume divider, panning, and loop modes,
 mixed to the frontend's 48 kHz; the dual-CPU memory map including the runtime-configurable
-shared-WRAM split; all
+shared-WRAM split; the **cartridge save chip**, whose type is worked out from how the game talks
+to it and which writes no file at all until it is sure; all
 nine VRAM banks and every mapping their control registers can select; both 2D engines with
 background modes 0-5 (text, affine, and all three extended types), sprites at 4 and 8 bpp in both
 mapping arrangements with flips, affine, double-size, semi-transparent, bitmap and object-window
@@ -53,8 +54,6 @@ and save states covering all of it.
   answering "hidden" wrongly removes geometry unrecoverably while answering "visible" wrongly only
   costs work. The geometry FIFO is reported as never full: hardware stalls the CPU when it fills,
   and nothing in this project's `Bus` contract can express a bus that blocks a CPU mid-instruction.
-- **Save chips.** DS cartridges carry EEPROM or FLASH on the auxiliary SPI bus and the header does
-  not say which; guessing wrong corrupts a save silently, so no save file is written at all.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
   card present looks like.
 - Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
@@ -112,7 +111,8 @@ Component status:
 | `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
-| `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no save chip, no KEY1** |
+| `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no KEY1 encryption** |
+| `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; write timing is not modelled, and a cartridge that only ever writes partial pages cannot be identified |
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
 | `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
@@ -151,7 +151,7 @@ ROMs are far fewer than the Game Boy family's, most target hardware this build d
 wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
 as fetchable artifacts. What the DS *is* verified by instead:
 
-- **313 unit tests in `system-nds`**, covering every module against the register behaviour it
+- **339 unit tests in `system-nds`**, covering every module against the register behaviour it
   implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
   timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
 - **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing

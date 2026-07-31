@@ -14,7 +14,7 @@
 //! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
 //! them ([`system`]). The in-app debugger works against it through [`debug`], on the ARM9.
 //!
-//! Not implemented: a cartridge save chip, wifi, and the 3D core's rarer effects — fog, edge
+//! Not implemented: wifi, KEY1 cartridge encryption, and the 3D core's rarer effects — fog, edge
 //! marking, anti-aliasing, shadow polygons, and the toon table. Prompt 13 explicitly ranks those
 //! below geometry and texturing correctness, which is the order they were built in. Each is
 //! documented where it is skipped rather than approximated into a picture that looks deliberate.
@@ -38,6 +38,7 @@ pub mod input;
 pub mod ipc;
 pub mod irq;
 pub mod memory;
+pub mod save;
 pub mod system;
 pub mod timers;
 pub mod video;
@@ -52,6 +53,7 @@ pub use input::Input;
 pub use ipc::Ipc;
 pub use irq::InterruptController;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};
+pub use save::SaveChip;
 pub use system::{NdsBus, NdsSystem};
 pub use timers::TimerBlock;
 pub use video::VideoTiming;

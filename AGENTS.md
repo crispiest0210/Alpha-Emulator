@@ -216,8 +216,10 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 - **`bincode` 3.0.0 on crates.io is a squatted placeholder** that only emits `compile_error!`.
   Pinned to 2.x.
 - **`wgpu` is pinned to 29** to match `egui-wgpu` 0.35.
-- **An inherent method silently shadows a trait method** with the same name. This bit `is_halted`
-  on the SM83 core, with different semantics on each side and no warning.
+- **An inherent method silently shadows a trait method** with the same name. This has now bitten
+  three times: `is_halted` on the SM83 core, `MatrixStack::load` against `Savable::load`, and
+  `SaveChip::load` against the same. The two later ones are named `load_matrix` and `load_file`
+  for that reason. Any type that is `Savable` and also wants a `load` of its own has this problem.
 - The SM83 core reports each memory access through `Bus::tick` *before* performing it, and the
   bus drains due events inside that call. Advancing the clock without draining passes
   `mem_timing` and breaks `instr_timing`.
@@ -350,16 +352,12 @@ is evidence and polish rather than hardware.
 - **Nothing DS-shaped is in the accuracy corpus.** `README.md` says why and lists what stands in
   for it. That is honest but it is not the same bar the Game Boy family is held to, and the next
   person to work on the DS should look for community test ROMs again — the ecosystem moves.
-- **No cartridge save chip.** The header does not say whether a cart carries EEPROM or FLASH, and
-  guessing wrong corrupts a save silently, so nothing is written at all. Fixing it means either a
-  database keyed on game code or heuristics on the save routine, and the choice between those is a
-  real decision rather than a lookup.
 - **The 3D core's rarer effects**, all listed in `README.md` and each documented where it is
   skipped: fog, edge marking, anti-aliasing, shadow polygons, the toon and highlight tables, the
   shininess table, and `BOX_TEST`. Prompt 13 explicitly ranks these below geometry and texturing,
   which is the order they were done in.
 
-Everything above is small next to what has landed. `system-nds` is 313 tests over thirteen modules
+Everything above is small next to what has landed. `system-nds` is 339 tests over fourteen modules
 and the machine boots, draws both screens in 2D and 3D, plays sound, and can be single-stepped in
 the in-app debugger.
 
@@ -368,10 +366,9 @@ the **ARM9 only**. `DebugTarget` has one register list, one program counter, one
 inventing a "which core" concept means changing the panel and making every breakpoint say which
 core it belongs to. Worth doing; not worth pretending is done. See `system-nds::debug`.
 
-Smaller DS gaps, all recorded in the crate docs where they are made: no save chip (the header does
-not say which of EEPROM or FLASH is fitted, and guessing corrupts saves silently), no KEY1
-encryption, no wifi and none planned, no mosaic, no mode 6 large bitmap, no display mode 3, and no
-per-line sprite budget.
+Smaller DS gaps, all recorded in the crate docs where they are made: no KEY1 cartridge encryption,
+no wifi and none planned, no mosaic, no mode 6 large bitmap, no display mode 3, no per-line sprite
+budget, and no save-chip write timing — a game polling for "write finished" is satisfied at once.
 
 ### Start here
 
@@ -384,13 +381,14 @@ current.
 
 Two things to know before picking any of it up:
 
-- **The save chip is the one item that needs a decision before code.** DS cartridges carry EEPROM
-  or FLASH on the auxiliary SPI bus and nothing in the header says which. The three ways to find
-  out are a database keyed on game code, a heuristic on the address width a game's save routine
-  uses, and asking the user. That choice writes a file to disk that a user's data then lives in —
-  which is squarely in the "expensive to reverse, raise it" category above. Do not just pick one
-  quietly. `NdsCartridge::save_ram` returns `None` today and nothing is written, which is why
-  guessing wrong has not yet been able to corrupt anything.
+- **The save chip is done, and it is worth knowing why it looks the way it does.** Nothing in a
+  DS header says whether a cartridge carries EEPROM or FLASH, or which of six sizes. The choice
+  between a game-code database, a heuristic, and asking the user was put to the user and the
+  heuristic was picked. `system-nds::save` therefore works the chip out from how software talks
+  to it, and — the part that matters — **refuses to guess**: an ambiguous write is held rather
+  than applied, and `save_ram` returns `None` until the type is settled, so a file of the wrong
+  shape never reaches the disk. Once a save file exists its size settles the question outright,
+  so the heuristic only ever runs on a cartridge's first save.
 - **The DS's margin is a fifth of the GBA's** — about 3.1x real time — and the reason is the CPU
   interpreters, not the rasteriser. See "Performance" below; prompt 18's expectation about the 3D
   core was measured and turned out backwards. If the DS needs to be faster, CPU dispatch is where

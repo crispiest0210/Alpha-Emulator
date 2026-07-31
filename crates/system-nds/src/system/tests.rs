@@ -599,13 +599,55 @@ fn the_arm9_cannot_reach_the_sound_hardware() {
 }
 
 #[test]
-fn there_is_no_save_ram_and_loading_one_fails_rather_than_pretending() {
+fn a_save_file_is_only_offered_once_the_chip_has_identified_itself() {
+    // Nothing has touched the save chip, so its type is unknown and there is nothing to write.
     let mut nds = idle();
     assert!(nds.save_ram().is_none());
+
+    // A file of a standard size settles the type outright, with no inference.
+    nds.load_save_ram(&[0x5A; 8192]).expect("a standard size");
+    assert_eq!(nds.save_ram().map(|s| s.len()), Some(8192));
+
+    // And one of no standard size is refused rather than padded into something wrong.
     assert!(matches!(
-        nds.load_save_ram(&[0; 512]),
-        Err(CartridgeError::NoSaveRam)
+        nds.load_save_ram(&[0; 1234]),
+        Err(CartridgeError::SaveSizeMismatch { .. })
     ));
+}
+
+#[test]
+fn a_frame_reports_the_save_as_dirty_only_when_the_game_changed_it() {
+    // The frontend uses this to schedule a debounced flush, so reporting it every frame would
+    // rewrite the file sixty times a second.
+    let mut nds = idle();
+    nds.load_save_ram(&[0xFF; 8192]).unwrap();
+    assert!(!nds.step_frame(InputState::default()).save_ram_dirty);
+
+    // Drive the save chip directly: enable the bus, hold chip select, write-enable, then a page.
+    // Through the ARM9, because `EXMEMCNT` gives it the slot after a direct boot.
+    let cnt = 0x0400_01A0;
+    let data = 0x0400_01A2;
+    nds.bus.write16(Core::Arm9, cnt, (1 << 15) | (1 << 6));
+    nds.bus.write16(Core::Arm9, data, 0x06); // WREN
+    nds.bus.write16(Core::Arm9, cnt, 1 << 15);
+    nds.bus.write16(Core::Arm9, data, 0x00);
+
+    nds.bus.write16(Core::Arm9, cnt, (1 << 15) | (1 << 6));
+    for byte in [0x02u16, 0x00, 0x00] {
+        nds.bus.write16(Core::Arm9, data, byte);
+    }
+    for i in 0..31u16 {
+        nds.bus.write16(Core::Arm9, data, 0x40 + i);
+    }
+    nds.bus.write16(Core::Arm9, cnt, 1 << 15);
+    nds.bus.write16(Core::Arm9, data, 0x60);
+
+    assert!(nds.step_frame(InputState::default()).save_ram_dirty);
+    assert!(
+        !nds.step_frame(InputState::default()).save_ram_dirty,
+        "and the flag clears once reported"
+    );
+    assert_eq!(nds.save_ram().unwrap()[0], 0x40);
 }
 
 #[test]
