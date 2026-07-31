@@ -300,11 +300,15 @@ and draws both screens with sound and 3D**.
   be hand-edited. Revisit that the moment real installers are wanted — an `.msi`, a signed `.app`,
   a `.deb` — which is exactly what those tools are for.
 - **Mostly done:** prompt 13 (NDS). The machine boots a `.nds` ROM through direct boot, runs both
-  cores, and draws both screens. Everything below the 3D core exists and is unit-tested: two memory
-  maps over one store, all nine VRAM banks, both 2D engines, the sixteen-channel sound hardware,
-  IPC, interrupts, timers, DMA, video timing, keypad and touchscreen, the card transfer interface,
-  the 3D core, and save states over all of it. There is no save chip, and the 3D core's rarer
-  effects are deferred. See "The biggest gap".
+  cores, draws both screens in 2D and 3D, plays sound, and can be single-stepped in the in-app
+  debugger. Thirteen modules, all unit-tested: two memory maps over one store, all nine VRAM banks,
+  both 2D engines, the 3D core, the sixteen-channel sound hardware, IPC, interrupts, timers, DMA,
+  video timing, keypad and touchscreen, the card transfer interface, and save states over all of it.
+  What is missing is a cartridge save chip, DS accuracy-corpus coverage, and the 3D core's rarer
+  effects. See "The biggest gap".
+
+**Every one of the twenty prompts has now been built.** What remains is finishing work, listed
+under "The biggest gap"; there is no next prompt file to open.
 
 ### The four decisions prompt 13 raised, and what was chosen
 
@@ -371,17 +375,30 @@ per-line sprite budget.
 
 ### Start here
 
-`crates/system-nds/src/lib.rs`'s Status section is kept current and is the shortest accurate
-summary of what exists.
+**All twenty prompts are now built.** There is no next prompt to open; what is left is the list
+under "The biggest gap" above, and it is finishing work rather than new hardware.
 
-If the 3D rasteriser ever needs replacing, `system-nds` has no `wgpu` dependency and prompt 13
+`crates/system-nds/src/lib.rs`'s Status section is the shortest accurate summary of what the DS
+has, and `README.md`'s "What the Nintendo DS does and does not do" is the longer one. Both are kept
+current.
+
+Two things to know before picking any of it up:
+
+- **The save chip is the one item that needs a decision before code.** DS cartridges carry EEPROM
+  or FLASH on the auxiliary SPI bus and nothing in the header says which. The three ways to find
+  out are a database keyed on game code, a heuristic on the address width a game's save routine
+  uses, and asking the user. That choice writes a file to disk that a user's data then lives in —
+  which is squarely in the "expensive to reverse, raise it" category above. Do not just pick one
+  quietly. `NdsCartridge::save_ram` returns `None` today and nothing is written, which is why
+  guessing wrong has not yet been able to corrupt anything.
+- **The DS's margin is a fifth of the GBA's** — about 3.1x real time — and the reason is the CPU
+  interpreters, not the rasteriser. See "Performance" below; prompt 18's expectation about the 3D
+  core was measured and turned out backwards. If the DS needs to be faster, CPU dispatch is where
+  to look, and that is the one dynarec question still open.
+
+If the 3D rasteriser ever *does* need replacing, `system-nds` has no `wgpu` dependency and prompt 13
 forbids it one: the answer is `frontend-native` consuming `gpu3d::geometry::DisplayList`, which is
-already a plain description of triangles with no rendering in it. **It does not need replacing** —
-see "Performance" below, where the measurement reverses the expectation prompt 18 set.
-
-Before optimising the 3D rasteriser, read "Performance" below. **The DS already has a fifth of the
-margin the GBA does** — 3.2x real time against 11.3x, and that is *without* 3D — so the dynarec
-question genuinely is still open for this system, unlike for the other two.
+already a plain description of triangles with no rendering in it.
 
 ### What "verified" means for the frontend
 
