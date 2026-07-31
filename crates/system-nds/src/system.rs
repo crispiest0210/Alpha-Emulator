@@ -36,16 +36,18 @@
 //! asking — and because `Cpu<B>` is generic over the bus, so each core still monomorphizes down
 //! to direct calls with no dynamic dispatch in the memory path.
 //!
-//! # What this machine does not have
+//! # One address, two meanings
 //!
-//! **The 3D core.** Engine A's 3D layer draws nothing and the backdrop shows through, rather than
-//! a flat colour that would look deliberate. Recorded in `README.md` as unimplemented rather than
-//! as partial.
+//! `0x0400_0400` is the 3D core's command FIFO to the ARM9 and the first sound channel's control
+//! register to the ARM7. That is not a quirk to work around: it is why the bus decode takes a
+//! [`Core`] rather than being one address table, and it is the clearest single example of the two
+//! cores genuinely disagreeing about what an address means.
 
 use crate::apu::NdsApu;
 use crate::cartridge::{NdsCartridge, HEADER_MIRROR};
 use crate::dma::{AddressStep, DmaController, Transfer};
 use crate::engine2d::{Engine, Engine2d};
+use crate::gpu3d::Gpu3d;
 use crate::input::{Input, RAW_PER_PIXEL};
 use crate::ipc::Ipc;
 use crate::irq::{sources, InterruptController};
@@ -93,6 +95,8 @@ pub struct NdsBus {
     pub video: VideoTiming,
     pub engine_a: Engine2d,
     pub engine_b: Engine2d,
+    /// The 3D core, which only the ARM9 can reach.
+    pub gpu3d: Gpu3d,
     pub irq: [InterruptController; 2],
     pub timers: [TimerBlock; 2],
     pub dma: [DmaController; 2],
@@ -118,6 +122,7 @@ impl NdsBus {
             video: VideoTiming::new(),
             engine_a: Engine2d::new(Engine::A),
             engine_b: Engine2d::new(Engine::B),
+            gpu3d: Gpu3d::new(),
             irq: [
                 InterruptController::new(Core::Arm9),
                 InterruptController::new(Core::Arm7),
@@ -399,6 +404,13 @@ impl NdsBus {
         if core == Core::Arm7 && NdsApu::owns(addr) {
             return self.apu.read32_reg(addr).unwrap_or(0);
         }
+        // The 3D core is checked before the fall-through to two halfword reads, because its
+        // command FIFO and its result registers are word-only.
+        if core == Core::Arm9 && Gpu3d::owns(addr) {
+            if let Some(value) = self.gpu3d.read32(addr) {
+                return value;
+            }
+        }
         (self.io_read16(core, addr) as u32) | ((self.io_read16(core, addr + 2) as u32) << 16)
     }
 
@@ -416,6 +428,12 @@ impl NdsBus {
         }
         if core == Core::Arm7 && NdsApu::owns(addr) {
             self.apu.write32_reg(addr, value);
+            return;
+        }
+        // `GXFIFO` and the command ports share `0x0400_0400` with the ARM7's sound registers.
+        // Which one an address means is decided by *which core is asking*, which is the whole
+        // reason the bus decode takes a core rather than being a table.
+        if core == Core::Arm9 && Gpu3d::owns(addr) && self.gpu3d.write32(addr, value) {
             return;
         }
         if addr == 0x0400_0180 {
@@ -462,6 +480,13 @@ impl NdsBus {
         }
         if core == Core::Arm7 && NdsApu::owns(addr) {
             return self.apu.read16_reg(addr).unwrap_or(0);
+        }
+        // Before engine A, because `DISP3DCNT` sits inside engine A's register block and belongs
+        // to the 3D core rather than to the 2D engine that surrounds it.
+        if core == Core::Arm9 && Gpu3d::owns(addr) {
+            if let Some(value) = self.gpu3d.read16(addr) {
+                return value;
+            }
         }
         if self.engine_a.owns(addr) {
             return self.engine_a.read16(addr).unwrap_or(0);
@@ -510,6 +535,9 @@ impl NdsBus {
             self.apu.write16_reg(addr, value);
             return;
         }
+        if core == Core::Arm9 && Gpu3d::owns(addr) && self.gpu3d.write16(addr, value) {
+            return;
+        }
         if self.engine_a.owns(addr) {
             self.engine_a.write16(addr, value);
             return;
@@ -555,6 +583,11 @@ impl NdsBus {
         if core == Core::Arm7 && NdsApu::owns(addr) {
             return self.apu.read8_reg(addr).unwrap_or(0);
         }
+        if core == Core::Arm9 && Gpu3d::owns(addr) {
+            if let Some(value) = self.gpu3d.read8(addr) {
+                return value;
+            }
+        }
         match addr {
             0x0400_0240..=0x0400_0249 if core == Core::Arm9 => self.vramcnt_read(addr),
             0x0400_0300 => self.postflg[core as usize],
@@ -582,6 +615,9 @@ impl NdsBus {
         }
         if core == Core::Arm7 && NdsApu::owns(addr) {
             self.apu.write8_reg(addr, value);
+            return;
+        }
+        if core == Core::Arm9 && Gpu3d::owns(addr) && self.gpu3d.write8(addr, value) {
             return;
         }
         match addr {
@@ -958,8 +994,10 @@ impl NdsSystem {
             memory,
             engine_a,
             engine_b,
+            gpu3d,
             ..
         } = &mut self.bus;
+        let three_d = gpu3d.enabled().then_some(&gpu3d.framebuffer);
         let row_of = |engine: Engine| {
             if engine == top {
                 line
@@ -967,11 +1005,12 @@ impl NdsSystem {
                 line + SCREEN_HEIGHT
             }
         };
-        engine_a.render_line(
+        engine_a.render_line_with_3d(
             line,
             vram,
             memory.palette(),
             memory.oam(),
+            three_d,
             self.framebuffer.row_mut(row_of(Engine::A)),
         );
         engine_b.render_line(
@@ -1027,6 +1066,11 @@ impl System for NdsSystem {
                         self.bus.engine_b.on_line_end();
                     }
                     if line == SCREEN_HEIGHT as u16 {
+                        // The 3D swap happens at vertical blank, not where `SWAP_BUFFERS`
+                        // appeared in the display list — which is what lets a game build the
+                        // next frame's geometry while this one is still being scanned out.
+                        let NdsBus { gpu3d, vram, .. } = &mut self.bus;
+                        gpu3d.on_vblank(vram);
                         for core in [Core::Arm9, Core::Arm7] {
                             self.bus.dma[core as usize].on_vblank();
                         }
@@ -1072,6 +1116,7 @@ impl System for NdsSystem {
         self.bus.video.reset();
         self.bus.engine_a = Engine2d::new(Engine::A);
         self.bus.engine_b = Engine2d::new(Engine::B);
+        self.bus.gpu3d.reset();
         self.bus.irq = [
             InterruptController::new(Core::Arm9),
             InterruptController::new(Core::Arm7),
@@ -1129,6 +1174,7 @@ impl Savable for NdsSystem {
         self.bus.video.save(w);
         self.bus.engine_a.save(w);
         self.bus.engine_b.save(w);
+        self.bus.gpu3d.save(w);
         self.bus.apu.save(w);
         for controller in &self.bus.irq {
             controller.save(w);
@@ -1161,6 +1207,7 @@ impl Savable for NdsSystem {
         self.bus.video.load(r)?;
         self.bus.engine_a.load(r)?;
         self.bus.engine_b.load(r)?;
+        self.bus.gpu3d.load(r)?;
         self.bus.apu.load(r)?;
         for controller in &mut self.bus.irq {
             controller.load(r)?;

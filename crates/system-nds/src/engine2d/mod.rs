@@ -32,10 +32,6 @@
 //!
 //! # What is not implemented
 //!
-//! - **The 3D layer.** With `DISPCNT` bit 3 set, engine A's BG0 is the 3D core's output. The 3D
-//!   core does not exist, so that layer draws nothing and the backdrop shows through. It is not
-//!   approximated with a flat colour: a wrong picture that looks deliberate is much harder to
-//!   notice than a gap. There is a test asserting the gap.
 //! - **Mosaic**, on backgrounds and sprites alike, exactly as on the GBA.
 //! - **Display mode 3**, main-memory display, which needs the capture unit.
 
@@ -274,6 +270,23 @@ impl Engine2d {
         oam: &[u8],
         out: &mut [u8],
     ) {
+        self.render_line_with_3d(line, vram, palette, oam, None, out)
+    }
+
+    /// The same, with the 3D core's output available for BG0.
+    ///
+    /// `three_d` is `Some` only for engine A with `DISPCNT` bit 3 set and the 3D core enabled.
+    /// When it is `None` — engine B, or the layer switched off — BG0 draws nothing and the
+    /// backdrop shows through, which is what the layer looks like with no 3D behind it.
+    pub fn render_line_with_3d(
+        &mut self,
+        line: u32,
+        vram: &Vram,
+        palette: &[u8],
+        oam: &[u8],
+        three_d: Option<&crate::gpu3d::render::Framebuffer3d>,
+        out: &mut [u8],
+    ) {
         // Display mode 0 is the display being off, which shows white rather than black. A game
         // uses it during boot, and rendering it as black makes the console look broken.
         let display_mode = (self.dispcnt & dispcnt::DISPLAY_MODE) >> 16;
@@ -310,12 +323,44 @@ impl Engine2d {
         }
         let enabled = (self.dispcnt & dispcnt::BG_ENABLE) >> 8;
         for bg in 0..4usize {
-            if enabled & (1 << bg) != 0 {
-                self.render_background(bg, line, vram, palette);
+            if enabled & (1 << bg) == 0 {
+                continue;
             }
+            if bg == 0 && self.engine == Engine::A && self.dispcnt & dispcnt::BG0_IS_3D != 0 {
+                if let Some(frame) = three_d {
+                    self.render_3d_layer(line, frame);
+                }
+                continue;
+            }
+            self.render_background(bg, line, vram, palette);
         }
 
         self.composite(line, palette, out);
+    }
+
+    /// Copy one line of the 3D core's output into BG0.
+    ///
+    /// The 3D layer's priority is BG0's, and its per-pixel alpha comes from the 3D engine rather
+    /// than from `BLDALPHA` — a translucent polygon blends against the 2D layers underneath it
+    /// through the ordinary blend unit, which is why the alpha is carried per pixel rather than
+    /// resolved inside the rasteriser.
+    fn render_3d_layer(&mut self, line: u32, frame: &crate::gpu3d::render::Framebuffer3d) {
+        let priority = (self.bgcnt[0] & 3) as u8;
+        for x in 0..SCREEN_WIDTH {
+            let alpha = frame.alpha_at(x, line);
+            if alpha == 0 {
+                continue;
+            }
+            self.layers[0][x as usize] = LinePixel {
+                color: frame.color_at(x, line),
+                opaque: true,
+                priority,
+                // A translucent 3D pixel forces the blend on, the same way a semi-transparent
+                // sprite does, so the layers beneath it show through without `BLDCNT` selecting
+                // the 3D layer as a target.
+                semi_transparent: alpha < 31,
+            };
+        }
     }
 
     /// Display mode 2: a raw 15-bit framebuffer read straight out of one 128 KiB VRAM bank,

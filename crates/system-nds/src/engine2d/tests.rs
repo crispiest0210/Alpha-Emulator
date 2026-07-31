@@ -389,9 +389,10 @@ fn a_direct_colour_bitmap_background_uses_bit_fifteen_as_alpha() {
 }
 
 #[test]
-fn the_three_d_layer_leaves_a_gap_rather_than_a_plausible_wrong_picture() {
-    // The 3D core does not exist. BG0 as the 3D layer must show the backdrop, not a flat colour
-    // that looks like a deliberate render.
+fn the_three_d_layer_draws_nothing_when_no_3d_frame_is_supplied() {
+    // `render_line` passes no 3D framebuffer, which is what engine B always sees and what engine
+    // A sees with the 3D core switched off. BG0 must then show the backdrop rather than a flat
+    // colour that would look like a deliberate render.
     let mut gfx = Gfx::new();
     gfx.map(0, 1, 0);
     gfx.set_palette(Engine::A, 0, BLUE15);

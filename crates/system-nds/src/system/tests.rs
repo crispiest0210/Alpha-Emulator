@@ -314,6 +314,84 @@ fn powcnt1_decides_which_engine_drives_which_screen() {
 }
 
 #[test]
+fn an_arm9_program_can_draw_a_triangle_through_the_geometry_fifo() {
+    // The whole 3D path end to end: the ARM9 enables the layer, sets a viewport, feeds a display
+    // list through GXFIFO, and the triangle appears on the top screen through engine A's BG0.
+    let attr = (1u32 << 6) | (1 << 7); // both faces
+    let vtx = |x: i32, y: i32| {
+        let f = |v: i32| ((v * 4096 / 10) as u32) & 0xFFFF;
+        [f(x) | (f(y) << 16), 0u32]
+    };
+    let mut fifo: Vec<u32> = Vec::new();
+    let mut push = |opcode: u32, params: &[u32]| {
+        fifo.push(opcode);
+        fifo.extend_from_slice(params);
+    };
+    push(0x60, &[(255 << 16) | (191 << 24)]); // VIEWPORT
+    push(0x20, &[0x001F]); // COLOR: red
+    push(0x29, &[attr]); // POLYGON_ATTR
+    push(0x40, &[0]); // BEGIN_VTXS triangles
+    for (x, y) in [(-5, 5), (5, 5), (0, -5)] {
+        push(0x23, &vtx(x, y));
+    }
+    push(0x41, &[]); // END_VTXS
+    push(0x50, &[0]); // SWAP_BUFFERS
+
+    let mut program: Vec<u32> = Vec::new();
+    // DISPCNT: graphics display, BG0 on, BG0 is the 3D layer.
+    program.extend(load(0, (1 << 16) | (1 << 8) | (1 << 3)));
+    program.extend(load(1, 0x0400_0000));
+    program.push(str_word(0, 1));
+    // DISP3DCNT: enable the 3D layer.
+    program.extend(load(0, 1));
+    program.extend(load(1, 0x0400_0060));
+    program.push(str_word(0, 1));
+    // Feed the display list, one word at a time to the FIFO.
+    program.extend(load(1, 0x0400_0400));
+    for word in &fifo {
+        program.extend(load(0, *word));
+        program.push(str_word(0, 1));
+    }
+    program.push(SPIN);
+
+    let mut nds = booted(&program, &[SPIN]);
+    // Two frames: the first runs the list and swaps at its vblank, the second draws it.
+    nds.step_frame(InputState::default());
+    nds.step_frame(InputState::default());
+
+    let fb = nds.framebuffer();
+    let pixel = |x: usize, y: usize| {
+        let base = (y * 256 + x) * 4;
+        [fb.as_bytes()[base], fb.as_bytes()[base + 1]]
+    };
+    // The middle of the triangle is red, and a corner of the screen is not.
+    let [r, g] = pixel(128, 110);
+    assert!(r > 200 && g < 40, "the triangle: r={r} g={g}");
+    assert_ne!(pixel(4, 4), [r, g], "and the corner is something else");
+}
+
+#[test]
+fn the_geometry_fifo_and_the_sound_channels_share_an_address() {
+    // 0x04000400 is GXFIFO to the ARM9 and SOUND0CNT to the ARM7. Which one an address means is
+    // decided by which core is asking, which is why the bus decode takes a core at all.
+    let mut nds = idle();
+    nds.bus.write32(Core::Arm7, 0x0400_0400, 0x8000_007F);
+    assert!(nds.bus.apu.channel_is_busy(0));
+
+    // The same word from the ARM9 is a packed command set, and must not touch the sound channel.
+    nds.bus.write32(Core::Arm9, 0x0400_0400, 0x0000_0010); // MTX_MODE
+    nds.bus.write32(Core::Arm9, 0x0400_0400, 1);
+    assert!(
+        nds.bus.apu.channel_is_busy(0),
+        "the ARM7's channel is intact"
+    );
+    assert_eq!(
+        nds.bus.gpu3d.geometry.matrices.mode,
+        crate::gpu3d::matrix::MatrixMode::Position
+    );
+}
+
+#[test]
 fn input_reaches_both_cores_and_the_touchscreen_reaches_only_one() {
     let mut nds = idle();
     nds.set_input(InputState {
