@@ -7,15 +7,17 @@
 //! last. See `README.md` for the authoritative status table.
 //!
 //! Implemented: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), both 2D
-//! engines ([`engine2d`]), the sixteen-channel sound hardware ([`apu`]), the inter-processor
+//! engines ([`engine2d`]), the 3D core ([`gpu3d`]), the sixteen-channel sound hardware ([`apu`]),
+//! the inter-processor
 //! communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]), the two timer blocks
 //! ([`timers`]), the two DMA controllers ([`dma`]), the video timing ([`video`]), the keypad and
 //! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
 //! them ([`system`]).
 //!
-//! Not implemented yet: **the 3D core**. Engine A's BG0-as-3D layer draws nothing and lets the
-//! backdrop through, with a test asserting that gap rather than a flat colour that would look
-//! deliberate. There is also no cartridge save chip, and no wifi.
+//! Not implemented: a cartridge save chip, wifi, and the 3D core's rarer effects — fog, edge
+//! marking, anti-aliasing, shadow polygons, and the toon table. Prompt 13 explicitly ranks those
+//! below geometry and texturing correctness, which is the order they were built in. Each is
+//! documented where it is skipped rather than approximated into a picture that looks deliberate.
 //!
 //! # Wifi is out of scope
 //!

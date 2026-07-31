@@ -379,6 +379,58 @@ fn nds_frames(c: &mut Criterion) {
     group.finish();
 }
 
+/// The DS's 3D rasteriser, measured directly rather than through a ROM.
+///
+/// Prompt 18 expects this to be the thing that actually needs optimising, so it is worth a number
+/// that is not confounded by the two CPUs. It is measured directly for a second reason: a display
+/// list is *pushed* by software at whatever rate software chooses, and a ROM that feeds one in a
+/// tight loop fills polygon RAM every frame and produces an unbounded benchmark rather than a
+/// representative one. Driving the engine from here fixes the geometry at a known amount.
+///
+/// The scene is three screen-filling quads, the front one translucent: enough overdraw to
+/// exercise the depth test and the blend path rather than only the setup.
+fn nds_rasteriser(c: &mut Criterion) {
+    use system_nds::gpu3d::geometry::Geometry;
+    use system_nds::gpu3d::render::{render, Framebuffer3d};
+
+    let vertex = |x: f32, y: f32, z: f32| {
+        let f = |v: f32| ((v * 4096.0) as i32 as u32) & 0xFFFF;
+        [f(x) | (f(y) << 16), f(z)]
+    };
+    let mut geometry = Geometry::new();
+    geometry.execute(0x60, &[(255 << 16) | (191 << 24)]); // VIEWPORT
+    let attr = (1u32 << 6) | (1 << 7);
+    for (index, (z, color, alpha)) in [
+        (0.5f32, 0x001Fu32, 0u32),
+        (0.0, 0x03E0, 0),
+        (-0.5, 0x7C00, 15),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        geometry.execute(0x29, &[attr | (alpha << 16) | ((index as u32) << 24)]);
+        geometry.execute(0x20, &[color]);
+        geometry.execute(0x40, &[1]); // BEGIN_VTXS quads
+        for (x, y) in [(-0.9f32, -0.9f32), (0.9, -0.9), (0.9, 0.9), (-0.9, 0.9)] {
+            geometry.execute(0x23, &vertex(x, y, z));
+        }
+    }
+    geometry.execute(0x50, &[0]); // SWAP_BUFFERS
+    let list = geometry.take_display_list();
+    let vram = system_nds::Vram::new();
+
+    let mut group = c.benchmark_group("nds");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function(BenchmarkId::new("rasteriser", "frame"), |b| {
+        let mut out = Framebuffer3d::new();
+        b.iter(|| {
+            render(&list, &vram, 0, 0x7FFF, &mut out);
+            std::hint::black_box(&out.color);
+        });
+    });
+    group.finish();
+}
+
 /// The cost of the watchpoint recorder that sits on every bus access.
 ///
 /// Prompt 15 left this as an explicit claim to check rather than assert: `AccessLog::record` returns
@@ -522,6 +574,7 @@ criterion_group!(
     gb_frames,
     gba_frames,
     nds_frames,
+    nds_rasteriser,
     corpus_frames,
     watchpoint_overhead,
     instruction_dispatch,

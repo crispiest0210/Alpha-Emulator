@@ -260,7 +260,7 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 `README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
 Advance are **playable** — window, audio, input, save states, rewind — with real accuracy coverage,
 and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
-and draws both screens with sound**. It has no 3D core.
+and draws both screens with sound and 3D**.
 
 - **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
   17 (testing).
@@ -302,8 +302,8 @@ and draws both screens with sound**. It has no 3D core.
   cores, and draws both screens. Everything below the 3D core exists and is unit-tested: two memory
   maps over one store, all nine VRAM banks, both 2D engines, the sixteen-channel sound hardware,
   IPC, interrupts, timers, DMA, video timing, keypad and touchscreen, the card transfer interface,
-  and save states over all of it. **The 3D core is not started**, and there is no save chip. See
-  "The biggest gap".
+  the 3D core, and save states over all of it. There is no save chip, and the 3D core's rarer
+  effects are deferred. See "The biggest gap".
 
 ### The four decisions prompt 13 raised, and what was chosen
 
@@ -325,10 +325,11 @@ the module that made it.
   write. The alternative is nine register decodes on every access, landing in the rasteriser's
   innermost texture fetch. Correctness is identical either way, because overlap is represented
   rather than resolved.
-- **Whether the 3D rasteriser stays software** — still open, because it does not exist. Prompt 13
-  forbids `system-nds` a `wgpu` dependency, so an accelerated path means designing an intermediate
-  command buffer, and that is a cross-crate interface worth agreeing before it is written rather
-  than after.
+- **Whether the 3D rasteriser stays software** — **software, and measured rather than assumed.**
+  It costs about 5 ns a rasterised pixel, which is a few percent of a frame for a realistic scene.
+  Prompt 13 forbids `system-nds` a `wgpu` dependency; the escape hatch if one is ever needed is
+  `frontend-native` consuming `gpu3d::geometry::DisplayList`, which is already a plain description
+  of triangles. Nothing needs it today.
 
 One more, not foreseen and worth knowing: **the timer block is duplicated from `system-gba`** rather
 than shared. `system-*` crates may not depend on each other and `core-common` is closed to
@@ -338,18 +339,23 @@ second instance. Whoever answers it should answer it for both.
 
 ### The biggest gap
 
-**The DS's 3D core.** Everything else in prompt 13 is done.
+**Accuracy coverage for the DS, and a save chip.** Prompt 13's scope is built; what is missing now
+is evidence and polish rather than hardware.
 
-Geometry command FIFO, matrix stack, per-vertex lighting, texture mapping, a software rasteriser,
-and compositing into engine A's BG0. Prompt 13 calls it the single largest scope item in the whole
-project and says to prioritise geometry and texturing correctness over fog and toon shading, and to
-document what is deferred. Engine A's 3D layer currently draws nothing and lets the backdrop
-through, with a test asserting that gap — the approximation trap this project keeps refusing.
+- **Nothing DS-shaped is in the accuracy corpus.** `README.md` says why and lists what stands in
+  for it. That is honest but it is not the same bar the Game Boy family is held to, and the next
+  person to work on the DS should look for community test ROMs again — the ecosystem moves.
+- **No cartridge save chip.** The header does not say whether a cart carries EEPROM or FLASH, and
+  guessing wrong corrupts a save silently, so nothing is written at all. Fixing it means either a
+  database keyed on game code or heuristics on the save routine, and the choice between those is a
+  real decision rather than a lookup.
+- **The 3D core's rarer effects**, all listed in `README.md` and each documented where it is
+  skipped: fog, edge marking, anti-aliasing, shadow polygons, the toon and highlight tables, the
+  shininess table, and `BOX_TEST`. Prompt 13 explicitly ranks these below geometry and texturing,
+  which is the order they were done in.
 
-The sound hardware landed after the assembly did: sixteen channels in `system-nds::apu`, kept out
-of `apu-shared` because prompt 13 says to and because the shapes genuinely do not meet — no
-envelope, no sweep, no length counter, no sequencer, and channels that play sample data out of
-memory rather than synthesising it.
+Everything above is small next to what has landed. `system-nds` is 294 tests over eleven modules
+and the machine boots, draws both screens in 2D and 3D, and plays sound.
 
 Smaller DS gaps, all recorded in the crate docs where they are made: no save chip (the header does
 not say which of EEPROM or FLASH is fitted, and guessing corrupts saves silently), no KEY1
@@ -358,14 +364,13 @@ per-line sprite budget.
 
 ### Start here
 
-Read `docs/successor-emulator/13-system-nds.md` again — the remaining item is in it — and then
-`crates/system-nds/src/lib.rs`, whose Status section is kept current.
+`crates/system-nds/src/lib.rs`'s Status section is kept current and is the shortest accurate
+summary of what exists.
 
-The 3D core is a large unit and should follow the same rule everything else here did: geometry
-FIFO, matrix stack, and rasteriser as separately tested pieces before any of it is wired into
-engine A. `system-nds` has no `wgpu` dependency and prompt 13 forbids it one, so if the software
-rasteriser turns out to be too slow, the answer is an intermediate command buffer `frontend-native`
-consumes — a cross-crate interface worth agreeing before it is written.
+If the 3D rasteriser ever needs replacing, `system-nds` has no `wgpu` dependency and prompt 13
+forbids it one: the answer is `frontend-native` consuming `gpu3d::geometry::DisplayList`, which is
+already a plain description of triangles with no rendering in it. **It does not need replacing** —
+see "Performance" below, where the measurement reverses the expectation prompt 18 set.
 
 Before optimising the 3D rasteriser, read "Performance" below. **The DS already has a fifth of the
 margin the GBA does** — 3.2x real time against 11.3x, and that is *without* 3D — so the dynarec
@@ -394,10 +399,15 @@ change where anyone looks next:
 
 - **On a Game Boy frame with music, the APU costs more than the PPU** — about a third of the frame
   against a sixth. Not what you would guess for a machine whose job is drawing a picture.
-- **The DS is the tight one, at about 3.1x real time**, against 11x to 80x everywhere else — and
-  that is before the 3D core exists. Read `nds/` benchmark numbers against `gba/spin` from the
-  *same run*: the DS case is close enough to its budget that a laptop under sustained load moves it
-  by 70%, which has already produced one "regression" that was nothing of the kind. Its first measurement was 1.1x, and the cause was not the two 2D
+- **The DS is the tight one, at about 3.1x real time**, against 11x to 80x everywhere else. Read
+  `nds/` benchmark numbers against `gba/spin` from the *same run*: the DS case is close enough to
+  its budget that a laptop under sustained load moves it by 70%, which has already produced one
+  "regression" that was nothing of the kind.
+- **Prompt 18 expected the 3D rasteriser to be the DS's bottleneck, and the measurement says it is
+  not.** Three screen-filling quads with overdraw cost about 0.73 ms — roughly 5 ns a rasterised
+  pixel — against the 5.3 ms the two CPU interpreters cost with both cores doing nothing. If the DS
+  ever needs to be faster, CPU dispatch is where to look. That is the dynarec question, and it is
+  still open for this system alone. Its first measurement was 1.1x, and the cause was not the two 2D
   engines: turning both displays off saved 1.5%. It was `NdsBus` composing every wide access out of
   byte accesses, so each instruction fetch paid four region decodes. Reading RAM at its real width
   cut a frame by 65%. That is the only optimisation in this project, and it had a measured problem

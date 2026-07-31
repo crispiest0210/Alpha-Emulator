@@ -18,7 +18,7 @@ and tested**, not what is planned. It is updated as work lands.
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Plays, measured at 100% speed; passes all three `gba-suite` ROMs. Keypad and affine backgrounds work. No PSG mixing, mosaic, or EEPROM yet |
-| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines, and plays its sixteen sound channels. **No 3D core**; no save chip. See below |
+| Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and prompt 13 scopes it that way.** Boots a `.nds` ROM through direct boot, runs both cores, draws both screens through the two 2D engines and the 3D core, and plays its sixteen sound channels. No save chip, and a lower accuracy bar than the rest — see below |
 
 **All four systems boot with picture and sound; three are fully playable.** `cargo xtask dev` opens a window with a ROM
 library, plays a cartridge with video, audio, and keyboard input, and supports quicksave,
@@ -30,7 +30,10 @@ disassembly, memory, execution breakpoints, and read/write watchpoints.
 Prompt 13 is explicit that its v1 bar is "boots and runs a meaningful set of commercial-quality
 homebrew and simple commercial titles correctly", not parity. This is the start of DS support.
 
-**Implemented:** sixteen-channel sound — PCM8, PCM16, IMA-ADPCM, the six PSG square channels and
+**Implemented:** the **3D core** — the full geometry command set, four matrix stacks, four-light
+vertex lighting, clipping against all six frustum planes, a perspective-correct software
+rasteriser with a 24-bit depth buffer, all seven texture formats including 4x4 compression, and
+compositing into engine A's BG0 through the ordinary blend unit; sixteen-channel sound — PCM8, PCM16, IMA-ADPCM, the six PSG square channels and
 the two noise channels, with per-channel rate, volume, volume divider, panning, and loop modes,
 mixed to the frontend's 48 kHz; the dual-CPU memory map including the runtime-configurable
 shared-WRAM split; all
@@ -44,8 +47,12 @@ and save states covering all of it.
 
 **Not implemented, and visibly so rather than approximated:**
 
-- **The 3D core.** Engine A's BG0-as-3D layer draws nothing and the backdrop shows through. There
-  is a test asserting that gap, because a flat colour there would look deliberate.
+- **3D refinements**, which prompt 13 explicitly ranks below geometry and texturing: fog, edge
+  marking, anti-aliasing, shadow polygons (mode 3 renders as ordinary geometry), and the toon and
+  highlight tables (mode 2 falls back to modulation). `BOX_TEST` always answers "visible", because
+  answering "hidden" wrongly removes geometry unrecoverably while answering "visible" wrongly only
+  costs work. The geometry FIFO is reported as never full: hardware stalls the CPU when it fills,
+  and nothing in this project's `Bus` contract can express a bus that blocks a CPU mid-instruction.
 - **Save chips.** DS cartridges carry EEPROM or FLASH on the auxiliary SPI bus and the header does
   not say which; guessing wrong corrupts a save silently, so no save file is written at all.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
@@ -107,6 +114,9 @@ Component status:
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
 | `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no save chip, no KEY1** |
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
+| `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
+| `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
+| `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
 | `system-nds` assembly — `System` impl, two bus views, dual-core frame loop | done; boots a ROM, draws both screens, and produces audio. **No 3D core** |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
 | Everything else | not started |
@@ -139,14 +149,15 @@ ROMs are far fewer than the Game Boy family's, most target hardware this build d
 wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
 as fetchable artifacts. What the DS *is* verified by instead:
 
-- **249 unit tests in `system-nds`**, covering every module against the register behaviour it
+- **294 unit tests in `system-nds`**, covering every module against the register behaviour it
   implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
   timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
 - **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing
   code direct boot loaded, the ARM7 writing where only it can see, the two cores exchanging a word
   through the FIFO with each side spinning on its own status flag, a vblank interrupt reaching a
   handler with no BIOS present, a program that maps a VRAM bank and puts a colour on screen, and an
-  ARM7 program that starts a sound channel and is heard.
+  ARM7 program that starts a sound channel and is heard, and an ARM9 program that feeds a display
+  list through `GXFIFO` and gets a triangle on the top screen.
 - **A determinism test**: two machines given the same ROM and input agree byte for byte after four
   frames, which is prompt 13's dual-CPU constraint checked rather than asserted.
 - **A save-state round trip** that is a fixed point and that continues identically from a restore.
@@ -339,6 +350,7 @@ that produced them rather than in prose that can drift from them.
 | Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
 | Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
 | Nintendo DS, the same with the sound hardware wired in | ≈5 440 µs | ≈3.1x |
+| Nintendo DS 3D rasteriser, three screen-filling quads with overdraw | ≈730 µs | — |
 
 Three findings worth surfacing:
 
