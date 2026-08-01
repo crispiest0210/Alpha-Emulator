@@ -380,9 +380,14 @@ that cost real time", which is the one worth reading before touching any timing 
 
 What is left on the GBA is smaller and specific:
 
-- **Nothing past the title screen has been looked at.** Pressing start, the save-file load, and the
-  overworld are all unexercised. `EEPROM saves are reported absent rather than emulated` and
-  Emerald is a FLASH cartridge, so the save path is the next thing likely to bite.
+- **The cartridge has no GPIO, so Emerald has no real-time clock.** It says "the internal battery
+  has run dry" and carries on, which is exactly what a real cartridge with a dead battery does, so
+  this is an accurate result rather than a bug — but berries never grow and the tides never change.
+  The clock lives on four pins at `0x080000C4`-`0x080000C8`, which currently read as ordinary ROM.
+- **Past the opening is unexercised.** Start, the dead-battery notice, NEW GAME, and Professor
+  Birch's introduction all render correctly with text, sprites and animation. Nothing after that
+  has been looked at, and the save path in particular has never written a file — Emerald is a
+  FLASH cartridge, and `EEPROM saves are reported absent rather than emulated`.
 - **PSG mixing is not wired**, so a game driving music through the four PSG channels gets silence.
   Emerald's music comes through direct sound so this did not block it, but it is still a real gap
   and it needs the design decision under "Smaller, well-defined items" made first.
@@ -561,6 +566,11 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   both palette sets from a running machine. It is what cracked cgb-acid2 in about a minute after
   reasoning from the rendered picture had stalled — reach for it before staring at pixels. Its rows
   are *map* rows, which with `SCY` non-zero are not screen rows.
+- **`frontend-headless run --press <button>@<frame>[:<frames>]`** holds a button, repeatable for a
+  sequence. Everything a commercial game does past its title screen is on the far side of one
+  button press, and before this there was no way to reach any of it without a window. Emerald's
+  whole opening — start, the dead-battery notice, NEW GAME, Professor Birch — is four `--press`
+  flags and a frame count.
 - **`frontend-headless run --save-frame out.png`** writes a framebuffer as a PNG, and `identify`
   prints what the library importer would record for a ROM. Comparing that PNG against a published
   reference image is what turned dmg-acid2 and cgb-acid2 from "renders something" into passes.

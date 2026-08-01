@@ -22,7 +22,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use core_common::{Framebuffer, InputState, System};
+use core_common::{Buttons, Framebuffer, InputState, System};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -50,6 +50,15 @@ enum Command {
         /// nothing more.
         #[arg(long, value_name = "FILE")]
         save_frame: Option<PathBuf>,
+        /// Hold a button for a while: `--press start@4500` or `--press a@600:30`.
+        ///
+        /// Without this nothing past a title screen is reachable headlessly, which is where most
+        /// of what a commercial game does actually lives. The frame number is the first frame the
+        /// button is down and the optional count is how many frames it stays down, defaulting to
+        /// 10 — long enough for a game polling once a frame to see it, short enough not to read as
+        /// a second press. Repeat the flag for a sequence.
+        #[arg(long, value_name = "BUTTON@FRAME[:FRAMES]")]
+        press: Vec<ButtonPress>,
     },
     /// Run a ROM twice from the same start and report whether the two runs match.
     ///
@@ -69,6 +78,56 @@ enum Command {
     Identify { rom: PathBuf },
 }
 
+/// One button held over a range of frames, parsed from `button@frame[:frames]`.
+#[derive(Debug, Clone, Copy)]
+struct ButtonPress {
+    button: Buttons,
+    first: u64,
+    frames: u64,
+}
+
+impl ButtonPress {
+    fn covers(&self, frame: u64) -> bool {
+        frame >= self.first && frame < self.first + self.frames
+    }
+}
+
+impl std::str::FromStr for ButtonPress {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let (name, when) = text
+            .split_once('@')
+            .with_context(|| format!("expected `button@frame[:frames]`, got `{text}`"))?;
+        let (first, frames) = match when.split_once(':') {
+            Some((first, frames)) => (first, frames.parse()?),
+            // Ten frames is a sixth of a second: seen by anything that polls once a frame, and
+            // short enough that a game watching for a release still sees one.
+            None => (when, 10),
+        };
+        let button = match name.to_ascii_lowercase().as_str() {
+            "a" => Buttons::A,
+            "b" => Buttons::B,
+            "x" => Buttons::X,
+            "y" => Buttons::Y,
+            "l" => Buttons::L,
+            "r" => Buttons::R,
+            "start" => Buttons::START,
+            "select" => Buttons::SELECT,
+            "up" => Buttons::UP,
+            "down" => Buttons::DOWN,
+            "left" => Buttons::LEFT,
+            "right" => Buttons::RIGHT,
+            other => anyhow::bail!("no button called `{other}`"),
+        };
+        Ok(Self {
+            button,
+            first: first.parse()?,
+            frames,
+        })
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -82,10 +141,17 @@ fn main() -> Result<()> {
             frames,
             trace_every,
             save_frame,
+            press,
         } => {
             let mut system = load(&rom)?;
             for frame in 1..=frames {
-                system.step_frame(InputState::default());
+                system.step_frame(InputState {
+                    buttons: press
+                        .iter()
+                        .filter(|p| p.covers(frame))
+                        .fold(Buttons::empty(), |held, p| held | p.button),
+                    touch: None,
+                });
                 // Draining audio matters even with nothing to play it: the buffer is bounded,
                 // and a run that never drains does not exercise the path a real frontend does.
                 let _ = system.take_audio_samples();
@@ -156,4 +222,37 @@ fn hash(framebuffer: &Framebuffer) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn a_press_defaults_to_ten_frames() {
+        let press = ButtonPress::from_str("start@4400").unwrap();
+        assert_eq!(press.button, Buttons::START);
+        assert!(!press.covers(4399), "not before it starts");
+        assert!(press.covers(4400), "the named frame is the first one down");
+        assert!(press.covers(4409));
+        assert!(!press.covers(4410), "and it is released after ten");
+    }
+
+    #[test]
+    fn a_press_can_say_how_long_it_is_held() {
+        // A game that reads a *release* needs the button to come back up, so a hold that never
+        // ends is not the useful default — it is the thing that makes a menu unnavigable.
+        let press = ButtonPress::from_str("a@10:3").unwrap();
+        assert_eq!(press.button, Buttons::A);
+        assert!(press.covers(12));
+        assert!(!press.covers(13));
+    }
+
+    #[test]
+    fn a_press_that_names_no_button_is_an_error_rather_than_nothing() {
+        assert!(ButtonPress::from_str("turbo@10").is_err());
+        assert!(ButtonPress::from_str("start").is_err(), "no frame");
+        assert!(ButtonPress::from_str("start@soon").is_err());
+    }
 }

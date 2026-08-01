@@ -84,6 +84,12 @@ real game:
   call. A 256-colour sprite read as 16-colour comes out as a stretched checkerboard, which is what
   the wordmark was.
 
+Past the title screen: pressing start reaches the dead-battery notice — which is what a real
+cartridge without a working clock shows, and this one has no GPIO, so that is an accurate result
+rather than a bug — then NEW GAME, then Professor Birch's introduction, with text, sprites, and
+animation all correct. Nothing after that has been looked at, and no save file has ever been
+written.
+
 The tool for any of this is `state_dump`, and its companion for a machine that runs but gets
 nowhere is `trace_stall`:
 
@@ -406,6 +412,7 @@ printed at startup.
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 120 --save-frame out.png
+cargo run -p frontend-headless -- run path/to/rom.gba --frames 5000 --press start@4400 --press a@4750
 cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- identify path/to/rom.gb
 ```
@@ -417,6 +424,12 @@ DMG-compatibility mode.
 `--save-frame` writes the final framebuffer as a PNG, which is how a rendering test ROM gets
 *looked at* rather than reduced to a hash. `identify` runs the same probe the library importer
 does, so the title and content hash it prints are the ones that would be indexed.
+
+`--press <button>@<frame>[:<frames>]` holds a button, and can be repeated for a sequence. Without
+it nothing past a title screen is reachable without a window, which is most of what a commercial
+game does — pressing start, loading a save, and walking around are all on the other side of it. The
+frame is the first one the button is down and the count defaults to 10, which is long enough for a
+game polling once a frame to see the press and short enough that it still sees the release.
 
 `run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
 printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N
