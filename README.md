@@ -430,6 +430,7 @@ cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
 cargo run -p frontend-headless -- run path/to/rom.gb --frames 120 --save-frame out.png
 cargo run -p frontend-headless -- run path/to/rom.gba --frames 5000 --press start@4400 --press a@4750
+cargo run -p frontend-headless -- run path/to/rom.gba --frames 1 --state slot1.ast --save-frame out.png
 cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
 cargo run -p frontend-headless -- identify path/to/rom.gb
 ```
@@ -447,6 +448,13 @@ it nothing past a title screen is reachable without a window, which is most of w
 game does — pressing start, loading a save, and walking around are all on the other side of it. The
 frame is the first one the button is down and the count defaults to 10, which is long enough for a
 game polling once a frame to see the press and short enough that it still sees the release.
+
+`--state` loads a save state before running and `--save-state` writes one after, in the format the
+window reads. Together they are what makes a bug report reproducible: a picture that is wrong only
+after an hour of play cannot be reached by a press schedule, but the state file from the moment it
+went wrong can be re-rendered and dumped here instead of in a window. A state resumes byte-exactly,
+so running five frames past a loaded state gives the same framebuffer hash as running the whole way
+from a reset.
 
 `run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
 printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N

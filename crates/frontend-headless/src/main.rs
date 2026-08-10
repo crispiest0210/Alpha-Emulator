@@ -65,6 +65,19 @@ enum Command {
         /// a second press. Repeat the flag for a sequence.
         #[arg(long, value_name = "BUTTON@FRAME[:FRAMES]")]
         press: Vec<ButtonPress>,
+        /// Load a save state before running, so a bug report becomes reproducible.
+        ///
+        /// A picture that is wrong only after an hour of play cannot be reached by a press
+        /// schedule. With the state file from the moment it went wrong, it can be re-rendered,
+        /// dumped, and bisected against here instead of in a window.
+        #[arg(long, value_name = "FILE")]
+        state: Option<PathBuf>,
+        /// Write a save state after the last frame, in the format the window reads.
+        ///
+        /// The other half of `--state`: it makes the pair round-trippable, which is what proves
+        /// the loader reads the header the windowed frontend writes rather than one guessed at.
+        #[arg(long, value_name = "FILE")]
+        save_state: Option<PathBuf>,
     },
     /// Run a ROM twice from the same start and report whether the two runs match.
     ///
@@ -82,6 +95,19 @@ enum Command {
     /// would be indexed — which is what makes "why is this listed under that name?" answerable
     /// without opening the application.
     Identify { rom: PathBuf },
+}
+
+/// Drop the header the windowed frontend puts in front of a save state, if it is there.
+///
+/// It writes `AEF1` and a frame number; a state produced anywhere else is the bare payload. Both
+/// load, so a state can come from either side.
+fn strip_state_header(bytes: &[u8]) -> &[u8] {
+    const HEADER: &[u8; 4] = b"AEF1";
+    if bytes.len() >= HEADER.len() + 8 && bytes.starts_with(HEADER) {
+        &bytes[HEADER.len() + 8..]
+    } else {
+        bytes
+    }
 }
 
 /// One button held over a range of frames, parsed from `button@frame[:frames]`.
@@ -148,8 +174,21 @@ fn main() -> Result<()> {
             trace_every,
             save_frame,
             press,
+            state,
+            save_state,
         } => {
             let mut system = load(&rom)?;
+            if let Some(path) = &state {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("could not read {}", path.display()))?;
+                // The windowed frontend prefixes `AEF1` and the frame number; a bare payload has
+                // neither. Accept both, so a state from either side loads here.
+                let payload = strip_state_header(&bytes);
+                system.load_state(payload).map_err(|e| {
+                    anyhow::anyhow!("{} is not a state for this ROM: {e:?}", path.display())
+                })?;
+                println!("loaded {}", path.display());
+            }
             // Whether a machine is making any sound at all is otherwise invisible without a
             // speaker, and "no audio" is a bug report that needs separating from "quiet game".
             let (mut audio_peak, mut audio_count, mut audio_nonzero) = (0.0f32, 0u64, 0u64);
@@ -181,6 +220,16 @@ fn main() -> Result<()> {
                 "audio  {audio_count} samples, {audio_nonzero} non-silent, peak {audio_peak:.4}"
             );
             println!("hash   {}", hash(system.framebuffer()));
+
+            if let Some(path) = save_state {
+                // `AEF1` and a frame number, then the payload: what the window writes and reads.
+                let mut bytes = b"AEF1".to_vec();
+                bytes.extend_from_slice(&frames.to_le_bytes());
+                bytes.extend_from_slice(&system.save_state());
+                std::fs::write(&path, bytes)
+                    .with_context(|| format!("could not write {}", path.display()))?;
+                println!("wrote  {}", path.display());
+            }
 
             if let Some(path) = save_frame {
                 std::fs::write(&path, frontend_core::encode_png(system.framebuffer()))
@@ -246,6 +295,20 @@ fn hash(framebuffer: &Framebuffer) -> String {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    /// The header `--state` skips, kept beside the writer that produces it.
+    #[test]
+    fn a_state_file_carries_the_windowed_frontends_header() {
+        // Read from `frontend_core`'s writer rather than guessed at: a wrong header length loads
+        // the payload off by a few bytes and fails with a decode error that looks like a corrupt
+        // file, which sends the next person after the wrong bug entirely.
+        let mut bytes = b"AEF1".to_vec();
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(b"payload");
+        assert_eq!(strip_state_header(&bytes), b"payload");
+        // A bare payload with no header is passed through untouched.
+        assert_eq!(strip_state_header(b"payload"), b"payload");
+    }
 
     #[test]
     fn a_press_defaults_to_ten_frames() {

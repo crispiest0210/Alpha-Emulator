@@ -607,6 +607,11 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   button press, and before this there was no way to reach any of it without a window. Emerald's
   whole opening — start, the dead-battery notice, NEW GAME, Professor Birch — is four `--press`
   flags and a frame count.
+- **`frontend-headless run --state <file>`** loads a save state before running, and `--save-state`
+  writes one after. This is how an unreproducible "the graphics are wrong after an hour" becomes a
+  two-minute diagnosis: take the user's state file, load it here, and run `graphics_dump` on the
+  exact frame. A state resumes byte-exactly, so five frames past a loaded state hash the same as
+  the whole run from a reset.
 - **`frontend-headless run --save-frame out.png`** writes a framebuffer as a PNG, and `identify`
   prints what the library importer would record for a ROM. Comparing that PNG against a published
   reference image is what turned dmg-acid2 and cgb-acid2 from "renders something" into passes.
