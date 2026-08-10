@@ -616,3 +616,32 @@ fn a_256_colour_sprite_is_one_byte_a_pixel() {
         "and the sprite is 8 pixels wide, not 16"
     );
 }
+
+#[test]
+fn colour_zero_in_a_text_layer_lets_the_layer_behind_show_through() {
+    // On this machine a background is one of four *layers*, and index 0 is transparent. Writing
+    // it made the frontmost enabled text layer opaque across the whole screen: every layer behind
+    // it and the backdrop disappeared under flat bands of one palette colour. Menus and text
+    // boxes were the worst affected, because their front layer is mostly empty.
+    //
+    // The Game Boy's rule is the opposite and both are right — see
+    // `BackgroundParams::transparent_index_zero`.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // the back layer's colour
+    scene.simple_layer(1, 1, 8); // BG1 behind, drawing red
+
+    // BG0 in front, enabled, with a map cell whose tile is entirely colour 0.
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE, 0);
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "the red layer behind should show through a transparent front layer"
+    );
+}

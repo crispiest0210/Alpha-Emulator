@@ -299,6 +299,11 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
     };
     let params = BackgroundParams {
         layer: index as u8,
+        // Index 0 is transparent on this machine: a background is one of four layers, and the one
+        // behind — or the backdrop — shows through. Writing it made the frontmost enabled text
+        // layer opaque across the whole screen, which covered the real picture with flat bands of
+        // one palette colour. The affine and sprite paths here have always skipped it.
+        transparent_index_zero: true,
         ..BackgroundParams::full_line(
             line,
             layer.scroll_x as u32,

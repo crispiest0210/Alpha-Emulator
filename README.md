@@ -91,9 +91,18 @@ Three causes compounded, all now fixed and pinned by
 - The wait-state table reports an access's whole cost including its first cycle, and the CPU core's
   S/N/I total already counted that cycle. Only the waiting is charged now.
 
-Two rendering defects surfaced immediately afterwards, both of which had produced a complete and
-plausible *wrong* picture rather than a missing one — the failure mode this project treats as the
-dangerous one:
+Three rendering defects surfaced afterwards, all of which had produced a complete and plausible
+*wrong* picture rather than a missing one — the failure mode this project treats as the dangerous
+one:
+
+- **Colour index 0 in a text background was drawn as a colour instead of being transparent.** On
+  this machine a background is one of four *layers*, and index 0 lets whatever is behind show
+  through. Writing it made the frontmost enabled text layer opaque across the whole screen, hiding
+  every layer behind it and the backdrop under flat bands of one palette colour — worst on menus,
+  text boxes, and anything mid-transition, where the front layer is mostly empty. The Game Boy's
+  rule is the opposite and equally correct, because its background is the bottom of the picture and
+  sprite priority is decided by comparing against index 0, so this is a parameter rather than a
+  fix: `BackgroundParams::transparent_index_zero`.
 
 - **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
   the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The

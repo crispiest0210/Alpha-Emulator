@@ -315,6 +315,10 @@ impl GbPpu {
             attributes,
         };
         let params = BackgroundParams {
+            // A Game Boy background is the bottom of the picture, not a layer over something
+            // else: index 0 is an ordinary shade, and sprite priority is decided by comparing
+            // against it. Skipping it here would make the background disappear entirely.
+            transparent_index_zero: false,
             // The window scrolls with its own counter, not with LY or SCY.
             line: self.window_line as u32,
             scroll_x: 0,

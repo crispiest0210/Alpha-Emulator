@@ -98,6 +98,19 @@ pub struct BackgroundParams {
     pub start_x: usize,
     /// Screen-space offset subtracted before scrolling, again for the window.
     pub origin_x: u32,
+    /// Whether colour index 0 means "transparent" rather than a colour.
+    ///
+    /// The two machines genuinely disagree, so this is a parameter rather than a rule. A Game Boy
+    /// Advance background is one of four *layers*: index 0 lets whatever is behind show through,
+    /// and the backdrop shows where nothing covers. A Game Boy background is the bottom of the
+    /// picture with nothing behind it, index 0 is an ordinary shade, and sprite priority is
+    /// decided by comparing against it — so writing it is required there.
+    ///
+    /// Getting this wrong on the GBA does not lose a pixel here and there. The frontmost enabled
+    /// text layer becomes opaque across the whole screen and hides every layer behind it, which
+    /// looks like large flat bands of one palette colour over the real picture — worst on menus
+    /// and text boxes, where the front layer is mostly empty.
+    pub transparent_index_zero: bool,
 }
 
 impl BackgroundParams {
@@ -110,6 +123,9 @@ impl BackgroundParams {
             map_width: 32,
             map_height: 32,
             depth,
+            // The Game Boy's rule, because it is the older machine and the one whose background
+            // is the bottom of the picture. A layered system opts in.
+            transparent_index_zero: false,
             layer: 0,
             start_x: 0,
             origin_x: 0,
@@ -155,10 +171,14 @@ pub fn render_text_background<M: TilemapSource>(
             loaded_tile_x = tile_x;
         }
 
+        let color = pixels[(source_x % 8) as usize];
+        if color == 0 && params.transparent_index_zero {
+            continue;
+        }
         out.set(
             x,
             IndexedPixel {
-                color: pixels[(source_x % 8) as usize],
+                color,
                 palette: tile.palette,
                 priority: tile.priority,
                 layer: params.layer,
@@ -951,5 +971,50 @@ mod tests {
         };
         render_sprites(&[sprite], &tile, 8, SpriteRule::SpriteDecides, &mut line);
         assert_ne!(line.get(0).color, 0, "row 8 came from 32 tiles on");
+    }
+}
+
+#[cfg(test)]
+mod transparency_tests {
+    use super::*;
+
+    fn params(transparent: bool) -> BackgroundParams {
+        BackgroundParams {
+            transparent_index_zero: transparent,
+            ..BackgroundParams::full_line(0, 0, 0, BitDepth::Two)
+        }
+    }
+
+    struct OneTile;
+    impl TilemapSource for OneTile {
+        fn tile_at(&self, _x: u32, _y: u32) -> TileRef {
+            TileRef::default()
+        }
+    }
+
+    #[test]
+    fn the_two_machines_disagree_about_colour_zero_and_both_are_right() {
+        // A Game Boy Advance background is a layer over something else, so index 0 lets it show
+        // through. A Game Boy background is the bottom of the picture, index 0 is an ordinary
+        // shade, and sprite priority is decided by comparing against it — so it must be written.
+        let tile = vec![0u8; 16]; // every pixel index 0
+
+        let mut layered = ScanlineBuffer::new(8);
+        layered.clear();
+        render_text_background(&OneTile, &tile, &params(true), &mut layered);
+        assert_eq!(
+            layered.get(0).source,
+            PixelSource::Backdrop,
+            "nothing written, so whatever is behind stays"
+        );
+
+        let mut flat = ScanlineBuffer::new(8);
+        flat.clear();
+        render_text_background(&OneTile, &tile, &params(false), &mut flat);
+        assert_eq!(
+            flat.get(0).source,
+            PixelSource::Background,
+            "the Game Boy writes it as a colour"
+        );
     }
 }
