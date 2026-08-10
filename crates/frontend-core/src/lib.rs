@@ -33,7 +33,7 @@
 //!
 //! # Status
 //!
-//! Complete for prompt 14: [`session`] and [`emulation`] run any system the workspace implements,
+//! Complete for prompt 14: [`session`] and `emulation` run any system the workspace implements,
 //! [`config`] persists settings as TOML, [`catalog`] connects the SQLite library index to the
 //! cartridge headers, and [`platform`] is the one place that knows which system a file needs.
 //!

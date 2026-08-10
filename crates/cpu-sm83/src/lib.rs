@@ -69,7 +69,7 @@ pub const FLAG_C: u8 = 0b0001_0000;
 /// For conditional branches this is the **not-taken** cost; taken branches add
 /// [`CYCLES_BRANCH_TAKEN`]. Zero marks an opcode that does not exist on the SM83
 /// (`0xD3`, `0xDB`, `0xDD`, `0xE3`, `0xE4`, `0xEB`–`0xED`, `0xF4`, `0xFC`, `0xFD`); executing
-/// one locks up real hardware, and [`Sm83::execute`] treats it as such.
+/// one locks up real hardware, and `Sm83::execute` treats it as such.
 ///
 /// Transcribed from the gbdev opcode tables rather than derived by hand — instruction timing
 /// is invisible until a test ROM catches it, and hand-deriving 256 entries is how you get the

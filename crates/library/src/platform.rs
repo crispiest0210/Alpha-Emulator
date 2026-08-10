@@ -3,7 +3,7 @@
 //! This lives in `library` rather than in `frontend-core` because the index stores it: a row in
 //! the ROM table needs a platform column, and the platform of a file has to be decidable
 //! *before* a system exists to run it. `frontend-core` turns one of these into a running
-//! [`System`](core_common::System); this crate only names it.
+//! `System`; this crate only names it.
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// Stable identifier, matching [`System::id`](core_common::System::id) so a save state and a
+    /// Stable identifier, matching `System::id` so a save state and a
     /// library row agree on what they are talking about. Stored in the database, so it must not
     /// change once released.
     pub const fn id(self) -> &'static str {

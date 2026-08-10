@@ -471,7 +471,7 @@ impl Engine2d {
 
     /// Whether this x is inside window 0 or 1, given the current line's vertical test.
     ///
-    /// The vertical test is folded into [`set_window_rows`] rather than repeated per pixel.
+    /// The vertical test is folded into `set_window_rows` rather than repeated per pixel.
     fn in_window(&self, index: usize, x: usize) -> bool {
         if !self.window_row[index] {
             return false;

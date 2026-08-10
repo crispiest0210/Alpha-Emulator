@@ -24,7 +24,7 @@ pub struct TileAttributes {
     pub flip_x: bool,
     pub flip_y: bool,
     /// The tile asks to be drawn over sprites. Subject to `LCDC` bit 0 — see
-    /// [`background_wins`].
+    /// `background_wins`.
     pub priority: bool,
 }
 

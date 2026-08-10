@@ -4,7 +4,7 @@
 //!
 //! Prompt 16 is explicit about starting here. A delta-based buffer stores less but is a second
 //! serialisation path to keep correct alongside the first, and a bug in it looks like a
-//! *corrupt emulator* rather than a corrupt file. Full snapshots reuse the [`Savable`] machinery
+//! *corrupt emulator* rather than a corrupt file. Full snapshots reuse the `Savable` machinery
 //! that every system already proves in its own round-trip tests, so a rewind that works is
 //! evidence the save states work and vice versa.
 //!

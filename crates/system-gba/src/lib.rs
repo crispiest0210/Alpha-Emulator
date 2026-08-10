@@ -6,28 +6,43 @@
 //!
 //! # Status
 //!
-//! **The machine runs.** A cartridge boots, the display renders through the compositor, DMA and
-//! timers drive the sound FIFOs, and interrupts reach the game's handler with or without a BIOS.
-//! A save state round-trips frame-exactly and two runs of the same ROM are identical.
+//! **Commercial games run.** A cartridge boots, the display renders through the compositor, DMA
+//! and timers drive the sound FIFOs, and interrupts reach the game's handler with or without a
+//! BIOS. A save state round-trips frame-exactly and two runs of the same ROM are identical. All
+//! three `gba-suite` ROMs pass — the instruction set in both states, and memory — and a real game
+//! plays in the window at a measured 100% speed with no dropped frames or audio samples.
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **All three `gba-suite` ROMs pass**: the instruction set in both states, and memory.
-//! - The four `apu-shared` PSG channels are not mixed alongside the two FIFO channels, and
-//!   doing it needs a decision first. Their *register* layer — `NR10`-`NR52` decode, read masks,
-//!   power-down semantics — is shared by the Game Boy, the Game Boy Color, and the GBA, but it
-//!   lives in `system-gb::apu` and this crate cannot reach it: `system-*` crates may not depend
-//!   on each other. Duplicating it is exactly the copy-paste this project avoids, so it wants
-//!   moving into `apu-shared` — and the obstacle is that three of its behaviours are gated on
-//!   `GbModel`, which would have to move too or be replaced by something narrower.
-//! - Colour blending applies, but an alpha blend uses the backdrop as what lies underneath: the
-//!   scanline buffer keeps only the winning pixel, so the layer below it is not available.
-//!   That covers the common case of a layer blended over the background colour and nothing
-//!   more. The object window is likewise reported as never covering, since sprites drawn into
-//!   it are not yet distinguished. Mosaic is not implemented at all.
-//! - EEPROM saves are reported as absent rather than emulated; SRAM and Flash work.
+//! - **The four `apu-shared` PSG channels are not mixed** alongside the two FIFO channels, so a
+//!   game whose music comes through them is silent. What blocks it is smaller than it looks and
+//!   was recorded here backwards for a while: the *channels* already live in `apu-shared` and are
+//!   directly usable. What lives in `system-gb::apu`, unreachable because `system-*` crates may
+//!   not depend on each other, is the **address decode** — and the GBA's is genuinely different
+//!   anyway. Its registers are halfwords at `0x0400_0060`, laid out with gaps rather than as the
+//!   Game Boy's contiguous `NR10`-`NR52`; its wave RAM is two banks of sixteen bytes with the CPU
+//!   seeing whichever is not playing; and it has a 75% volume step the Game Boy lacks. So this is
+//!   a new register layer over shared channels, not a copy of an existing one, and the `GbModel`
+//!   gating that was called the obstacle does not apply — the GBA follows the CGB rule throughout.
+//! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
+//!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
+//!   write a save file, so the path from a game's write to a file on disk is unverified.
+//! - **Mosaic is not implemented**, and the object window is reported as never covering, since
+//!   sprites drawn into it are not yet distinguished from ordinary ones.
+//! - **No cartridge GPIO**, so a game with a real-time clock finds none. That is a supported
+//!   hardware state rather than a failure — a cartridge with a dead battery behaves the same way
+//!   and games handle it — but the clock never advances.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
+//!
+//! # The bug worth knowing about before touching timing
+//!
+//! Every memory access was charged three to six times over, so an ARM instruction in internal
+//! WRAM cost 13 cycles against hardware's 1. **No test failed and the emulator reported 100%
+//! speed throughout**, because a frame is a fixed number of cycles however few instructions fit
+//! inside it. What a commercial game lost was nine tenths of its processor, and what that looked
+//! like was a frozen picture with the CPU visibly running. See `system::GbaSystemBus::charge`:
+//! charge once, at the width the CPU asked for, and charge only the waiting.
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that

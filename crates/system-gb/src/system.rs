@@ -196,7 +196,7 @@ impl GbSystemBus {
 impl Bus for GbSystemBus {
     /// Every CPU read funnels through here, which is why the debugger's recorder sits here.
     ///
-    /// The routing lives in [`read_routed`](Self::read_routed) and the recording here, rather than a
+    /// The routing lives in `read_routed` and the recording here, rather than a
     /// `record` call inside each of the eight arms it dispatches to — one of those would eventually
     /// be forgotten, and a watchpoint that misses one region is worse than no watchpoint at all.
     fn read8(&mut self, addr: u32) -> u8 {

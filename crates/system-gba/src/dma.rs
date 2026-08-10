@@ -17,7 +17,7 @@
 //! Channel 0 cannot reach the cartridge at all, channel 3 is the only one that can write to it,
 //! and only channels 1 and 2 can feed a sound FIFO. Their word counters are different widths
 //! too. Treating all four alike produces a machine where a game's audio DMA silently works on
-//! the wrong channel — see [`Channel::max_words`].
+//! the wrong channel — see `Channel::max_words`.
 //!
 //! # This decides, it does not copy
 //!

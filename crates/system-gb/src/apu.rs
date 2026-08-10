@@ -15,7 +15,7 @@
 //!
 //! Channel *waveforms* advance with the CPU clock, through [`GbApu::tick`]. The length,
 //! envelope, and sweep units advance on the 512 Hz frame sequencer, which the scheduler owns
-//! and delivers through [`TimingOutput`](crate::timing::TimingOutput). Output *samples* are
+//! and delivers through [`TimingOutput`]. Output *samples* are
 //! generated at a third rate entirely. Conflating any two of those produces audio that is
 //! subtly the wrong speed.
 

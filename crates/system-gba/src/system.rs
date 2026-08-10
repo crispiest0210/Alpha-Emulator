@@ -22,7 +22,7 @@
 //! game linked into the slow ROM window run at the speed of one linked into the fast one.
 //!
 //! Charging happens exactly once per access, in the [`Bus`] method the CPU called — see
-//! [`GbaSystemBus::charge`] for why both halves of that sentence are load-bearing. Getting either
+//! `GbaSystemBus::charge` for why both halves of that sentence are load-bearing. Getting either
 //! wrong does not fail a test: the emulator still produces frames at 100% speed, because a frame is
 //! a fixed number of cycles however few instructions fit inside it. What a game loses is processor
 //! time, and what that looks like is a title screen that never arrives.
@@ -137,7 +137,7 @@ impl GbaSystemBus {
     /// The two halves of the machine's cycle count meet here, and they overlap by exactly one
     /// cycle per access. The ARM7TDMI core reports an instruction as a count of S, N, and I
     /// cycles summed at one each — so the *access itself* is already in the number
-    /// [`Cpu::step`](core_common::Cpu::step) returns. [`WaitControl::cost`] then reports what the
+    /// [`Cpu::step`](core_common::Cpu) returns. [`WaitControl::cost`] then reports what the
     /// same access costs including that first cycle. Adding both charged every access twice.
     ///
     /// So the instruction's cost is `cpu_cycles + Σ(cost − 1)`: the core's own accounting, plus

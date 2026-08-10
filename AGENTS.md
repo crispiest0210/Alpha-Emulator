@@ -96,9 +96,11 @@ make. An easy call that is expensive to walk back is worth thirty seconds of the
 - it **picks between named tools** where the prompt named one and you want another — `release.yml`
   is hand-written where prompt 19 says `cargo-dist`.
 - it **defers a whole feature**, or ships something visibly partial.
-- it is **already flagged here as needing a decision first**. The GBA PSG mixing item under "Smaller,
-  well-defined items" is exactly this shape: the fix is blocked on where a shared register layer
-  should live, and that placement is a design choice, not a lookup.
+- it is **already flagged here as needing a decision first**. Check that the flag is still true
+  before treating it as one: the GBA PSG item carried "blocked on where a shared register layer
+  should live" for months, and on inspection the layer that mattered was already shared and the
+  rest was per-system anyway. A stale blocker costs more than an open question, because nobody
+  re-examines it.
 
 ### How to raise one
 
@@ -366,37 +368,52 @@ the module that made it.
 
 One more, not foreseen and worth knowing: **the timer block is duplicated from `system-gba`** rather
 than shared. `system-*` crates may not depend on each other and `core-common` is closed to
-platform-specific behaviour, so sharing needs a new crate — the same unresolved placement question
-`system-gb::apu`'s register layer is stuck on under "Smaller, well-defined items". This is now the
-second instance. Whoever answers it should answer it for both.
+platform-specific behaviour, so sharing needs a new crate. This was filed as the same question the
+GBA's PSG register layer was stuck on; that one turned out not to be a placement question at all
+(see "The biggest gap"), so this is the only live instance. It is also the weaker case: the two
+timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
+of structure for a little reuse. Worth doing only when a third caller appears.
 
 ### The biggest gap
 
-**A commercial Game Boy Advance game now reaches its title screen**, as of 2026-07-31. Pokémon
-Emerald boots through the GAME FREAK logo, the whole intro, and the Rayquaza scene to "PRESS
-START", with backgrounds, sprites, affine effects, and the M4A sound driver running. The bug that
-had been holding it there was cycle accounting, not graphics — see the first entry under "Gotchas
-that cost real time", which is the one worth reading before touching any timing code on any system.
+**PSG audio on the Game Boy Advance.** A commercial GBA game now plays at a measured 100% speed in
+the window — 59.7 fps sustained, zero dropped frames, zero dropped audio samples — with backgrounds,
+sprites, affine effects, colour blending, input and save states all working on real software. The
+loudest thing still wrong is that **music is often silent**: the GBA makes sound two ways and only
+direct sound is wired, so a game whose music comes through the four PSG channels plays its effects
+and nothing else.
 
-What is left on the GBA is smaller and specific:
+This was recorded for a long time as blocked on a design decision, and **that framing was wrong**.
+The claim was that the `NR10`-`NR52` register layer is shared, lives in `system-gb::apu`, cannot be
+reached across a `system-*` boundary, and wants moving to `apu-shared` with its `GbModel` gating
+resolved. Checking it: the *channels* — `SquareChannel`, `WaveChannel`, `NoiseChannel`, `Envelope`,
+`Sweep`, `LengthCounter`, `Mixer` — are **already in `apu-shared` and directly usable**. What sits
+in `system-gb::apu` is the **address decode**, and the GBA's is genuinely a different thing: its
+registers are halfwords from `0x0400_0060` laid out with gaps rather than the Game Boy's contiguous
+block, its wave RAM is two banks of sixteen bytes with the CPU seeing whichever is not playing, and
+it has a 75% volume step the Game Boy lacks. So the work is a new register layer over shared
+channels, not a copy of an existing one, and the `GbModel` gating does not apply at all — the GBA
+follows the CGB rule throughout. No decision is needed; write `system-gba::psg`, mix its output into
+`generate_samples` alongside `DirectSound::output`, and scale by `SOUNDCNT_H` bits 0-1.
 
-- **The cartridge has no GPIO, so Emerald has no real-time clock.** It says "the internal battery
-  has run dry" and carries on, which is exactly what a real cartridge with a dead battery does, so
-  this is an accurate result rather than a bug — but berries never grow and the tides never change.
-  The clock lives on four pins at `0x080000C4`-`0x080000C8`, which currently read as ordinary ROM.
-- **Saving has never been verified end to end.** The chip is right — Emerald's `FLASH1M_V103`
-  string is found, `save_ram` is 131072 bytes, and a raw write to the save window is correctly
-  *refused* because FLASH wants its command sequence first — but no game has ever been played far
-  enough to write a file, so nothing has confirmed a save reaches the disk and loads back.
-- **Past the opening is unexercised.** Start, the dead-battery notice, NEW GAME, and Professor
-  Birch's introduction all render correctly with text, sprites and animation. Nothing after that
-  has been looked at, and the save path in particular has never written a file — Emerald is a
-  FLASH cartridge, and `EEPROM saves are reported absent rather than emulated`.
-- **PSG mixing is not wired**, so a game driving music through the four PSG channels gets silence.
-  Emerald's music comes through direct sound so this did not block it, but it is still a real gap
-  and it needs the design decision under "Smaller, well-defined items" made first.
+The one judgement call inside it: the 64-sample wave mode spans both banks, and `apu_shared::WaveChannel`
+holds sixteen bytes and walks 32 samples. Either extend it with a sample count or implement the
+32-sample mode and say the other is not modelled. Prefer extending it — the Game Boy never changes
+the default, and "do not approximate a behaviour you have not modelled" applies to audio too.
 
-The DS items below are the other candidate for what to do next; neither displaces the other.
+Then, in order:
+
+- **Saving has never been verified end to end.** The chip is right — a real cartridge's `FLASH1M`
+  string is found, `save_ram` is the correct 131072 bytes, and a raw write to the save window is
+  correctly *refused* because FLASH wants its command sequence first — but no game has been played
+  far enough to write a file, so nothing has confirmed a save reaches the disk and loads back. Use
+  `frontend-headless run --press` to get there rather than a window.
+- **No cartridge GPIO**, so a game with a real-time clock finds none and reports a flat battery.
+  That is what real hardware with a dead battery does, so it is an accurate outcome rather than a
+  bug, but time-of-day events never fire. The pins are at `0x080000C4`-`0x080000C8`, currently
+  reading as ordinary ROM.
+- **EEPROM saves are reported absent rather than emulated**, and mosaic and the object window are
+  not implemented.
 
 ### The gaps behind it
 
@@ -496,11 +513,10 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-- **PSG mixing on the GBA** needs a design decision first. The `NR10`-`NR52` register layer is
-  shared by all three machines but lives in `system-gb::apu`, and `system-*` crates may not
-  depend on each other. It wants moving into `apu-shared`; the obstacle is that three of its
-  behaviours are gated on `GbModel`, which would have to move or be narrowed. Duplicating it is
-  the copy-paste this project exists to avoid.
+- **PSG mixing on the GBA** is now the biggest gap and is *not* blocked on a decision, though it
+  was recorded that way here for a long time. See "The biggest gap" above for why the blocker
+  dissolved on inspection: the channels are already shared, and only the address decode is
+  per-system — which the GBA needs its own of regardless.
 - **Alpha blending on the GBA** now composes its real lower layer, as a second pass over the line
   with the first-target layers left out. A second `ScanlineBuffer` slot was rejected: that type is
   shared with the Game Boy, which has no colour effects and would carry the runner-up pixel on every

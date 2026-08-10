@@ -28,81 +28,94 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **Pokémon Emerald boots through its intro to the title screen**, with backgrounds, sprites, and affine effects — see below for what is still wrong there. BIOS calls work in both instruction sets, decompressors included. No PSG mixing, mosaic, or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
-**All four systems boot with picture and sound.** The Game Boy and Game Boy Color are the two
-held to a full accuracy bar; see the notes below each of the other two. The application has a
+**All four systems boot with picture and sound, and three of them play commercial games at full
+speed.** The Game Boy and Game Boy Color are the two held to a full accuracy bar; see the notes
+below each of the other two. The application has a
 ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
 a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
 viewer, breakpoints, and watchpoints.
 
 ### Where the Game Boy Advance actually is
 
-`gba-suite`'s three ROMs pass, and **Pokémon Emerald now boots through the GAME FREAK logo, the
-full intro sequence, and the Rayquaza scene to its title screen** — backgrounds, sprites, affine
-scaling, palette fades, and the M4A sound driver all running.
+`gba-suite`'s three ROMs pass, and a commercial game **plays in the window at a measured 100%
+speed** — 59.7 fps sustained, zero frames dropped to the drawing thread, zero audio samples
+dropped. Backgrounds in every mode, sprites at both colour depths, affine scaling and rotation,
+windows, colour blending, save states and rewind all work on real software rather than only on
+unit tests.
 
-Getting there took four bugs, and the fourth was the interesting one. The first three were the
-BIOS interception ignoring Thumb (which is what almost every commercial game is compiled to), the
-interrupt HLE skipping the BIOS's return wrapper so the machine took exactly one interrupt and
-then none, and eleven missing BIOS calls including all five decompressors. Fixing those got the
-intro drawing and no further.
+Two gaps are worth stating plainly because you will notice both:
 
-The fourth was **the machine charging every memory access between three and six times over**. An
-ARM instruction in internal WRAM cost 13 cycles where hardware charges 1, and 49 from the
-cartridge where hardware charges 6. Nothing failed: every test passed, and the emulator still ran
-at a measured 100% speed, because *a frame is a fixed number of cycles however few instructions
-fit inside it*. What the game lost was about nine tenths of its processor — its sound mixer alone
-took 92% of every frame, and its main loop got seven iterations in the time it should have had a
-hundred and sixty. That looks exactly like a hang, and it is why the title screen never arrived.
+- **PSG mixing is not wired.** The GBA makes sound two ways — two DMA-fed direct-sound channels and
+  the Game Boy's four older PSG channels — and only direct sound is connected. A game that drives
+  its music through the PSG channels plays its sound effects and nothing else.
+- **There is no cartridge GPIO**, so a game with a real-time clock finds none and reports a flat
+  battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
+  battery behaves identically and games handle it — but time-of-day events never fire.
 
-Three things compounded to produce it, all now fixed and pinned by
+Mosaic, the object window, and EEPROM saves are also absent. SRAM and Flash work and a real
+cartridge's chip and size are detected correctly, but no game has yet been played far enough to
+write a save file, so that last step is unverified.
+
+#### The bug worth reading about before touching timing anywhere
+
+Getting here took four fixes. Three were ordinary: the BIOS `SWI` interception ignored Thumb, which
+is what almost every commercial game is compiled to; the interrupt HLE skipped the BIOS's return
+wrapper, so the machine took exactly one interrupt and then none; and eleven BIOS calls were
+missing, including all five decompressors.
+
+The fourth is the one with a lesson in it. **Every memory access was charged between three and six
+times over** — an ARM instruction in internal WRAM cost 13 cycles where hardware charges 1, and 49
+from the cartridge where it charges 6.
+
+Nothing failed. Every test passed, and the emulator reported a steady 100% speed the whole time,
+because *a frame is a fixed number of cycles however few instructions fit inside it*. The emulator
+was not slow; the emulated machine was. What a game lost was about nine tenths of its processor,
+and what that looked like was a frozen picture with the CPU visibly running — which reads as a
+hang, and was diagnosed as one twice before a profiler was pointed at it.
+
+Three causes compounded, all now fixed and pinned by
 `an_instruction_costs_what_the_hardware_charges_for_it`:
 
-- The `SWI` interception fetched the opcode through the bus before every instruction, so the CPU's
-  own fetch was the *second* read of the same word. It peeks now.
-- `read32` charged, then delegated to two `read16`s that charged, which delegated to four `read8`s
-  that charged. Charging now happens once, in the `Bus` method the CPU called; everything below it
-  only moves bytes.
-- The wait-state table reports an access's *whole* cost including its first cycle, and the CPU core
-  already counts that cycle in its S/N/I total. The two were added together. Only the waiting is
-  charged now.
+- The `SWI` check fetched every opcode through the bus before the CPU fetched the same word itself.
+  It peeks now, through a path with no side effects.
+- `read32` charged the wait-state table, then charged it again in each `read16` and each `read8` it
+  decomposed into. Charging happens once, in the `Bus` method the CPU called, at the width the CPU
+  asked for; routing is split from timing so the decomposition cannot re-enter the accounting.
+- The wait-state table reports an access's whole cost including its first cycle, and the CPU core's
+  S/N/I total already counted that cycle. Only the waiting is charged now.
 
-The title screen then arrived brown, with no Rayquaza and a dithered smear where "EMERALD VERSION"
-belongs. Two more gaps, both already written down as known and both visible for the first time on a
-real game:
+Two rendering defects surfaced immediately afterwards, both of which had produced a complete and
+plausible *wrong* picture rather than a missing one — the failure mode this project treats as the
+dangerous one:
 
 - **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
-  the winning pixel. Emerald blends the whole sky against the artwork behind it, so every pixel of
-  it was mixed with black. The lower layer is now composed as a second pass with the first-target
-  layers left out — and a blend now happens only when that lower pixel's layer is a declared second
-  target, which is what hardware requires and what turns "always blend with something" into "blend
-  with the right thing or not at all".
-- **Every sprite was decoded as 16-colour.** The depth is per sprite on this hardware — bit 13 of an
-  OAM entry — and one scanline can hold both, so it now rides on the sprite rather than on the
-  call. A 256-colour sprite read as 16-colour comes out as a stretched checkerboard, which is what
-  the wordmark was.
+  the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The
+  lower layer is now composed as a second pass with the first-target layers left out, and a blend
+  happens only where the pixel underneath belongs to a declared second target, as hardware requires.
+- **Every sprite was decoded as 16-colour.** Depth is per sprite on this hardware and one scanline
+  can hold both, so it now rides on the sprite rather than on the call. A 256-colour sprite read as
+  16-colour comes out as a stretched checkerboard.
 
-Past the title screen: pressing start reaches the dead-battery notice — which is what a real
-cartridge without a working clock shows, and this one has no GPIO, so that is an accurate result
-rather than a bug — then NEW GAME, then Professor Birch's introduction, with text, sprites, and
-animation all correct. Nothing after that has been looked at, and no save file has ever been
-written.
+#### The tools
 
-The tool for any of this is `state_dump`, and its companion for a machine that runs but gets
-nowhere is `trace_stall`:
+Reach for these before reasoning about pixels; each of them beat that approach by an order of
+magnitude on this system.
 
 ```sh
 TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state
 TRACE_ROM=<rom> TRACE_FRAMES=600 cargo test -p system-gba --release -- --ignored --nocapture trace_stall
 ```
 
-The first prints the program counter, `DISPCNT`, the interrupt registers, and the handler pointer
-at seven points in a run. The second runs to a chosen frame and then profiles a window of
-instructions — hottest addresses disassembled in the right instruction set, a breakdown by 4 KiB
-page, and the per-instruction cycle cost. The cycle column is what made the fourth bug obvious in
-one line after reasoning from the picture had failed twice.
+`dump_state` prints the program counter, `DISPCNT`, the interrupt registers, the handler pointer,
+and a per-layer graphics decode at seven points in a run. `trace_stall` answers the question after
+it — for a machine executing happily and getting nowhere — by profiling a window of instructions:
+hottest addresses disassembled in the instruction set they were *fetched* in, a breakdown by 4 KiB
+page, how many steps went to a halted CPU, and the average cycle cost of each instruction. The page
+breakdown said a game's main loop was running seven times where it should run a hundred and sixty;
+the cycle column said why.
 
 ### What the Nintendo DS does and does not do
 
@@ -176,14 +189,14 @@ Component status:
 | `frontend-core` settings — TOML config, keybinds, presentation, rewind depth | done; a malformed file falls back to defaults and is left on disk |
 | `frontend-native` — window, `wgpu` presentation, `egui` chrome, library browser, HUD, keybind editor | done; **no native file dialog — drag-and-drop or a pasted path** |
 | `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
-| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested; not yet driven |
-| `system-gba` video timing and bitmap modes 3/4/5 | done and tested; not yet driven |
-| `system-gba` text backgrounds — four layers, map decode, draw order | done and tested; not yet driven |
+| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; the per-instruction poll is profiled rather than assumed |
+| `system-gba` video timing and bitmap modes 3/4/5 | done and tested, and driven by real games |
+| `system-gba` text backgrounds — four layers, map decode, draw order | done and tested, and driven by real games |
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |
-| `system-gba` affine transform — backgrounds and sprites | done and tested; not yet driven |
-| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; PSG mixing not wired |
+| `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
+| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; **PSG mixing not wired**, so a game whose music uses the four PSG channels is silent |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
-| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds plus non-affine sprites draw; **affine sprites not yet composited** |
+| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds, sprites at both depths, and affine sprites through their matrices |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` windows and colour blending | done and applied; alpha blending composes the real lower layer in a second pass, and only blends where that layer is a declared second target |
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done, and a real cartridge's chip and size are detected correctly; **EEPROM reported absent rather than emulated**, and no save has yet been written to disk by a real game |

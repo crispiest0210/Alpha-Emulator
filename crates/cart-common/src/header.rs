@@ -294,7 +294,7 @@ impl GbaHeader {
     /// recognizable marker in the binary. The alternative is a per-title database, which is
     /// worse — it needs maintaining and fails on homebrew entirely.
     ///
-    /// Returns [`SaveKind::None`] when no marker is found, which is correct for the games
+    /// Returns `SaveKind::None` when no marker is found, which is correct for the games
     /// that genuinely have no save chip.
     pub fn detect_save_kind(rom: &[u8]) -> crate::SaveKind {
         use crate::SaveKind;

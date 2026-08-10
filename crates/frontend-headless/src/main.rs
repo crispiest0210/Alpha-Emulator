@@ -12,6 +12,12 @@
 //! stops being true, this binary stops compiling — which is the crate-boundary rule enforcing
 //! itself at the place it matters most.
 //!
+//! # It can press buttons
+//!
+//! `--press <button>@<frame>[:<frames>]`, repeatable. Everything a commercial game does past its
+//! title screen is on the far side of one button press, so without this the only thing reachable
+//! without a window is a game's attract loop — and that is a small fraction of what a game is.
+//!
 //! # Sharing the loader with the window
 //!
 //! The extension-to-system decision lives in [`frontend_core::platform`], not here. It used to be

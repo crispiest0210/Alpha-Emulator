@@ -1,7 +1,7 @@
 //! The keybind configurator.
 //!
-//! The conflict rule it enforces is `frontend-core`'s, not its own: [`KeybindMap::bind`] refuses a
-//! key that is already claimed and [`KeybindMap::rebind`] displaces it. This panel's whole job is
+//! The conflict rule it enforces is `frontend-core`'s, not its own: `KeybindMap::bind` refuses a
+//! key that is already claimed and `KeybindMap::rebind` displaces it. This panel's whole job is
 //! to make that choice visible — show the conflict, let the user confirm, then displace. A UI that
 //! silently displaced would make bindings vanish without explanation; one that silently refused
 //! would look broken.
