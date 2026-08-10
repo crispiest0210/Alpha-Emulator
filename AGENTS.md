@@ -384,6 +384,10 @@ What is left on the GBA is smaller and specific:
   has run dry" and carries on, which is exactly what a real cartridge with a dead battery does, so
   this is an accurate result rather than a bug — but berries never grow and the tides never change.
   The clock lives on four pins at `0x080000C4`-`0x080000C8`, which currently read as ordinary ROM.
+- **Saving has never been verified end to end.** The chip is right — Emerald's `FLASH1M_V103`
+  string is found, `save_ram` is 131072 bytes, and a raw write to the save window is correctly
+  *refused* because FLASH wants its command sequence first — but no game has ever been played far
+  enough to write a file, so nothing has confirmed a save reaches the disk and loads back.
 - **Past the opening is unexercised.** Start, the dead-battery notice, NEW GAME, and Professor
   Birch's introduction all render correctly with text, sprites and animation. Nothing after that
   has been looked at, and the save path in particular has never written a file — Emerald is a

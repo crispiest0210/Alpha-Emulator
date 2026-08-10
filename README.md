@@ -186,7 +186,7 @@ Component status:
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds plus non-affine sprites draw; **affine sprites not yet composited** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` windows and colour blending | done and applied; alpha blending composes the real lower layer in a second pass, and only blends where that layer is a declared second target |
-| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; **EEPROM reported absent rather than emulated** |
+| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done, and a real cartridge's chip and size are detected correctly; **EEPROM reported absent rather than emulated**, and no save has yet been written to disk by a real game |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |
 | `system-gba` HLE interrupt wrapper — register save, handler call, `subs pc, lr, #4` return | done; the return is what puts `CPSR` back, and without it a machine takes exactly one interrupt |
