@@ -48,8 +48,8 @@
 //! | `gb/rendering_audio` | 361 µs | 46x |
 //! | `corpus/dmg_acid2` | 243 µs | 69x |
 //! | `corpus/cgb_acid2` | 258 µs | 65x |
-//! | `gba/spin` | 2 665 µs | 6.3x |
-//! | `corpus/gba_suite_arm` | 269 µs | 62x |
+//! | `gba/spin` | 1 372 µs | 12.2x |
+//! | `corpus/gba_suite_arm` | 738 µs | 22.7x |
 //!
 //! **Where a Game Boy frame goes.** Baseline 210 µs; tile fetch and compositing add 36 µs (+17%);
 //! four sounding APU channels add 115 µs (+47%). So on a machine with music playing, **the APU costs
@@ -60,7 +60,18 @@
 //! **The GBA's two numbers differ because they are different workloads**, not because one is wrong.
 //! `gba/spin` executes ARM instructions back to back out of cartridge ROM, paying a wait state on
 //! every fetch; `gba_suite_arm` spends most of its time in tighter loops. The pessimistic one is the
-//! one the target should be judged against, and it is the 6.3x.
+//! one the target should be judged against, and it is the 12.2x.
+//!
+//! **Neither is the number that matters most, and this file cannot hold the one that is.** No
+//! commercial ROM may be used here, and a synthetic loop is not a game: a real Game Boy Advance
+//! title runs the CPU, four backgrounds, sprites, colour effects, DMA, two timers and a sound
+//! mixer at once. Measured separately against one, `frontend-headless run --frames 600` takes
+//! **1.8–2.1 s against a 10.05 s budget — about 5x real time**, which is under half what
+//! `gba/spin` suggests. Take 5x as the working figure for a real game and these as ceilings.
+//!
+//! **Numbers here move by up to 2x with the machine's thermal state.** `gba/spin` was recorded as
+//! 2 665 µs during a long working session and 1 372 µs on the same code cooled down. Always read a
+//! before/after from one `--baseline` run, never against a figure written down on another day.
 //!
 //! **`gba/spin` was 1 486 µs and 11.3x until 2026-07-31, and that number was not real.** The machine
 //! was charging every memory access three to six times over, so a frame only got through about 7 900
@@ -80,12 +91,13 @@
 //! - **SM83: no.** The worst measured Game Boy workload runs at 46x real time. Even eliminating
 //!   dispatch entirely — impossible — could not turn 46x into anything a player notices, and the
 //!   apportionment above says the APU would become the bottleneck long before dispatch did.
-//! - **ARM7TDMI: no, and by a smaller margin than this file used to claim.** The pessimistic,
-//!   dispatch-bound `gba/spin` workload runs at 6.3x, not the 11.3x recorded before the cycle
-//!   accounting was fixed — the old figure was a machine executing a quarter of the instructions it
-//!   should have. Prompt 18's stated GBA target is full speed *including* 2x and 4x fast-forward, and
-//!   6.3x still clears 4x. The answer does not change, but the headroom behind it is half what it
-//!   was, so this is worth re-asking if the GBA ever gains work per frame.
+//! - **ARM7TDMI: no, but on a real margin rather than the imaginary one this file used to claim.**
+//!   The 11.3x recorded before 2026-07-31 was a machine executing a quarter of the instructions it
+//!   should have, because every memory access was charged three to six times over. With that fixed
+//!   and the per-instruction scheduler poll cleaned up, `gba/spin` is 12.2x — and a *real game*,
+//!   measured outside this file, is about 5x. Prompt 18's stated GBA target is full speed
+//!   *including* 2x and 4x fast-forward; 5x clears 4x, but only just. This is the one system where
+//!   the answer would change if the workload grew, so re-ask it before adding per-instruction work.
 //! - **NDS: deferred, with nothing to measure.** Prompt 18 expects this to be the case that actually
 //!   needs help — two CPUs and a software 3D rasteriser — and prompt 13 has not been started. The
 //!   decision is not "no", it is "not yet measurable", and it must not be inherited from the two
@@ -112,7 +124,7 @@
 //! - **Checking in the CPU** cannot work — the CPU does not know which addresses are watched, and
 //!   teaching it would put the debugger inside the hot trait `core-common` keeps minimal.
 //!
-//! So the cost is accepted deliberately: 4.5% of a 6.3x margin, against watchpoints working in the
+//! So the cost is accepted deliberately: 4.5% of a 12.2x margin, against watchpoints working in the
 //! build people actually have. Recorded here as a **deviation from prompt 15's constraint**, with the
 //! number, rather than reported as compliance. Reproduce it by commenting out the two `record` calls
 //! in `system-gb`'s `read8`/`write8` (six in `system-gba`, which records its halfword I/O paths
@@ -123,13 +135,23 @@
 //! stepping without one — under a nanosecond per instruction, which is the price of a debugging
 //! session and not of playing a game.
 //!
-//! ## Nothing was optimised
+//! ## What has been optimised, and what has not
 //!
-//! Deliberately. Prompt 18 requires every optimisation to be justified by a before/after benchmark,
-//! and the corollary is that an optimisation with no problem behind it should not be written. Every
-//! system meets its target with between 3x and 80x of margin. The workflow is here so that the first
-//! change that *does* need justifying can be justified — and so the APU finding above is on record for
-//! whoever eventually needs the Game Boy to be faster.
+//! Prompt 18 requires every optimisation to be justified by a before/after benchmark, and the
+//! corollary is that an optimisation with no problem behind it should not be written. Two have had
+//! a measured problem behind them, both found with a profiler rather than guessed at:
+//!
+//! - **The DS bus composing every wide access out of byte accesses** — a frame dropped from 15.2 ms
+//!   to 5.28 ms, a 65% reduction.
+//! - **The GBA's per-instruction scheduler poll.** `GbaSystemBus::advance` runs after every
+//!   instruction, and a `sample` profile of a real game put it at **39% of a whole frame** — with
+//!   `Timers::tick` alone at 14% and the DMA poll at 5%, against 7% for all of rendering. Two causes:
+//!   the timer divided by a runtime prescaler twice per enabled timer per instruction, and the DMA
+//!   controller scanned four channels to answer "nothing to do". Every prescaler is a power of two,
+//!   so the divisions are now shifts, and the DMA scan is inlined at the call site. `gba/spin`
+//!   −8.2%, `corpus/gba_suite_arm` −4.4%, framebuffer hash unchanged over 600 frames of a real ROM.
+//!
+//! Nothing else has been. Every system meets its target with 5x to 80x of margin.
 
 use core_common::{InputState, System};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

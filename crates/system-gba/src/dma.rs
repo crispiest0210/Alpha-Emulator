@@ -229,6 +229,20 @@ impl DmaController {
         }
     }
 
+    /// Whether any channel is waiting to run.
+    ///
+    /// The whole point is to answer "no" without a call. The bus asks after *every instruction* and
+    /// the answer is no almost always — a game arms a channel a handful of times a frame — so
+    /// inlining four bool loads at the call site saves entering [`Self::take_transfer`] and
+    /// building an `Option<Transfer>` millions of times a second.
+    ///
+    /// Derived rather than cached: `armed` is written from six places and a stale flag would drop
+    /// a transfer, which is far worse than the four loads it would save.
+    #[inline]
+    pub fn any_armed(&self) -> bool {
+        self.channels.iter().any(|channel| channel.armed)
+    }
+
     /// The highest-priority transfer that is ready, if any.
     ///
     /// Scans from channel 0 every call rather than round-robining: priority is by channel

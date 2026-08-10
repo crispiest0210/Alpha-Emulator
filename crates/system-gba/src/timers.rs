@@ -30,6 +30,8 @@ pub const BASE: u32 = 0x0400_0100;
 
 /// Cycles per tick for each prescaler setting.
 pub const PRESCALERS: [u32; 4] = [1, 64, 256, 1024];
+/// The same four divisors as shifts, for the hot path. Checked against [`PRESCALERS`] by a test.
+const PRESCALER_SHIFTS: [u32; 4] = [0, 6, 8, 10];
 
 mod control {
     pub const PRESCALE: u16 = 0x0003;
@@ -64,8 +66,13 @@ impl Timer {
         self.control & control::IRQ != 0
     }
 
-    fn prescaler(&self) -> u32 {
-        PRESCALERS[(self.control & control::PRESCALE) as usize]
+    /// How many cycles one tick takes, as a shift rather than a divisor.
+    ///
+    /// Every entry of [`PRESCALERS`] is a power of two — 1, 64, 256, 1024 — which is not a
+    /// coincidence to be rediscovered but the reason the hot path can avoid a division.
+    /// `every_prescaler_shift_matches_its_divisor` is what keeps the two tables honest.
+    fn prescaler_shift(&self) -> u32 {
+        PRESCALER_SHIFTS[(self.control & control::PRESCALE) as usize]
     }
 
     /// Advance by one tick. Returns true on overflow.
@@ -112,11 +119,15 @@ impl Timers {
                 continue;
             }
 
-            let prescaler = self.channels[index].prescaler();
+            // Every prescaler is a power of two, so this is a shift and a mask rather than an
+            // integer division and a remainder. It matters because this runs once per timer per
+            // *instruction*: with a game's sound timer running, the two divisions here were 14% of
+            // a whole frame, measured with `sample` against a commercial ROM.
+            let shift = self.channels[index].prescaler_shift();
             let total = self.channels[index].remainder + cycles;
-            self.channels[index].remainder = total % prescaler;
+            self.channels[index].remainder = total & ((1 << shift) - 1);
 
-            for _ in 0..(total / prescaler) {
+            for _ in 0..(total >> shift) {
                 if self.channels[index].tick() {
                     overflowed |= 1 << index;
                     self.cascade_from(index, &mut overflowed);
@@ -403,5 +414,23 @@ mod tests {
         timers.tick(56);
         restored.tick(56);
         assert_eq!(restored.counter(2), timers.counter(2));
+    }
+}
+
+#[cfg(test)]
+mod shift_tests {
+    use super::*;
+
+    #[test]
+    fn every_prescaler_shift_matches_its_divisor() {
+        // The hot path divides by shifting, which is only correct because every prescaler is a
+        // power of two. If a fifth setting ever appears that is not, this is what says so.
+        for (setting, divisor) in PRESCALERS.iter().enumerate() {
+            assert_eq!(
+                1u32 << PRESCALER_SHIFTS[setting],
+                *divisor,
+                "setting {setting}"
+            );
+        }
     }
 }

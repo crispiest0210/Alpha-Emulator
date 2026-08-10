@@ -448,7 +448,8 @@ that produced them rather than in prose that can drift from them.
 |---|---|---|
 | Game Boy, rendering | 246 µs | 68x |
 | Game Boy, rendering + four APU channels | 361 µs | 46x |
-| Game Boy Advance, ARM instructions straight from ROM | 2 665 µs | 6.3x |
+| Game Boy Advance, ARM instructions straight from ROM | 1 372 µs | 12.2x |
+| Game Boy Advance, **a commercial game** (measured outside the bench suite) | ≈3 050 µs | ≈5x |
 | dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
 | Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
 | Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
@@ -462,13 +463,13 @@ Three findings worth surfacing:
   the Game Boy ever needs to be faster.
 - **No dynamic recompiler, for either CPU core**, on the evidence rather than by preference. A dynarec
   replaces dispatch and nothing else, and the worst measured workload on each system already runs at
-  46x and 6.3x real time.
+  46x and 12.2x real time — though a *real* GBA game is about 5x, and that is the figure to hold.
 
   The GBA figure was 11.3x until 2026-07-31 and that number was not real: the machine charged every
   memory access three to six times over, so the same benchmark ROM got through a quarter of the
   instructions it should have. The emulator was not fast, the emulated machine was slow, and a frame
-  is a fixed number of cycles either way. The decision does not change at 6.3x, but half the headroom
-  behind it was imaginary.
+  is a fixed number of cycles either way. A real game at 5x still clears the 4x fast-forward target,
+  but this is the one system where more per-instruction work would change the answer.
 - **The Nintendo DS has a fifth of the margin the GBA does, and prompt 18 was right about it.** At
   3.2x real time against the other systems' 11x to 80x, it is by a wide margin the tightest — and
   that is *without* the 3D core. The dynarec question stays open for it rather than being inherited
@@ -487,8 +488,16 @@ Three findings worth surfacing:
   leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
   deliberate deviation with the number, not as compliance.
 
-Nothing has been optimised, deliberately: every system meets its target with 3x to 80x of margin, and
-an optimisation with no problem behind it is not worth its own risk.
+Two things have been optimised, each with a profiled problem behind it and a before/after to show
+for it — the DS bus composing wide accesses out of byte accesses (−65% of a frame), and the GBA's
+per-instruction scheduler poll, which a `sample` profile of a real game put at **39% of a frame**
+against 7% for all of rendering (−8.2% of `gba/spin`, hash unchanged). Nothing else has been:
+every system meets its target with 5x to 80x of margin, and an optimisation with no problem behind
+it is not worth its own risk.
+
+**Benchmark figures here move by up to 2x with the machine's thermal state.** `gba/spin` measured
+2 665 µs during a long working session and 1 372 µs on identical code cooled down. Make a
+before/after claim from one `--baseline` run, never against a number written down on another day.
 
 ## Architecture
 

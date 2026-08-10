@@ -242,6 +242,10 @@ impl GbaSystemBus {
 
     /// Perform every transfer that is ready, highest priority first.
     fn run_pending_dma(&mut self) {
+        // Asked after every instruction, and the answer is almost always no.
+        if !self.dma.any_armed() {
+            return;
+        }
         while let Some(transfer) = self.dma.take_transfer() {
             let mut source = transfer.source;
             let mut destination = transfer.destination;
