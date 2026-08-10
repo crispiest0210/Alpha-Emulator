@@ -209,6 +209,12 @@ impl GbaSystem {
             (bldalpha >> 8) & 0x1F,
             bldy & 0x1F,
         );
+        // The window *rectangles*, which are where a wrong window shows up. Their registers are
+        // write-only on hardware, so these come from the effects block rather than a bus read.
+        let (w0h, w1h, w0v, w1v) = bus.effects.window_bounds();
+        let rect =
+            |h: u16, v: u16| format!("x {}..{} y {}..{}", h >> 8, h & 0xFF, v >> 8, v & 0xFF);
+        let _ = writeln!(out, "WIN0 {}   WIN1 {}", rect(w0h, w0v), rect(w1h, w1v));
         let _ = writeln!(
             out,
             "WININ={:04X} WINOUT={:04X} MOSAIC={:04X}",

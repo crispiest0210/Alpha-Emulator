@@ -233,6 +233,24 @@ impl DirectSound {
                 self.control.control = value & !(1 << 11) & !(1 << 15);
             }
             reg::SOUNDCNT_X => self.control.master = value & (1 << 7),
+            // The two FIFOs themselves. `owns` has always claimed these addresses and this match
+            // never handled them, so every byte a DMA channel delivered was accepted by the bus
+            // and then dropped: the queues stayed empty, the held sample stayed zero, and the
+            // machine produced digital silence for every game that uses direct sound — which is
+            // every commercial game. Nothing failed, because nothing tested that a sample written
+            // to a FIFO can be read back out of it.
+            //
+            // A halfword rather than a word because the bus splits every 32-bit access in two, and
+            // the FIFO is a byte queue underneath: low byte first, which is the order a little-
+            // endian word delivers its samples in.
+            _ if (reg::FIFO_A..reg::FIFO_A + 4).contains(&addr) => {
+                self.a.push(value as u8 as i8);
+                self.a.push((value >> 8) as u8 as i8);
+            }
+            _ if (reg::FIFO_B..reg::FIFO_B + 4).contains(&addr) => {
+                self.b.push(value as u8 as i8);
+                self.b.push((value >> 8) as u8 as i8);
+            }
             _ => return None,
         }
         Some(())

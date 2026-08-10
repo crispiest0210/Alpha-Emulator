@@ -279,3 +279,33 @@ fn a_corrupt_length_in_a_save_state_cannot_index_past_the_queue() {
         restored.a.pop_sample();
     }
 }
+
+#[test]
+fn a_word_written_to_a_fifo_becomes_four_samples() {
+    // The write path that did not exist. `owns` claimed both FIFO addresses and `write16`
+    // answered `None` for them, so the bus accepted every byte a DMA channel delivered and
+    // dropped it. The queues stayed empty, the held sample stayed zero, and the machine produced
+    // exact digital silence for every game that uses direct sound — which is every commercial
+    // game. Nothing caught it because nothing checked that a sample put into a FIFO comes out.
+    let mut sound = DirectSound::new();
+    sound.write16(reg::FIFO_A, 0x0201);
+    sound.write16(reg::FIFO_A + 2, 0x0403);
+
+    assert_eq!(sound.a.len(), 4, "a 32-bit write is four samples");
+    // Low byte first: a little-endian word delivers its earliest sample in the low byte.
+    assert_eq!(sound.a.pop_sample(), 1);
+    assert_eq!(sound.a.pop_sample(), 2);
+    assert_eq!(sound.a.pop_sample(), 3);
+    assert_eq!(sound.a.pop_sample(), 4);
+}
+
+#[test]
+fn the_two_fifos_are_separate_queues() {
+    let mut sound = DirectSound::new();
+    sound.write16(reg::FIFO_A, 0x1111);
+    sound.write16(reg::FIFO_B, 0x2222);
+    assert_eq!(sound.a.len(), 2);
+    assert_eq!(sound.b.len(), 2);
+    assert_eq!(sound.a.pop_sample(), 0x11);
+    assert_eq!(sound.b.pop_sample(), 0x22);
+}

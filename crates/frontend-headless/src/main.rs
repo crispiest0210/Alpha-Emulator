@@ -150,6 +150,9 @@ fn main() -> Result<()> {
             press,
         } => {
             let mut system = load(&rom)?;
+            // Whether a machine is making any sound at all is otherwise invisible without a
+            // speaker, and "no audio" is a bug report that needs separating from "quiet game".
+            let (mut audio_peak, mut audio_count, mut audio_nonzero) = (0.0f32, 0u64, 0u64);
             for frame in 1..=frames {
                 system.step_frame(InputState {
                     buttons: press
@@ -160,7 +163,13 @@ fn main() -> Result<()> {
                 });
                 // Draining audio matters even with nothing to play it: the buffer is bounded,
                 // and a run that never drains does not exercise the path a real frontend does.
-                let _ = system.take_audio_samples();
+                for sample in system.take_audio_samples() {
+                    audio_peak = audio_peak.max(sample.left.abs()).max(sample.right.abs());
+                    audio_count += 1;
+                    if sample.left != 0.0 || sample.right != 0.0 {
+                        audio_nonzero += 1;
+                    }
+                }
                 if let Some(every) = trace_every {
                     if every > 0 && frame.is_multiple_of(every) {
                         println!("{frame:>8}  {}", hash(system.framebuffer()));
@@ -168,6 +177,9 @@ fn main() -> Result<()> {
                 }
             }
             println!("frames {frames}");
+            println!(
+                "audio  {audio_count} samples, {audio_nonzero} non-silent, peak {audio_peak:.4}"
+            );
             println!("hash   {}", hash(system.framebuffer()));
 
             if let Some(path) = save_frame {

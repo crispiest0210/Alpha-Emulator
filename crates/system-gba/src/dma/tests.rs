@@ -335,3 +335,56 @@ fn dma_state_round_trips_between_repeats() {
     dma.on_hblank();
     assert_eq!(restored.take_transfer(), dma.take_transfer());
 }
+
+#[test]
+fn a_sound_fifo_transfer_ignores_the_channels_own_count_and_destination_step() {
+    // Hardware fixes the shape of a FIFO transfer: four 32-bit words into a destination that does
+    // not move, whatever the channel's own registers say. That is not pedantry — a game does not
+    // bother writing settings the hardware overrides. Pokémon Emerald leaves DMA 1 with an
+    // incrementing destination and a stale word count, and honouring them marched a refill out of
+    // `FIFO_A` and straight up through the DMA control registers above it, thousands of times a
+    // second, writing audio samples over the machine's own configuration.
+    let mut dma = DmaController::new();
+    dma.write16(BASE + 12 + 4, 0x00A0); // destination low: FIFO_A
+    dma.write16(BASE + 12 + 6, 0x0400); // destination high
+    dma.write16(BASE + 12, 0x0000);
+    dma.write16(BASE + 12 + 2, 0x0200); // source in EWRAM
+    dma.write16(BASE + 12 + 8, 0x2000); // a word count that must be ignored
+                                        // Enable, repeat, 32-bit, Special timing, destination step = increment.
+    dma.write16(BASE + 12 + 10, 0x8000 | (1 << 9) | (1 << 10) | (3 << 12));
+
+    dma.on_fifo_empty(0x0400_00A0);
+    let transfer = dma.take_transfer().expect("armed");
+    assert_eq!(transfer.words, 4, "always four words");
+    assert_eq!(transfer.unit, 4, "always 32-bit");
+    assert_eq!(transfer.destination, 0x0400_00A0);
+    assert_eq!(transfer.destination_step, AddressStep::Fixed);
+
+    // And the running destination must not have moved either, or the next refill lands on the
+    // DMA registers rather than the FIFO.
+    dma.on_fifo_empty(0x0400_00A0);
+    let second = dma.take_transfer().expect("armed again");
+    assert_eq!(second.destination, 0x0400_00A0, "still the FIFO");
+    assert_eq!(
+        second.source,
+        transfer.source + 16,
+        "but the source walks forward through the sample buffer"
+    );
+}
+
+#[test]
+fn an_ordinary_transfer_still_honours_its_own_settings() {
+    // The override above is keyed to channels 1 and 2 with Special timing. Everything else must
+    // keep reading its registers, including channel 3's Special, which is video capture.
+    let mut dma = DmaController::new();
+    dma.write16(BASE + 12 + 4, 0x0000);
+    dma.write16(BASE + 12 + 6, 0x0300);
+    dma.write16(BASE + 12 + 8, 0x0010);
+    dma.write16(BASE + 12 + 10, 0x8000 | (1 << 10)); // enable, 32-bit, immediate
+
+    let transfer = dma
+        .take_transfer()
+        .expect("immediate transfers arm on enable");
+    assert_eq!(transfer.words, 0x10, "its own count");
+    assert_eq!(transfer.destination_step, AddressStep::Increment);
+}

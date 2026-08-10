@@ -50,12 +50,12 @@ it is added to your library and starts playing.
 | `.gba` | Game Boy Advance | Playable — with two gaps worth knowing about |
 | `.nds` | Nintendo DS | **Partial** — see below |
 
-Game Boy Advance games play at full speed with picture, sound effects, input, and saves. Two things
-are missing and you will notice both. **Music is often silent**: the GBA can make sound two ways,
-and only one of them is wired, so a game whose music comes through the older four-channel hardware
-plays its sound effects and nothing else. And there is **no cartridge clock**, so a game with a
-real-time clock will say its internal battery has run dry and carry on — which is exactly what a
-real cartridge with a flat battery does, so nothing is broken, but time-of-day events never happen.
+Game Boy Advance games play at full speed with picture, sound, input, and saves. Two things are
+missing. The GBA can make sound two ways and only one is wired, so **part of the mix is missing**
+in a game that uses the older four-channel hardware alongside the main one. And there is **no
+cartridge clock**, so a game with a real-time clock will say its internal battery has run dry and
+carry on — which is exactly what a real cartridge with a flat battery does, so nothing is broken,
+but time-of-day events never happen.
 
 Nintendo DS support is real but newer: games boot, both screens draw in 2D and 3D, sound plays, and
 saves work. It is held to a lower accuracy bar than the other three and some games will misbehave.

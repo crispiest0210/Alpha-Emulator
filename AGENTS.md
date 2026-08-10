@@ -376,12 +376,28 @@ of structure for a little reuse. Worth doing only when a third caller appears.
 
 ### The biggest gap
 
-**PSG audio on the Game Boy Advance.** A commercial GBA game now plays at a measured 100% speed in
-the window — 59.7 fps sustained, zero dropped frames, zero dropped audio samples — with backgrounds,
-sprites, affine effects, colour blending, input and save states all working on real software. The
-loudest thing still wrong is that **music is often silent**: the GBA makes sound two ways and only
-direct sound is wired, so a game whose music comes through the four PSG channels plays its effects
-and nothing else.
+**Graphics that break across a screen change.** Reported against a commercial game on 2026-08-10,
+with a screenshot: a screen that is mostly right but missing one background layer's content. Two
+severe bugs were found and fixed while chasing it, and it is not yet known whether they were the
+cause — re-test before assuming anything:
+
+- **The sound FIFOs had no write path at all.** `DirectSound::owns` claimed both FIFO addresses and
+  `write16` answered `None` for them, so the bus accepted every byte a DMA channel delivered and
+  dropped it. The machine produced *exact digital silence* — 0 non-zero samples out of 964140 —
+  for every game that uses direct sound, which is every commercial game.
+- **A sound-FIFO DMA read its own destination step and word count.** Hardware fixes the shape of
+  that transfer — four 32-bit words into a destination that does not move — precisely because a
+  game does not bother writing settings the hardware overrides. Honouring them marched a refill
+  out of `FIFO_A` and up through the **DMA control registers** above it, thousands of times a
+  second, writing audio samples over the machine's own configuration. That is a very good candidate
+  for "graphics fall apart on a screen change" and it is what to rule out first.
+
+What is known about the remaining report: at the screen in question VRAM *is* populated and the
+windows *do* cover the screen, so it is neither a failed upload nor a window-mask bug. The layer
+whose char base is empty is the one with nothing to draw, which is expected. Reproduce with
+`frontend-headless run --press` and `graphics_dump`, which now prints the window rectangles too.
+
+**PSG audio** is the other known gap: the GBA makes sound two ways and only direct sound is wired,
 
 This was recorded for a long time as blocked on a design decision, and **that framing was wrong**.
 The claim was that the `NR10`-`NR52` register layer is shared, lives in `system-gb::apu`, cannot be

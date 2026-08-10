@@ -170,6 +170,14 @@ impl Channel {
         }
     }
 
+    /// Whether this is a sound-FIFO transfer, whose shape hardware fixes rather than reads.
+    ///
+    /// Only channels 1 and 2 can feed a FIFO. Channel 3's `Special` is video capture and channel
+    /// 0 has none, so the channel number is half the test and the timing is the other half.
+    fn is_sound_fifo(&self, index: usize) -> bool {
+        (index == 1 || index == 2) && self.timing() == StartTiming::Special
+    }
+
     fn resolved_words(&self, index: usize) -> u32 {
         let max = Self::max_words(index);
         let requested = self.words as u32 & (max - 1);
@@ -249,8 +257,24 @@ impl DmaController {
     /// number and it is absolute, so a fair rotation would be the wrong behaviour.
     pub fn take_transfer(&mut self) -> Option<Transfer> {
         let index = (0..CHANNELS).find(|&i| self.channels[i].armed)?;
-        let words = self.channels[index].resolved_words(index);
-        let unit = self.channels[index].unit();
+        // A sound-FIFO transfer ignores three of the channel's own settings, and this is not a
+        // detail — a game does not bother writing settings the hardware overrides, so honouring
+        // what it wrote is catastrophic rather than merely wrong. Pokémon Emerald leaves DMA 1 and
+        // 2 with an incrementing destination and whatever word count was last there; obeying that
+        // marched a refill up out of `FIFO_A` and straight through the DMA control registers
+        // above it, arming and disarming channels at random. It presented as silence plus
+        // graphics that fell apart whenever the screen changed.
+        let fifo = self.channels[index].is_sound_fifo(index);
+        let (words, unit, destination_step) = if fifo {
+            // Always four 32-bit words into a destination that does not move.
+            (4, 4, AddressStep::Fixed)
+        } else {
+            (
+                self.channels[index].resolved_words(index),
+                self.channels[index].unit(),
+                self.channels[index].destination_step(),
+            )
+        };
         let channel = &mut self.channels[index];
 
         let transfer = Transfer {
@@ -260,7 +284,7 @@ impl DmaController {
             words,
             unit,
             source_step: channel.source_step(),
-            destination_step: channel.destination_step(),
+            destination_step,
             raise_irq: channel.control & control::IRQ != 0,
         };
 
@@ -269,7 +293,7 @@ impl DmaController {
         // Walk the running addresses past what this transfer covered.
         let span = words as i64 * unit as i64;
         channel.current_source = advance(channel.current_source, channel.source_step(), span);
-        channel.current_destination = match channel.destination_step() {
+        channel.current_destination = match destination_step {
             // The reload variant snaps back so the next repeat refills the same buffer.
             AddressStep::IncrementReload => channel.destination,
             step => advance(channel.current_destination, step, span),

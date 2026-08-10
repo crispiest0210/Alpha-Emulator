@@ -50,7 +50,11 @@ Two gaps are worth stating plainly because you will notice both:
 
 - **PSG mixing is not wired.** The GBA makes sound two ways — two DMA-fed direct-sound channels and
   the Game Boy's four older PSG channels — and only direct sound is connected. A game that drives
-  its music through the PSG channels plays its sound effects and nothing else.
+  sound through the PSG channels loses that part of its mix. Direct sound itself now works: until
+  2026-08-10 it produced **exact digital silence**, because `DirectSound::owns` claimed both FIFO
+  addresses and `write16` answered `None` for them, so every byte a DMA channel delivered was
+  accepted by the bus and dropped. Nothing caught it because nothing checked that a sample put
+  into a FIFO comes back out.
 - **There is no cartridge GPIO**, so a game with a real-time clock finds none and reports a flat
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
@@ -189,12 +193,12 @@ Component status:
 | `frontend-core` settings — TOML config, keybinds, presentation, rewind depth | done; a malformed file falls back to defaults and is left on disk |
 | `frontend-native` — window, `wgpu` presentation, `egui` chrome, library browser, HUD, keybind editor | done; **no native file dialog — drag-and-drop or a pasted path** |
 | `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
-| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; the per-instruction poll is profiled rather than assumed |
+| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; a sound-FIFO transfer's shape is fixed by hardware rather than read from the channel |
 | `system-gba` video timing and bitmap modes 3/4/5 | done and tested, and driven by real games |
 | `system-gba` text backgrounds — four layers, map decode, draw order | done and tested, and driven by real games |
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |
 | `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
-| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested; **PSG mixing not wired**, so a game whose music uses the four PSG channels is silent |
+| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10; **PSG mixing still not wired** |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds, sprites at both depths, and affine sprites through their matrices |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |

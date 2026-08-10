@@ -140,6 +140,11 @@ impl Effects {
         within(x, left, right) && within(y, top, bottom)
     }
 
+    /// The four window-bound registers, for diagnostics. They are write-only to a game.
+    pub fn window_bounds(&self) -> (u16, u16, u16, u16) {
+        (self.win0h, self.win1h, self.win0v, self.win1v)
+    }
+
     pub fn blend_mode(&self) -> BlendMode {
         match (self.bldcnt >> 6) & 3 {
             1 => BlendMode::Alpha,
