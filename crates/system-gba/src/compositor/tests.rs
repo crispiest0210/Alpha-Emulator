@@ -746,3 +746,39 @@ fn an_object_window_sprite_masks_by_its_shape_rather_than_drawing() {
         "and the sprite itself never draws"
     );
 }
+
+#[test]
+fn a_background_larger_than_one_screen_block_reaches_its_other_blocks() {
+    // `BackgroundParams::full_line` describes a 32x32 map, and the GBA text renderer wraps on the
+    // size *it* is given — so a layer left at that default wrapped at half its real size and never
+    // reached its second screen block. Pokémon Emerald's battle menu lives in exactly that block,
+    // on a 32x64 background scrolled to 320, and the whole bottom of the screen came out as
+    // backdrop because line 140 read block 0 instead of block 1.
+    use crate::background::SCREEN_BLOCK;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+
+    // A solid tile 1, and a map whose *second* screen block names it while the first does not.
+    for row in 0..8 {
+        scene.vram[0x20 + row * 4..0x20 + row * 4 + 4].copy_from_slice(&[0x11; 4]);
+    }
+    let block1 = SCREEN_BLOCK; // screen base 0, so the second block starts one block along
+    scene.vram[block1..block1 + 2].copy_from_slice(&1u16.to_le_bytes());
+
+    // BG0: screen base 0, size 2 (32x64 tiles), enabled.
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE, 2 << 14);
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+    // Scroll down by 256 pixels: the top of the screen is now the top of the second block.
+    scene.backgrounds.write16(0x0400_0012, 256); // BG0VOFS
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "scrolled into the second screen block, its tile should be what draws"
+    );
+}

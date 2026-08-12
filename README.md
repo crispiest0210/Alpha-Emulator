@@ -115,6 +115,11 @@ one:
   sprite won against every background. Characters walked *over* the text boxes in front of them.
   The GBA text tilemap also recorded a hard-coded priority of zero on every pixel, so there was
   nothing to compare against even once the sprite's was passed through.
+- **A background larger than 32x32 tiles wrapped at half its size.** `BackgroundParams::full_line`
+  describes a 32x32 map and the text renderer wraps on the size it is handed, so a layer left at
+  that default never reached its second screen block. Emerald's battle menu lives in exactly that
+  block, on a 32x64 background scrolled to 320 — so the bottom fifty scanlines read an empty block
+  and came out as backdrop.
 - **The object window was reported as never covering.** A sprite whose graphics mode is
   `ObjectWindow` draws nothing; its *shape* is a window region, and `WINOUT`'s high byte says what
   is visible inside it. Answering "never" is not a neutral default — a game that reveals content
