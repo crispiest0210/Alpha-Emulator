@@ -225,6 +225,21 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 - The SM83 core reports each memory access through `Bus::tick` *before* performing it, and the
   bus drains due events inside that call. Advancing the clock without draining passes
   `mem_timing` and breaks `instr_timing`.
+- **Every GBA rendering bug so far has produced a complete, plausible *wrong* picture rather than a
+  missing one**, which is much harder to spot than a gap and is why a save state from the reporter
+  beats any amount of reasoning. The five, all now covered by tests: colour index 0 in a text
+  background drawn as a colour instead of transparent, so the frontmost layer went opaque and hid
+  everything behind it; sprite-versus-background priority decided by the Game Boy's single "behind
+  background" bit instead of comparing the two priorities, so every sprite won; bit 5 of
+  `WININ`/`WINOUT` treated as a sixth layer when it is the colour-effect enable; a text background
+  wrapping at 32x32 whatever `BGxCNT` said, so a larger one never reached its second screen block;
+  and the object window answered as never covering, so content revealed *through* one vanished.
+  **When a picture is wrong, get a save state and bisect the layers** — `--state`, then render with
+  one layer enabled at a time. Four of the five were found that way in minutes.
+- **`graphics_dump`'s scroll column is not trustworthy.** `BGxHOFS`/`BGxVOFS` are write-only, so a
+  bus read returns zero and the dump shows `scroll=(0,0)` for a layer scrolled to 320. The stored
+  value has to come from `bus.backgrounds.layers[i]`. This cost real time on the battle-menu bug,
+  where the scroll *was* the answer.
 - **A masked comparison is the wrong way to write `owns`.** It bit the GBA interrupt controller
   (`IE` and `IF` are two apart, so `& !1` misses `IF`) and the direct-sound block (`SOUNDCNT_H`
   is a halfword at an address ending in 2, so no single mask groups it correctly). Write
@@ -376,28 +391,9 @@ of structure for a little reuse. Worth doing only when a third caller appears.
 
 ### The biggest gap
 
-**Graphics that break across a screen change.** Reported against a commercial game on 2026-08-10,
-with a screenshot: a screen that is mostly right but missing one background layer's content. Two
-severe bugs were found and fixed while chasing it, and it is not yet known whether they were the
-cause — re-test before assuming anything:
-
-- **The sound FIFOs had no write path at all.** `DirectSound::owns` claimed both FIFO addresses and
-  `write16` answered `None` for them, so the bus accepted every byte a DMA channel delivered and
-  dropped it. The machine produced *exact digital silence* — 0 non-zero samples out of 964140 —
-  for every game that uses direct sound, which is every commercial game.
-- **A sound-FIFO DMA read its own destination step and word count.** Hardware fixes the shape of
-  that transfer — four 32-bit words into a destination that does not move — precisely because a
-  game does not bother writing settings the hardware overrides. Honouring them marched a refill
-  out of `FIFO_A` and up through the **DMA control registers** above it, thousands of times a
-  second, writing audio samples over the machine's own configuration. That is a very good candidate
-  for "graphics fall apart on a screen change" and it is what to rule out first.
-
-What is known about the remaining report: at the screen in question VRAM *is* populated and the
-windows *do* cover the screen, so it is neither a failed upload nor a window-mask bug. The layer
-whose char base is empty is the one with nothing to draw, which is expected. Reproduce with
-`frontend-headless run --press` and `graphics_dump`, which now prints the window rectangles too.
-
-**PSG audio** is the other known gap: the GBA makes sound two ways and only direct sound is wired,
+**PSG audio on the Game Boy Advance.** A commercial game now plays through its opening, overworld,
+menus and battles at a measured 100% speed with sound. The loudest thing still missing is that the
+GBA makes sound two ways and only direct sound is wired, so part of a game's mix is silent.
 
 This was recorded for a long time as blocked on a design decision, and **that framing was wrong**.
 The claim was that the `NR10`-`NR52` register layer is shared, lives in `system-gb::apu`, cannot be
@@ -419,17 +415,15 @@ the default, and "do not approximate a behaviour you have not modelled" applies 
 
 Then, in order:
 
-- **Saving has never been verified end to end.** The chip is right — a real cartridge's `FLASH1M`
-  string is found, `save_ram` is the correct 131072 bytes, and a raw write to the save window is
-  correctly *refused* because FLASH wants its command sequence first — but no game has been played
-  far enough to write a file, so nothing has confirmed a save reaches the disk and loads back. Use
-  `frontend-headless run --press` to get there rather than a window.
+- **Saving works and is confirmed by play**, as of 2026-08-11: a commercial game's in-game save,
+  quicksave, and the save-state list were all exercised by hand and all three behave. The chip is
+  detected from the cartridge rather than guessed, so this should hold for any FLASH or SRAM title;
+  EEPROM is the one still absent.
 - **No cartridge GPIO**, so a game with a real-time clock finds none and reports a flat battery.
   That is what real hardware with a dead battery does, so it is an accurate outcome rather than a
   bug, but time-of-day events never fire. The pins are at `0x080000C4`-`0x080000C8`, currently
   reading as ordinary ROM.
-- **EEPROM saves are reported absent rather than emulated**, and mosaic and the object window are
-  not implemented.
+- **EEPROM saves are reported absent rather than emulated**, and mosaic is not implemented.
 
 ### The gaps behind it
 

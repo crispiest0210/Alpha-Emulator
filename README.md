@@ -59,7 +59,8 @@ Two gaps are worth stating plainly because you will notice both:
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
 
-Mosaic and EEPROM saves are absent. SRAM and Flash work and a real
+Mosaic and EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
+working by play on a commercial title. SRAM and Flash work and a real
 cartridge's chip and size are detected correctly, but no game has yet been played far enough to
 write a save file, so that last step is unverified.
 
@@ -231,10 +232,10 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10; **PSG mixing still not wired** |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
-| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds, sprites at both depths, and affine sprites through their matrices |
+| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
-| `system-gba` windows and colour blending | done and applied; alpha blending composes the real lower layer in a second pass, and only blends where that layer is a declared second target |
-| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done, and a real cartridge's chip and size are detected correctly; **EEPROM reported absent rather than emulated**, and no save has yet been written to disk by a real game |
+| `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
+| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |
 | `system-gba` HLE interrupt wrapper — register save, handler call, `subs pc, lr, #4` return | done; the return is what puts `CPSR` back, and without it a machine takes exactly one interrupt |

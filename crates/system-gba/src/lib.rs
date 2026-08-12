@@ -27,13 +27,32 @@
 //! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
 //!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
 //!   write a save file, so the path from a game's write to a file on disk is unverified.
-//! - **Mosaic is not implemented**, and the object window is reported as never covering, since
-//!   sprites drawn into it are not yet distinguished from ordinary ones.
+//! - **Mosaic is not implemented.** The object window now is: a sprite whose graphics mode is
+//!   `ObjectWindow` draws nothing and its shape is a region instead, with `WINOUT`'s high byte
+//!   saying what is visible inside it.
 //! - **No cartridge GPIO**, so a game with a real-time clock finds none. That is a supported
 //!   hardware state rather than a failure — a cartridge with a dead battery behaves the same way
 //!   and games handle it — but the clock never advances.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
+//!
+//! # The failure mode this system keeps producing
+//!
+//! Every rendering bug found here so far produced a **complete and plausible wrong picture** rather
+//! than a missing one, which is far harder to notice than a gap and is why the reference
+//! comparisons and a save-state repro matter more than they look. The list, each now covered by a
+//! test:
+//!
+//! - Colour index 0 in a text background drawn as a colour rather than transparent, so the
+//!   frontmost layer went opaque and hid everything behind it.
+//! - Sprite-versus-background priority decided by the Game Boy's single "behind background" bit
+//!   instead of comparing the two priorities, so every sprite won and characters walked over the
+//!   text boxes in front of them.
+//! - Bit 5 of `WININ`/`WINOUT` treated as a sixth layer when it is the colour-effect enable, so
+//!   effects applied inside regions a game had switched them off in and menu panels came out grey.
+//! - A text background wrapping at 32x32 whatever its real size, so a larger one never reached its
+//!   second screen block and half its content was simply absent.
+//! - The object window answered as never covering, so content revealed *through* one vanished.
 //!
 //! # The bug worth knowing about before touching timing
 //!
