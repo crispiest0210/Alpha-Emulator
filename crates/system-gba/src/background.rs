@@ -180,6 +180,8 @@ pub struct GbaTilemap<'a> {
     /// Size in tiles.
     pub width: u32,
     pub height: u32,
+    /// This layer's `BGxCNT` priority, 0 nearest.
+    pub priority: u8,
 }
 
 impl TilemapSource for GbaTilemap<'_> {
@@ -208,7 +210,11 @@ impl TilemapSource for GbaTilemap<'_> {
             },
             flip_x: entry & 0x0400 != 0,
             flip_y: entry & 0x0800 != 0,
-            priority: 0,
+            // The layer's priority, recorded on every pixel it draws. A GBA text map cell has no
+            // priority bit of its own — unlike the Game Boy Color's tile attributes — so this comes
+            // from `BGxCNT`. It was hard-coded to zero, which left every background claiming to be
+            // the frontmost and made sprite-versus-background priority unresolvable.
+            priority: self.priority,
         }
     }
 }

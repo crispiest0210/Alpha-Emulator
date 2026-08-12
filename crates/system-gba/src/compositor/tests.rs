@@ -645,3 +645,63 @@ fn colour_zero_in_a_text_layer_lets_the_layer_behind_show_through() {
         "the red layer behind should show through a transparent front layer"
     );
 }
+
+#[test]
+fn a_sprite_behind_a_background_by_priority_does_not_cover_it() {
+    // The rule this machine actually uses: compare the sprite's priority with the background's.
+    // Every GBA sprite used to win against every background, because the Game Boy's rule was
+    // applied — a single "behind background" bit that the GBA decoder always leaves false. What
+    // that looked like was a character walking *over* the text box in front of them.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // the background's colour
+    scene.colour(257, GREEN); // the sprite's colour
+    scene.simple_layer(0, 0, 8); // BG0 at priority 0, the nearest
+    scene.simple_sprite(0, 0); // sprite at priority 0 by default
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "at equal priority the sprite is in front"
+    );
+
+    // Now put the sprite behind: attribute 2 bits 10-11 carry its priority.
+    scene.simple_sprite(0, 2 << 10);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "a higher priority number is further back, so the background covers it"
+    );
+}
+
+#[test]
+fn a_window_can_switch_the_colour_effect_off_inside_it() {
+    // Bit 5 of WININ/WINOUT is not a sixth layer — it is whether colour effects apply in that
+    // region at all. Ignoring it darkened everything a game meant to leave alone, which is why
+    // menu panels came out grey instead of white.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+    scene
+        .effects
+        .write16(ereg::BLDCNT, Layer::Bg0.bit() | (3 << 6)); // darken BG0
+    scene.effects.write16(ereg::BLDY, 16); // fully
+
+    let unwindowed = scene.render(0).pixel(0, 0).r;
+    assert!(unwindowed < 0x40, "with no window the darkening applies");
+
+    // Window 0 over the whole screen, with BG0 visible but the effect bit clear.
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+    scene.effects.write16(ereg::WIN0H, 0x00F0);
+    scene.effects.write16(ereg::WIN0V, 0x00A0);
+    scene.effects.write16(ereg::WININ, Layer::Bg0.bit());
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "inside the window the effect is switched off, so the layer keeps its colour"
+    );
+}

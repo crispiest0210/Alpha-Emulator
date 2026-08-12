@@ -82,6 +82,7 @@ fn each_layer_has_its_own_horizontal_and_vertical_scroll() {
 fn a_map_entry_decodes_into_a_tile_reference() {
     let vram = map_with(32, 0x0000, 0, 0);
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 0,
         char_base: 0,
@@ -93,7 +94,11 @@ fn a_map_entry_decodes_into_a_tile_reference() {
 
     // Tile 5, both flips, palette 9.
     let vram = map_with(32, 5 | 0x0400 | 0x0800 | (9 << 12), 0, 0);
-    let map = GbaTilemap { vram: &vram, ..map };
+    let map = GbaTilemap {
+        priority: 0,
+        vram: &vram,
+        ..map
+    };
     let tile = map.tile_at(0, 0);
     assert_eq!(tile.data_offset, 5 * 32, "16-colour tiles are 32 bytes");
     assert!(tile.flip_x);
@@ -107,6 +112,7 @@ fn the_palette_field_is_unused_in_two_hundred_and_fifty_six_colour_mode() {
     // index a palette that does not exist.
     let vram = map_with(32, 7 | (9 << 12), 0, 0);
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 0,
         char_base: 0,
@@ -125,6 +131,7 @@ fn a_wide_map_is_stored_as_two_blocks_not_one_wide_grid() {
     // tile at x=37 is in the *second* block's column 5, not the first block's column 37.
     let vram = map_with(64, 0x0123, 37, 0);
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 0,
         char_base: 0,
@@ -143,6 +150,7 @@ fn a_wide_map_is_stored_as_two_blocks_not_one_wide_grid() {
 fn a_tall_map_places_its_second_block_below_the_first() {
     let vram = map_with(32, 0x00AA, 0, 40);
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 0,
         char_base: 0,
@@ -158,6 +166,7 @@ fn a_full_size_map_uses_all_four_blocks() {
     for (x, y) in [(0, 0), (40, 0), (0, 40), (40, 40)] {
         let vram = map_with(64, 0x0055, x, y);
         let map = GbaTilemap {
+            priority: 0,
             vram: &vram,
             screen_base: 0,
             char_base: 0,
@@ -173,6 +182,7 @@ fn a_full_size_map_uses_all_four_blocks() {
 fn the_map_wraps_rather_than_reading_past_its_edge() {
     let vram = map_with(32, 0x0011, 0, 0);
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 0,
         char_base: 0,
@@ -191,6 +201,7 @@ fn the_char_and_screen_bases_offset_the_fetch() {
     vram[offset..offset + 2].copy_from_slice(&entry.to_le_bytes());
 
     let map = GbaTilemap {
+        priority: 0,
         vram: &vram,
         screen_base: 5 * SCREEN_BLOCK,
         char_base: 2 * CHAR_BLOCK,

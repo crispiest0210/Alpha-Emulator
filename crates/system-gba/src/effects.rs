@@ -59,6 +59,15 @@ impl Layer {
         1 << self as u16
     }
 
+    /// Bit 5 of `WININ`/`WINOUT` is **not** a sixth layer: it says whether colour special effects
+    /// apply at all inside that region. It shares its position with [`Layer::Backdrop`], which is a
+    /// real target in `BLDCNT` — the same bit means two different things in two register sets.
+    ///
+    /// Ignoring it made every effect apply everywhere. A game that darkens the world behind a menu
+    /// masks the effect off inside the menu's window; without that, the menu is darkened too, and
+    /// its panels come out grey instead of white.
+    pub const COLOUR_EFFECT: u16 = 1 << 5;
+
     pub const fn background(index: usize) -> Self {
         match index {
             0 => Layer::Bg0,

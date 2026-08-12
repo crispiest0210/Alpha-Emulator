@@ -242,12 +242,20 @@ fn apply_effects(
         // not yet distinguished from ordinary ones, so it is reported as never covering rather
         // than as always covering — which would mask the whole screen.
         let visible = frame.effects.visible_layers(x as u32, line, windows, false);
-        if visible & layer.bit() == 0 {
+        // The backdrop is not maskable: bit 5 of a window register is the colour-effect enable,
+        // not a backdrop-enable, so testing it as a layer bit asks the wrong question entirely.
+        if layer != Layer::Backdrop && visible & layer.bit() == 0 {
             write_pixel(pixel, backdrop);
             continue;
         }
 
         if mode == BlendMode::None || !frame.effects.is_first_target(layer) {
+            continue;
+        }
+        // …and here it is asked the right one. A game darkening the world behind a menu switches
+        // the effect off inside the menu's window; honouring only the layer bits darkened the menu
+        // too, which is why its panels came out grey rather than white.
+        if visible & Layer::COLOUR_EFFECT == 0 {
             continue;
         }
         let top = Rgba8 {
@@ -296,6 +304,7 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         depth: layer.bit_depth(),
         width,
         height,
+        priority: layer.priority(),
     };
     let params = BackgroundParams {
         layer: index as u8,
@@ -410,7 +419,10 @@ fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
         &sprites,
         frame.vram,
         line,
-        SpriteRule::SpriteDecides,
+        // Compare the sprite's priority against the background's, which is this machine's rule.
+        // `SpriteDecides` is the Game Boy's, and under it every GBA sprite won against every
+        // background — so a character walked over the text box in front of them.
+        SpriteRule::ByPriority,
         scanline,
     );
 }

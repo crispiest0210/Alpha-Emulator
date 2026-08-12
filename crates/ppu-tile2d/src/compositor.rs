@@ -210,6 +210,9 @@ pub struct Sprite {
     /// 32-tile-wide sheet that each sprite is a window onto, and then the next row is a fixed
     /// distance away regardless of the sprite's width — hence a field rather than a derivation.
     pub row_stride: usize,
+    /// This sprite's priority, 0 nearest. Compared against the background pixel's under
+    /// [`SpriteRule::ByPriority`]; ignored by the Game Boy, which has one sprite plane.
+    pub priority: u8,
     /// How many bits each of this sprite's pixels takes.
     ///
     /// Per sprite rather than per call, because on the Game Boy Advance it genuinely varies: bit 13
@@ -235,6 +238,13 @@ pub struct Sprite {
 /// resolve it, which is why this is a parameter rather than a second renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpriteRule {
+    /// Compare the two priorities: the sprite is in front where its own is less than or equal to
+    /// the background pixel's. The Game Boy Advance's rule, and the reason a sprite carries a
+    /// priority at all.
+    ///
+    /// Without this every sprite won against every background, so a character walked *over* the
+    /// text box in front of them rather than behind it.
+    ByPriority,
     /// The DMG's rule: only the sprite gets an opinion. It loses where its own "behind
     /// background" bit is set and the background pixel is opaque.
     SpriteDecides,
@@ -264,6 +274,9 @@ pub fn background_wins(
         return false;
     }
     match rule {
+        // Answered by the caller, which has both priorities; this entry point only sees one bit
+        // of each and cannot compare them.
+        SpriteRule::ByPriority => false,
         SpriteRule::SpriteDecides => sprite_yields,
         SpriteRule::SpriteOrTileDecides { master_priority } => {
             master_priority && (tile_asks_for_priority || sprite_yields)
@@ -340,14 +353,21 @@ pub fn render_sprites(
 
                 let background = out.get(screen_x);
                 let covered = background.source == PixelSource::Background
-                    && background_wins(
-                        rule,
-                        // `TileRef::priority` counts lower as nearer, so zero is the tile
-                        // asking to be drawn in front.
-                        background.priority == 0,
-                        sprite.behind_background,
-                        background.color,
-                    );
+                    && match rule {
+                        // A transparent background pixel never covers anything, whatever the
+                        // priorities say.
+                        SpriteRule::ByPriority => {
+                            background.color != 0 && sprite.priority > background.priority
+                        }
+                        _ => background_wins(
+                            rule,
+                            // `TileRef::priority` counts lower as nearer, so zero is the tile
+                            // asking to be drawn in front.
+                            background.priority == 0,
+                            sprite.behind_background,
+                            background.color,
+                        ),
+                    };
                 if covered {
                     // The sprite loses to the background here, but it has still claimed the
                     // pixel: a farther sprite does not get to show through instead.
@@ -614,6 +634,7 @@ mod tests {
     fn sprite_at(x: i32, y: i32) -> Sprite {
         Sprite {
             depth: BitDepth::Two,
+            priority: 0,
             x,
             y,
             width: 8,

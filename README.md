@@ -59,7 +59,10 @@ Two gaps are worth stating plainly because you will notice both:
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
 
-Mosaic, the object window, and EEPROM saves are also absent. SRAM and Flash work and a real
+**The object window is not implemented** — it is reported as never covering, since sprites drawn
+into it are not distinguished from ordinary ones. A game uses it as a *shape* to mask layers or
+colour effects, so where one is used, an effect that should have been switched off in that region
+still applies. Mosaic and EEPROM saves are also absent. SRAM and Flash work and a real
 cartridge's chip and size are detected correctly, but no game has yet been played far enough to
 write a save file, so that last step is unverified.
 
@@ -108,6 +111,18 @@ one:
   the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The
   lower layer is now composed as a second pass with the first-target layers left out, and a blend
   happens only where the pixel underneath belongs to a declared second target, as hardware requires.
+- **Sprite-versus-background priority was the Game Boy's rule, not this machine's.** A GBA sprite
+  carries a priority in OAM and each background carries one in `BGxCNT`, and the sprite is in front
+  where its own is less than or equal to the background's. Instead the Game Boy's single
+  "behind background" bit was consulted — which the GBA decoder always leaves false — so every
+  sprite won against every background. Characters walked *over* the text boxes in front of them.
+  The GBA text tilemap also recorded a hard-coded priority of zero on every pixel, so there was
+  nothing to compare against even once the sprite's was passed through.
+- **Bit 5 of the window registers was treated as a layer.** It is not: it says whether colour
+  special effects apply inside that region at all, and it shares a bit position with the backdrop
+  target in `BLDCNT` — the same bit meaning two things in two register sets. A game that darkens
+  the world behind a menu switches the effect off inside the menu's window; ignoring that darkened
+  the menu too, so its panels came out grey instead of white.
 - **Every sprite was decoded as 16-colour.** Depth is per sprite on this hardware and one scanline
   can hold both, so it now rides on the sprite rather than on the call. A 256-colour sprite read as
   16-colour comes out as a stretched checkerboard.

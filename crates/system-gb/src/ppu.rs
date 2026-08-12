@@ -396,6 +396,9 @@ impl GbPpu {
                 Sprite {
                     // A Game Boy sprite is always two bits per pixel; there is no other mode.
                     depth: BitDepth::Two,
+                    // One sprite plane, so this is never compared. `behind_background` is the
+                    // Game Boy's whole answer to sprite-versus-background priority.
+                    priority: 0,
                     x,
                     y,
                     width: 8,
@@ -479,6 +482,7 @@ impl GbPpu {
 /// Filler for the fixed-size candidate array, never rendered.
 const PLACEHOLDER_SPRITE: Sprite = Sprite {
     depth: BitDepth::Two,
+    priority: 0,
     row_stride: 0,
     x: 0,
     y: 0,

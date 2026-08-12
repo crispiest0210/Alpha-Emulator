@@ -198,6 +198,9 @@ impl Object {
             // 16 or 256 colours, per sprite. One scanline can hold both, which is why this rides on
             // the sprite rather than on the call.
             depth: self.depth,
+            // Compared against the background pixel's, which is what decides whether a character
+            // walks in front of a text box or behind it.
+            priority: self.priority,
             x: self.x,
             y: self.y,
             width: self.width,
