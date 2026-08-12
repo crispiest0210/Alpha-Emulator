@@ -190,15 +190,89 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let backdrop = palette.lookup_bg(0, 0);
     let row = framebuffer.row_mut(line);
     scanline.resolve_into(&palette, backdrop, row);
-    apply_effects(
-        frame,
+    let object_window = object_window_mask(frame, line);
+    let composed = Composed {
+        scanline: &scanline,
+        under: under.as_ref(),
+        object_window: object_window.as_deref(),
+    };
+    apply_effects(frame, line, composed, &palette, backdrop, row);
+}
+
+/// One composited line, and the two extra views of it the colour effects need.
+///
+/// Grouped because they are three answers about the same line and always travel together: what won
+/// each pixel, what was beneath the winner, and which pixels an object window covers.
+struct Composed<'a> {
+    scanline: &'a ScanlineBuffer,
+    /// What lies under the winning pixel, composed only when an alpha blend is configured.
+    under: Option<&'a ScanlineBuffer>,
+    /// Which pixels the object window covers, `None` when it is switched off.
+    object_window: Option<&'a [bool]>,
+}
+
+/// Where the object window covers this line.
+///
+/// A sprite whose graphics mode is `ObjectWindow` draws nothing. Its *shape* — every pixel of it
+/// that is not colour 0 — is a window region instead, and `WINOUT`'s high byte says which layers
+/// and whether colour effects apply inside it. Games use it for shapes a rectangle cannot make.
+///
+/// Reported as never covering until now, which is not a neutral default: a game that reveals its
+/// content *through* an object window gets a blank region instead. Pokémon Emerald's battle screen
+/// puts the action menu and message box there, so the bottom fifty scanlines came out as pure
+/// backdrop.
+///
+/// The mask is built by rendering those sprites into a scratch buffer rather than by re-deriving
+/// tile addressing, flips, depth and affine transforms a second time — every one of which is a
+/// place for the two paths to disagree.
+fn object_window_mask(frame: &Frame<'_>, line: u32) -> Option<Vec<bool>> {
+    if frame.video.dispcnt & (1 << 15) == 0 {
+        return None;
+    }
+    let oam = ObjectAttributeMemory::decode(frame.oam);
+    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
+    let shapes: Vec<_> = (0..crate::objects::OBJECT_COUNT)
+        .map(|i| oam.objects[i])
+        .filter(|object| {
+            object.graphics_mode == crate::objects::GraphicsMode::ObjectWindow
+                && object.mode != ObjectMode::Hidden
+                && object.covers_line(line as i32)
+        })
+        .collect();
+    if shapes.is_empty() {
+        return Some(vec![false; SCREEN_WIDTH as usize]);
+    }
+
+    let mut scratch = ScanlineBuffer::new(SCREEN_WIDTH as usize);
+    scratch.clear();
+    for object in shapes.iter().filter(|o| o.mode != ObjectMode::Normal) {
+        draw_affine_sprite(
+            frame,
+            &oam,
+            object,
+            line as i32,
+            one_dimensional,
+            &mut scratch,
+        );
+    }
+    let plain: Vec<_> = shapes
+        .iter()
+        .filter(|o| o.mode == ObjectMode::Normal)
+        .map(|object| object.to_sprite(one_dimensional))
+        .collect();
+    render_sprites(
+        &plain,
+        frame.vram,
         line,
-        &scanline,
-        under.as_ref(),
-        &palette,
-        backdrop,
-        row,
+        SpriteRule::ByPriority,
+        &mut scratch,
     );
+
+    Some(
+        (0..SCREEN_WIDTH as usize)
+            .map(|x| scratch.get(x).source == PixelSource::Sprite)
+            .collect(),
+    )
 }
 
 /// Which layer a buffered pixel came from.
@@ -218,12 +292,16 @@ fn layer_of(indexed: ppu_tile2d::IndexedPixel) -> Layer {
 fn apply_effects(
     frame: &Frame<'_>,
     line: u32,
-    scanline: &ScanlineBuffer,
-    under: Option<&ScanlineBuffer>,
+    composed: Composed<'_>,
     palette: &GbaPalette<'_>,
     backdrop: Rgba8,
     row: &mut [u8],
 ) {
+    let Composed {
+        scanline,
+        under,
+        object_window,
+    } = composed;
     let windows = [
         frame.video.dispcnt & (1 << 13) != 0,
         frame.video.dispcnt & (1 << 14) != 0,
@@ -238,10 +316,10 @@ fn apply_effects(
         let indexed = scanline.get(x);
         let layer = layer_of(indexed);
 
-        // The object window is a sprite's *shape* used as a region; sprites drawn into it are
-        // not yet distinguished from ordinary ones, so it is reported as never covering rather
-        // than as always covering — which would mask the whole screen.
-        let visible = frame.effects.visible_layers(x as u32, line, windows, false);
+        let in_object_window = object_window.is_some_and(|mask| mask[x]);
+        let visible = frame
+            .effects
+            .visible_layers(x as u32, line, windows, in_object_window);
         // The backdrop is not maskable: bit 5 of a window register is the colour-effect enable,
         // not a backdrop-enable, so testing it as a layer bit asks the wrong question entirely.
         if layer != Layer::Backdrop && visible & layer.bit() == 0 {

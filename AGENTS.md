@@ -548,7 +548,10 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   compare. Two traps, both paid for: dmg-acid2's reference is 2-bit greyscale, so a decoder must
   *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
   rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
-- Mosaic, EEPROM saves, and the GBA's object window are not implemented.
+- Mosaic and EEPROM saves are not implemented. The GBA's object window now is: the mask is built by
+  rendering the `ObjectWindow`-mode sprites into a scratch scanline buffer rather than re-deriving
+  tile addressing, flips, depth and the affine transform a second time — each of which is a place
+  for two paths to drift apart.
 - **Sprite bit depth is per sprite, not per call.** It rides on `ppu_tile2d::Sprite` because bit 13
   of a GBA OAM entry selects 16 or 256 colours and one scanline can hold both. It used to be an
   argument to `render_sprites` and every GBA sprite was rendered as 16-colour; a 256-colour one came

@@ -59,10 +59,7 @@ Two gaps are worth stating plainly because you will notice both:
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
 
-**The object window is not implemented** — it is reported as never covering, since sprites drawn
-into it are not distinguished from ordinary ones. A game uses it as a *shape* to mask layers or
-colour effects, so where one is used, an effect that should have been switched off in that region
-still applies. Mosaic and EEPROM saves are also absent. SRAM and Flash work and a real
+Mosaic and EEPROM saves are absent. SRAM and Flash work and a real
 cartridge's chip and size are detected correctly, but no game has yet been played far enough to
 write a save file, so that last step is unverified.
 
@@ -118,6 +115,11 @@ one:
   sprite won against every background. Characters walked *over* the text boxes in front of them.
   The GBA text tilemap also recorded a hard-coded priority of zero on every pixel, so there was
   nothing to compare against even once the sprite's was passed through.
+- **The object window was reported as never covering.** A sprite whose graphics mode is
+  `ObjectWindow` draws nothing; its *shape* is a window region, and `WINOUT`'s high byte says what
+  is visible inside it. Answering "never" is not a neutral default — a game that reveals content
+  *through* one gets a blank region instead. Pokémon Emerald's battle screen puts the action menu
+  and message box there, so the bottom fifty scanlines came out as pure backdrop.
 - **Bit 5 of the window registers was treated as a layer.** It is not: it says whether colour
   special effects apply inside that region at all, and it shares a bit position with the backdrop
   target in `BLDCNT` — the same bit meaning two things in two register sets. A game that darkens

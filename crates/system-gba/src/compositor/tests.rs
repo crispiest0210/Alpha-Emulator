@@ -705,3 +705,44 @@ fn a_window_can_switch_the_colour_effect_off_inside_it() {
         "inside the window the effect is switched off, so the layer keeps its colour"
     );
 }
+
+#[test]
+fn an_object_window_sprite_masks_by_its_shape_rather_than_drawing() {
+    // A sprite whose graphics mode is `ObjectWindow` draws nothing; its shape is a region, and
+    // `WINOUT`'s high byte says what is visible inside it. Reporting it as never covering is not a
+    // neutral default — a game that reveals content *through* one gets a blank region instead.
+    // Pokémon Emerald's battle screen puts the action menu there, so the bottom fifty scanlines
+    // came out as pure backdrop.
+    use crate::effects::{reg as ereg, Layer};
+    const OBJECT_WINDOW: u16 = 2 << 10; // attribute 0, bits 10-11
+
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // BG0's colour
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(OBJECT_WINDOW, 0);
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | (1 << 15), // object window enable
+    );
+
+    // Nothing at all outside the object window; BG0 inside it.
+    scene.effects.write16(ereg::WINOUT, Layer::Bg0.bit() << 8);
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "inside the sprite's shape BG0 shows"
+    );
+    assert_eq!(
+        frame.pixel(100, 0).b,
+        0xFF,
+        "outside it nothing is visible, so the backdrop shows"
+    );
+    assert_eq!(
+        frame.pixel(0, 0).g,
+        0x00,
+        "and the sprite itself never draws"
+    );
+}
