@@ -12,3 +12,4 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+corpus.workspace = true

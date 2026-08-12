@@ -5,10 +5,7 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{
-    Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
-    GB_DMG_SOUND_SINGLES, GB_ROMS,
-};
+use crate::corpus::{self, Convention, Hardware, TestRom, GB_ROMS};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -285,6 +282,136 @@ fn a_rom_that_never_sets_the_registers_times_out() {
 }
 
 // ---------------------------------------------------------------------------
+// The gba-suite adapter
+// ---------------------------------------------------------------------------
+
+/// A system whose `PC`/`R12` registers follow a scripted, per-frame sequence.
+///
+/// `ScriptedSystem` above can only reveal one fixed register snapshot at a chosen frame, which
+/// is not enough to model a `gba-suite` run: that convention needs `r12` to visibly change
+/// *while* the PC is still moving, then settle. The last entry in the script holds once the
+/// steps run out, which is what lets the PC "settle" for the three-frame check.
+struct GbaScript {
+    steps: Vec<(u64, u64)>,
+    frame: usize,
+    framebuffer: Framebuffer,
+}
+
+impl GbaScript {
+    fn new(steps: Vec<(u64, u64)>) -> Self {
+        Self {
+            steps,
+            frame: 0,
+            framebuffer: Framebuffer::new(4, 4),
+        }
+    }
+
+    fn current(&self) -> (u64, u64) {
+        let index = self.frame.saturating_sub(1).min(self.steps.len() - 1);
+        self.steps[index]
+    }
+}
+
+impl System for GbaScript {
+    fn id(&self) -> &'static str {
+        "gba-script"
+    }
+    fn set_input(&mut self, _input: InputState) {}
+    fn step_instruction(&mut self) -> core_common::Cycles {
+        unimplemented!("this system models frames, not instructions")
+    }
+    fn display_name(&self) -> &'static str {
+        "GbaScript"
+    }
+    fn state_version(&self) -> u32 {
+        1
+    }
+    fn reset(&mut self) {}
+    fn load_cartridge(&mut self, _rom: &[u8]) -> Result<(), CartridgeError> {
+        Ok(())
+    }
+    fn framebuffer(&self) -> &Framebuffer {
+        &self.framebuffer
+    }
+    fn take_audio_samples(&mut self) -> &[AudioSample] {
+        &[]
+    }
+    fn save_ram(&self) -> Option<&[u8]> {
+        None
+    }
+    fn load_save_ram(&mut self, _data: &[u8]) -> Result<(), CartridgeError> {
+        Ok(())
+    }
+    fn step_frame(&mut self, _input: InputState) -> FrameOutput {
+        self.frame += 1;
+        // A real ROM draws its report before settling; without this the framebuffer check
+        // that `run_gba_suite` now performs would see an unchanging screen and call every
+        // scripted run a hang, regardless of what `steps` says.
+        self.framebuffer
+            .set_pixel(0, 0, core_common::Rgba8::rgb(self.frame as u8, 0, 0));
+        FrameOutput {
+            cycles_elapsed: Cycles(100),
+            ..Default::default()
+        }
+    }
+}
+
+impl Savable for GbaScript {
+    fn save(&self, _w: &mut StateWriter) {}
+    fn load(&mut self, _r: &mut StateReader) -> Result<(), StateError> {
+        Ok(())
+    }
+}
+
+impl TestableSystem for GbaScript {
+    fn serial_output(&self) -> &[u8] {
+        &[]
+    }
+    fn cpu_registers(&self) -> Vec<RegisterValue> {
+        let (pc, r12) = self.current();
+        vec![
+            RegisterValue::new("PC", pc, 32),
+            RegisterValue::new("R12", r12, 32),
+        ]
+    }
+    fn read_byte(&mut self, _addr: u32) -> u8 {
+        0
+    }
+}
+
+#[test]
+fn a_machine_hung_before_running_is_not_reported_as_a_pass() {
+    // Exactly what a machine wedged in a BIOS trap before the test runner even starts looks
+    // like from outside: the PC never moves and r12 — its reset value — is zero throughout.
+    // Settled PC plus r12==0 alone would read this as "every sub-test passed", which is the
+    // defect this test exists to catch.
+    let mut system = ScriptedSystem::new();
+    let outcome = run_gba_suite(&mut system, 20);
+    assert!(
+        !outcome.passed(),
+        "a machine that never ran must not be reported as passing: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_genuine_pass_is_still_recognized() {
+    // r12 carries a nonzero sub-test index while the suite runs, then clears to zero and the
+    // PC settles once every sub-test has passed.
+    let mut system = GbaScript::new(vec![(0x100, 1), (0x104, 2), (0x108, 0)]);
+    let outcome = run_gba_suite(&mut system, 20);
+    assert!(outcome.passed(), "{outcome:?}");
+}
+
+#[test]
+fn a_genuine_failure_is_still_recognized() {
+    // Same shape, but r12 settles on the number of the sub-test that failed rather than zero.
+    let mut system = GbaScript::new(vec![(0x100, 1), (0x104, 2), (0x108, 3)]);
+    let outcome = run_gba_suite(&mut system, 20);
+    assert!(!outcome.passed());
+    assert!(outcome.report().contains('3'), "{}", outcome.report());
+}
+
+// ---------------------------------------------------------------------------
 // Framebuffer hashing
 // ---------------------------------------------------------------------------
 
@@ -524,7 +651,7 @@ fn run_on<S: TestableSystem>(rom: &TestRom, mut system: S) -> Option<(TestOutcom
     Some((outcome, state))
 }
 
-/// The whole Game Boy and Game Boy Color suite as one test.
+/// The whole accuracy corpus — DMG, CGB, and GBA — as one test.
 ///
 /// One test rather than one per ROM so the output is a single report naming every failure,
 /// which is what someone debugging a regression actually wants — and so an unfetched corpus
@@ -540,13 +667,7 @@ fn gb_accuracy_suite() {
     let mut known_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
 
-    for rom in GB_ROMS
-        .iter()
-        .chain(GB_CPU_INSTRS_SUBTESTS)
-        .chain(GB_DMG_SOUND_SINGLES)
-        .chain(CGB_ROMS)
-        .chain(GBA_ROMS)
-    {
+    for rom in corpus::all_roms() {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);
             continue;

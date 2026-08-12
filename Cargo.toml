@@ -19,6 +19,7 @@ members = [
     "crates/frontend-core",
     "crates/frontend-native",
     "crates/frontend-headless",
+    "testing/corpus",
     "testing/harness",
 ]
 
@@ -47,6 +48,7 @@ savestate = { path = "crates/savestate" }
 debugger = { path = "crates/debugger" }
 library = { path = "crates/library" }
 frontend-core = { path = "crates/frontend-core" }
+corpus = { path = "testing/corpus" }
 
 # --- shared third-party (versions pinned once, here) ---
 anyhow = "1.0"

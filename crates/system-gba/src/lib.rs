@@ -8,9 +8,12 @@
 //!
 //! **Commercial games run.** A cartridge boots, the display renders through the compositor, DMA
 //! and timers drive the sound FIFOs, and interrupts reach the game's handler with or without a
-//! BIOS. A save state round-trips frame-exactly and two runs of the same ROM are identical. All
-//! three `gba-suite` ROMs pass — the instruction set in both states, and memory — and a real game
-//! plays in the window at a measured 100% speed with no dropped frames or audio samples.
+//! BIOS. A save state round-trips frame-exactly and two runs of the same ROM are identical.
+//! `gba-suite`'s ARM, Thumb, memory, and `save/none` ROMs pass, and a real game plays in the
+//! window at a measured 100% speed with no dropped frames or audio samples. `gba-suite`'s `bios`
+//! and three of its four `save` ROMs fail on this HLE BIOS and this save-chip implementation
+//! respectively, each a specific diagnosed gap rather than a mystery — see
+//! `testing/corpus/src/lib.rs` for what each one names.
 //!
 //! What is not done, in rough order of how much it matters:
 //!

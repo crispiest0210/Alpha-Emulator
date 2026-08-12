@@ -30,7 +30,12 @@
 
 #![deny(unsafe_code)]
 
-pub mod corpus;
+/// The test-ROM corpus.
+///
+/// Lives in its own crate (`corpus`) so `xtask` can depend on it too without dragging in every
+/// engine crate — see that crate's docs for why. Re-exported here under the name every existing
+/// caller in this crate already uses.
+pub use corpus;
 
 use core_common::{Framebuffer, InputState, RegisterValue, System};
 
@@ -567,6 +572,20 @@ impl TestableSystem for system_gbc::GbcSystem {
 /// every one passed. There is no serial port and nothing written to memory, so "has it
 /// finished" is answered by the CPU no longer making progress — the program counter settling
 /// into the same place frame after frame.
+///
+/// A settled PC with `r12 == 0` is necessary but not sufficient for a pass. `r12` is reset to
+/// zero once at the top of the ROM and is *only* ever written again by the failure path — a
+/// genuine pass never touches it, so it reads as zero both before the suite has run a single
+/// instruction and after every sub-test has legitimately passed. Those two states are
+/// indistinguishable by register alone: a machine wedged in a BIOS trap before the ROM's own
+/// code ever starts also settles immediately with `r12` still at its reset value.
+///
+/// What does distinguish them is the screen. Every exit path — pass or fail — renders a text
+/// report before settling into its final spin (`m_test_eval` in the suite's own source), so a
+/// genuine result always leaves the framebuffer different from how it looked before the ROM drew
+/// anything. A hang before that point leaves the screen exactly as it started. So a `r12 == 0`
+/// verdict is only trusted as a pass if the picture actually changed; a nonzero `r12` needs no
+/// such check; because writing it at all requires having executed the failure path for real.
 pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32) -> TestOutcome {
     let register = |system: &S, name: &str| -> u64 {
         system
@@ -575,6 +594,8 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
             .find(|r| r.name == name)
             .map_or(0, |r| r.value)
     };
+
+    let initial_frame_hash = framebuffer_hash(system.framebuffer());
 
     let mut previous_pc = u64::MAX;
     let mut settled = 0;
@@ -595,14 +616,24 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
         }
 
         let failed = register(system, "R12");
-        return if failed == 0 {
+        if failed != 0 {
+            return TestOutcome::Failed {
+                report: format!("sub-test {failed} failed"),
+                frames: frame,
+            };
+        }
+
+        return if framebuffer_hash(system.framebuffer()) != initial_frame_hash {
             TestOutcome::Passed {
                 report: "all sub-tests passed".into(),
                 frames: frame,
             }
         } else {
             TestOutcome::Failed {
-                report: format!("sub-test {failed} failed"),
+                report: "settled with r12=0 but the screen never changed from its boot state; \
+                         the suite appears to have hung before it ever drew its report (e.g. \
+                         stuck in a BIOS trap) rather than having passed"
+                    .into(),
                 frames: frame,
             }
         };

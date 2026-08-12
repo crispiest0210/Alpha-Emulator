@@ -28,7 +28,7 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ⚠️ | Passes `gba-suite`'s ARM, Thumb, memory, and `save/none` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. `bios` and three of the four `save` ROMs fail, each a specific diagnosed gap — see below. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
@@ -40,11 +40,14 @@ viewer, breakpoints, and watchpoints.
 
 ### Where the Game Boy Advance actually is
 
-`gba-suite`'s three ROMs pass, and a commercial game **plays in the window at a measured 100%
-speed** — 59.7 fps sustained, zero frames dropped to the drawing thread, zero audio samples
-dropped. Backgrounds in every mode, sprites at both colour depths, affine scaling and rotation,
-windows, colour blending, save states and rewind all work on real software rather than only on
-unit tests.
+`gba-suite`'s ARM, Thumb, and memory ROMs pass, and a commercial game **plays in the window at a
+measured 100% speed** — 59.7 fps sustained, zero frames dropped to the drawing thread, zero audio
+samples dropped. Backgrounds in every mode, sprites at both colour depths, affine scaling and
+rotation, windows, colour blending, save states and rewind all work on real software rather than
+only on unit tests.
+
+`gba-suite`'s `bios` and `save` ROMs are also in the corpus now, and they found two real, specific
+gaps rather than passing cleanly — see "Open gaps" below.
 
 Two gaps are worth stating plainly because you will notice both:
 
@@ -60,9 +63,13 @@ Two gaps are worth stating plainly because you will notice both:
   battery behaves identically and games handle it — but time-of-day events never fire.
 
 Mosaic and EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
-working by play on a commercial title. SRAM and Flash work and a real
-cartridge's chip and size are detected correctly, but no game has yet been played far enough to
-write a save file, so that last step is unverified.
+working by play on a commercial title, and a real cartridge's chip and size are detected
+correctly. `gba-suite`'s `save` ROMs (added to the corpus alongside `bios`) turned "unverified"
+into two specific findings instead: fresh SRAM reads `0x00` rather than the `0xFF` a real chip
+reads before anything is written, and a 16- or 32-bit CPU access to the save window reads two
+independent bytes rather than mirroring the single addressed byte across every lane, as an 8-bit
+device must. Both are diagnosed in `testing/corpus/src/lib.rs` against the exact code that needs
+to change. `save/none` and the ARM/Thumb/memory suites still pass.
 
 #### The bug worth reading about before touching timing anywhere
 
@@ -280,6 +287,9 @@ Current Game Boy results:
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
 | `gba-suite` arm, thumb, memory | **pass** |
+| `gba-suite` save/none | **pass** |
+| `gba-suite` bios | fails — see below |
+| `gba-suite` save/sram, save/flash64, save/flash128 | fail — see below |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
 
 **Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
@@ -344,10 +354,36 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-**All three `gba-suite` ROMs pass** — the whole instruction set in both states, and the memory
-suite. Between them they found two real bugs that no amount of unit testing would have caught:
-the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed into
-bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
+**`gba-suite`'s ARM, Thumb, and memory ROMs pass** — the whole instruction set in both states, and
+the memory suite. Between them they found two real bugs that no amount of unit testing would have
+caught: the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed
+into bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
+
+**`bios` and three of the four `save` ROMs fail, and each is a specific, diagnosed finding, not a
+mystery:**
+
+- **`bios` sub-test 1.** This project's BIOS is fully HLE'd (`crates/system-gba/src/bios.rs`): an
+  `swi` traps straight to native Rust that computes the answer, so no real BIOS instruction is
+  ever fetched. The test reads the unmapped BIOS region right after startup and expects the last
+  opcode a *real* BIOS left latched on the bus — a value that only exists if BIOS code actually
+  ran. Sub-tests 2–4 check the same open-bus artifact after an `swi`, during an IRQ, and after an
+  IRQ return, and are never reached because the suite exits at its first mismatch, but they fail
+  for the same reason.
+- **`save/sram` sub-test 1.** `Sram::new` (`crates/cart-common/src/save.rs`) deliberately
+  zero-fills fresh save memory rather than the `0xFF` a real chip reads before anything has been
+  written, so a fresh save is reproducible. The test reads a byte of untouched SRAM and requires
+  `0xFF`.
+- **`save/flash64` and `save/flash128` sub-test 4.** SRAM and Flash are 8-bit-wide devices, so a
+  16- or 32-bit CPU access to the save window must read the single addressed byte mirrored into
+  every byte lane. `GbaSystemBus::read16_routed` (`crates/system-gba/src/system.rs`) has no case
+  for `Region::Sram` and falls through to the generic path, reading two independent bytes
+  instead — the write side already gets this right, writing only the addressed byte. The test
+  writes one byte and reads it back as a halfword, expecting it duplicated.
+- **`save/none` passes**: with no save chip at all, a read of the save window correctly returns
+  `0xFF`, which is a different code path from `Sram::new`'s.
+
+All four are recorded as `expected_failure` in `testing/corpus/src/lib.rs`, so the suite stays
+green for *regressions* while they are open and fails loudly if one starts passing.
 
 The Game Boy Color's colour *rendering* is now validated against a reference — that is what
 cgb-acid2 covers. Its speed switch and VRAM DMA are still checked against hardware documentation

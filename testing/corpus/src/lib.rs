@@ -1,5 +1,14 @@
 //! The test-ROM corpus: what to fetch, from where, and how to judge it.
 //!
+//! # The single source of truth
+//!
+//! This crate has no dependencies beyond `std`, deliberately: both `harness` (which drives the
+//! ROMs through the emulator) and `xtask` (which only needs to download them) depend on it, and
+//! `xtask` must keep building even when every engine crate is broken. A data-only crate with
+//! nothing to break makes that safe. Before this crate existed, `xtask` kept its own hand-copied
+//! fetch list, and the two lists could — and did — drift: a ROM added to one and not the other
+//! was silently never tested. Now there is exactly one list, and [`all_roms`] is it.
+//!
 //! # Licensing
 //!
 //! Nothing here is committed to the repository. Each suite is downloaded from its own
@@ -469,12 +478,19 @@ impl TestRom {
     }
 }
 
-/// Every ROM across every system.
+/// Every ROM across every system: DMG, CGB, and GBA alike.
+///
+/// This is the single source of truth for what the accuracy suite runs *and* what
+/// `cargo xtask fetch-test-roms` downloads — see the crate-level docs. A hardware kind left out
+/// here is a hardware kind whose ROMs are never fetched, never checked by this module's own
+/// validation tests, and never run, with nothing to say so.
 pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
     GB_ROMS
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(CGB_ROMS)
+        .chain(GBA_ROMS)
 }
 
 /// Game Boy Color ROMs.
@@ -542,6 +558,14 @@ pub const CGB_ROMS: &[TestRom] = &[
 /// ARM7TDMI core underneath it — the CPU passed its own unit tests but had never been run
 /// against a reference. Its sub-suites are separate ROMs so a failure names the instruction
 /// class rather than only "the CPU".
+///
+/// `bios` and the four `save` ROMs use the same jsmolka/gba-tests suite and the same
+/// [`Convention::GbaSuite`] reporting convention, so they need no new harness machinery. `bios`
+/// is the direct check on this project's BIOS HLE: the `swi` dispatcher and the interrupt-return
+/// wrapper. The `save` ROMs each format their cartridge for one backup type (SRAM, 64K flash,
+/// 128K flash, or none) and exercise it, covering the path `README.md` otherwise admits is
+/// unverified. `ppu/` is left for a later prompt that builds the framebuffer convention it
+/// needs.
 pub const GBA_ROMS: &[TestRom] = &[
     TestRom {
         name: "gba_suite_arm",
@@ -569,6 +593,94 @@ pub const GBA_ROMS: &[TestRom] = &[
         name: "gba_suite_memory",
         url: "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
         path: "gba/gba-suite/memory.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_bios",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/bios/bios.gba",
+        path: "gba/gba-suite/bios.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 1: the BIOS is fully HLE'd (crates/system-gba/src/bios.rs) — an `swi` \
+             traps straight to native Rust that computes the answer, so no real BIOS \
+             instruction is ever fetched. This ROM's first check reads the unmapped BIOS \
+             region right after startup and expects the last opcode a *real* BIOS left latched \
+             on the bus, which only exists if BIOS code actually ran. The suite exits at its \
+             first mismatch, so sub-tests 2-4 (the same open-bus artifact after an swi, during \
+             an IRQ, and after an IRQ return) are never reached, but would fail for the same \
+             reason",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_sram",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/sram.gba",
+        path: "gba/gba-suite/save/sram.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 1: `Sram::new` (crates/cart-common/src/save.rs) deliberately zero-fills \
+             fresh save memory rather than the 0xFF a real chip reads before anything has been \
+             written, so a fresh save is reproducible rather than depending on whatever the \
+             host's allocator handed back. This ROM's first check reads a byte of untouched \
+             SRAM and requires 0xFF. The suite exits at its first mismatch, so sub-tests 2-9 \
+             (mirroring and the 16/32-bit read/write shape covered by gba_suite_save_flash64 \
+             below) are never reached here",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_flash64",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/flash64.gba",
+        path: "gba/gba-suite/save/flash64.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 4: SRAM and Flash are 8-bit-wide devices, so a 16- or 32-bit CPU access \
+             to the save window must read back the single addressed byte mirrored into every \
+             byte lane. `GbaSystemBus::read16_routed` (crates/system-gba/src/system.rs) has no \
+             case for `Region::Sram` and falls through to the generic path, which reads two \
+             independent bytes from the chip instead. (The write side already gets this right: \
+             `write16_routed` writes only the low byte through `cartridge.write_save`.) This \
+             ROM writes one byte and reads it back as a halfword, expecting it duplicated \
+             (0x0101); it gets two unrelated bytes instead. The suite exits at its first \
+             mismatch, so sub-tests 5-11 are never reached",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_flash128",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/flash128.gba",
+        path: "gba/gba-suite/save/flash128.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 4: the same missing 8-bit-mirrored-read behaviour as \
+             gba_suite_save_flash64 above — `read16_routed` has no `Region::Sram` case and \
+             composes two independent bytes instead of duplicating the one addressed byte. \
+             128K flash shares the same save window and the same bus routing, so it fails at \
+             the identical sub-test for the identical reason",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_none",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/none.gba",
+        path: "gba/gba-suite/save/none.gba",
         convention: Convention::GbaSuite,
         hardware: Hardware::Gba,
         max_frames: 600,

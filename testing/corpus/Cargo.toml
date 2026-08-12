@@ -1,0 +1,10 @@
+[package]
+name = "corpus"
+description = "The accuracy test-ROM corpus: what to fetch, from where, and how to judge it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false

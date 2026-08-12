@@ -354,14 +354,14 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     }
 
     let root = workspace_root()?;
-    let corpus = root.join("testing").join("test-roms");
+    let corpus_dir = root.join("testing").join("test-roms");
 
     let mut fetched = 0usize;
     let mut skipped = 0usize;
     let mut failed = Vec::new();
 
-    for (path, url) in TEST_ROMS {
-        let target = corpus.join(path);
+    for rom in corpus::all_roms() {
+        let target = corpus_dir.join(rom.path);
         if target.is_file() && !force {
             skipped += 1;
             continue;
@@ -371,7 +371,7 @@ fn fetch_test_roms(force: bool) -> Result<()> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        println!("fetching {path}");
+        println!("fetching {}", rom.path);
         let status = Command::new("curl")
             .args([
                 "--location", // these are redirects to a CDN
@@ -383,9 +383,9 @@ fn fetch_test_roms(force: bool) -> Result<()> {
                 "--output",
             ])
             .arg(&target)
-            .arg(url)
+            .arg(rom.url)
             .status()
-            .with_context(|| format!("running curl for {path}"))?;
+            .with_context(|| format!("running curl for {}", rom.path))?;
 
         if status.success() {
             fetched += 1;
@@ -393,7 +393,7 @@ fn fetch_test_roms(force: bool) -> Result<()> {
             // Leave nothing half-written behind: a truncated ROM would fail the suite in a
             // way that looks like an emulator bug.
             let _ = std::fs::remove_file(&target);
-            failed.push(*path);
+            failed.push(rom.path);
         }
     }
 
@@ -410,78 +410,6 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     println!("Run `cargo xtask test --accuracy` to use them.");
     Ok(())
 }
-
-/// The corpus, mirroring `testing/harness`'s own list.
-///
-/// Duplicated rather than shared because `xtask` deliberately does not depend on the
-/// workspace's crates — it must build and run even when they do not.
-const TEST_ROMS: &[(&str, &str)] = &[
-    (
-        "gb/blargg/cpu_instrs.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/cpu_instrs.gb",
-    ),
-    (
-        "gb/blargg/instr_timing.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/instr_timing/instr_timing.gb",
-    ),
-    (
-        "gb/blargg/mem_timing.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/mem_timing/mem_timing.gb",
-    ),
-    (
-        "gb/blargg/dmg_sound.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/dmg_sound.gb",
-    ),
-    ("gb/blargg/cpu_instrs/01-special.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/01-special.gb"),
-    ("gb/blargg/cpu_instrs/02-interrupts.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/02-interrupts.gb"),
-    ("gb/blargg/cpu_instrs/03-op_sp_hl.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/03-op%20sp,hl.gb"),
-    ("gb/blargg/cpu_instrs/04-op_r_imm.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/04-op%20r,imm.gb"),
-    ("gb/blargg/cpu_instrs/05-op_rp.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/05-op%20rp.gb"),
-    ("gb/blargg/cpu_instrs/06-ld_r_r.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/06-ld%20r,r.gb"),
-    ("gb/blargg/cpu_instrs/07-jr_jp_call_ret_rst.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb"),
-    ("gb/blargg/cpu_instrs/08-misc_instrs.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/08-misc%20instrs.gb"),
-    ("gb/blargg/cpu_instrs/09-op_r_r.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/09-op%20r,r.gb"),
-    ("gb/blargg/cpu_instrs/10-bit_ops.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/10-bit%20ops.gb"),
-    ("gb/blargg/cpu_instrs/11-op_a_hl.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/11-op%20a,(hl).gb"),
-    ("gb/blargg/dmg_sound/01-registers.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/01-registers.gb"),
-    ("gb/blargg/dmg_sound/02-len_ctr.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/02-len%20ctr.gb"),
-    ("gb/blargg/dmg_sound/03-trigger.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/03-trigger.gb"),
-    ("gb/blargg/dmg_sound/04-sweep.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/04-sweep.gb"),
-    ("gb/blargg/dmg_sound/05-sweep_details.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/05-sweep%20details.gb"),
-    ("gb/blargg/dmg_sound/06-overflow_on_trigger.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/06-overflow%20on%20trigger.gb"),
-    ("gb/blargg/dmg_sound/07-len_sweep_period_sync.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/07-len%20sweep%20period%20sync.gb"),
-    ("gb/blargg/dmg_sound/08-len_ctr_during_power.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/08-len%20ctr%20during%20power.gb"),
-    ("gb/blargg/dmg_sound/09-wave_read_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/09-wave%20read%20while%20on.gb"),
-    ("gb/blargg/dmg_sound/10-wave_trigger_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/10-wave%20trigger%20while%20on.gb"),
-    ("gb/blargg/dmg_sound/11-regs_after_power.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/11-regs%20after%20power.gb"),
-    ("gb/blargg/dmg_sound/12-wave_write_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/12-wave%20write%20while%20on.gb"),
-    (
-        "gb/dmg-acid2.gb",
-        "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
-    ),
-    // Game Boy Color.
-    (
-        "gbc/cgb-acid2.gbc",
-        "https://github.com/mattcurrie/cgb-acid2/releases/download/v1.1/cgb-acid2.gbc",
-    ),
-    (
-        "gbc/blargg/cgb_sound.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cgb_sound/cgb_sound.gb",
-    ),
-    // Game Boy Advance. Also the first real test of the ARM7TDMI core.
-    (
-        "gba/gba-suite/arm.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/arm/arm.gba",
-    ),
-    (
-        "gba/gba-suite/thumb.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/thumb/thumb.gba",
-    ),
-    (
-        "gba/gba-suite/memory.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
-    ),
-];
 
 /// The workspace root, found from this crate rather than the current directory.
 fn workspace_root() -> Result<std::path::PathBuf> {

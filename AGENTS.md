@@ -45,7 +45,7 @@ Affected documentation means every surface making a claim the change just falsif
 - `SETUP.md` — when a system dependency changes (also `xtask/src/main.rs` and
   `.github/workflows/ci.yml`; those three must move together)
 - Crate-level `//!` docs, especially their Status sections
-- `testing/harness/src/corpus.rs` — `expected_failure` notes, added or removed
+- `testing/corpus/src/lib.rs` — `expected_failure` notes, added or removed
 
 Write a handoff prompt **only** when the context window is genuinely near its limit — not at
 every stopping point. Below that, committing and keeping the docs current *is* the handoff, and
