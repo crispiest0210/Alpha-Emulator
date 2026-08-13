@@ -331,6 +331,13 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   `intercept_bios_call`'s own peek exists — it is answering what the CPU is about to fetch itself,
   and reading it a second time through the bus would charge, latch, and log an access that never
   happened.
+- **`in_bios` was set once at construction and never touched again.** With a BIOS loaded, a game
+  that calls into it and returns crosses the "am I inside the BIOS" boundary constantly, but the
+  flag gating BIOS reads was computed once from `has_bios` at boot and left there — so after the
+  very first instruction, a read of BIOS space from *outside* it returned real BIOS content
+  instead of open bus, for the rest of the run. `GbaSystem::update_in_bios` recomputes it every
+  step from the program counter (`pc < memory::BIOS_SIZE`), alongside `update_open_bus`, so the
+  flag tracks wherever the CPU actually is rather than where it started.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

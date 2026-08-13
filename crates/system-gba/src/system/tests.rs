@@ -1015,3 +1015,36 @@ mod open_bus {
         );
     }
 }
+
+/// The BIOS is visible only to code executing inside it, and `GbaSystem::update_in_bios`
+/// recomputes that per step rather than trusting a flag latched once at construction.
+mod in_bios {
+    use super::*;
+
+    #[test]
+    fn a_read_of_bios_space_from_outside_it_is_refused_even_with_a_bios_loaded() {
+        let mut bios = vec![0u8; 0x4000];
+        // A byte only the real BIOS image has, so a leak is unmistakable.
+        bios[0] = 0x5A;
+        let mut gba = GbaSystem::new(spin_rom(), Some(bios)).unwrap();
+
+        // Sanity check: the boot state starts at the reset vector, inside the BIOS, so its
+        // content is visible from there.
+        assert_eq!(
+            gba.bus_mut().memory.read8(0),
+            Some(0x5A),
+            "the BIOS is visible to code running inside it"
+        );
+
+        // Move execution to the cartridge — well outside the BIOS's 16 KiB — and take one step,
+        // which is what `update_in_bios` keys off.
+        gba.cpu.regs.set_pc(CARTRIDGE_ENTRY);
+        gba.step_instruction();
+
+        assert_ne!(
+            gba.bus_mut().memory.read8(0),
+            Some(0x5A),
+            "BIOS content leaked to code running outside the BIOS"
+        );
+    }
+}

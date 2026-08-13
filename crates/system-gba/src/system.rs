@@ -43,7 +43,7 @@ use crate::effects::Effects;
 use crate::fifo::DirectSound;
 use crate::irq::{self, InterruptController};
 use crate::keypad::Keypad;
-use crate::memory::{GbaBus, Region};
+use crate::memory::{GbaBus, Region, BIOS_SIZE};
 use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::waitstates::{Access, WaitControl};
 use crate::{background::Backgrounds, timers::Timers};
@@ -600,7 +600,10 @@ impl GbaSystem {
             save_ram_dirty: false,
             intr_wait: None,
         };
-        system.bus.memory.set_in_bios(has_bios);
+        // Computed rather than passed `has_bios` directly: the boot program counter is 0 (inside
+        // the BIOS) exactly when a BIOS was supplied and the cartridge entry (outside it)
+        // otherwise, so this agrees with `has_bios` here and stays correct once execution moves.
+        system.update_in_bios();
         system.apply_startup_state();
         Ok(system)
     }
@@ -654,6 +657,20 @@ impl GbaSystem {
         } else if let Some(word) = self.bus.peek32(pc & !3) {
             self.bus.memory.set_open_bus(word);
         }
+    }
+
+    /// Gate BIOS reads on whether code is currently executing inside it.
+    ///
+    /// The BIOS is readable only by code running inside it — a real cartridge probing it from
+    /// outside gets open bus, which is exactly how some anti-piracy checks detect an emulator
+    /// that maps the region unconditionally. Latching this once at construction only got it right
+    /// for the very first instruction: a game that calls into the BIOS and returns crosses this
+    /// boundary constantly, and a flag fixed at boot answers every later read as if the machine
+    /// had never left its starting side of it. Recomputed every step from the program counter
+    /// instead, so the two stay in step with wherever the CPU actually is.
+    fn update_in_bios(&mut self) {
+        let in_bios = self.cpu.regs.pc() < BIOS_SIZE as u32;
+        self.bus.memory.set_in_bios(in_bios);
     }
 
     /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
@@ -894,8 +911,9 @@ impl System for GbaSystem {
         if self.intercept_bios_irq_return() {
             return Cycles(3);
         }
-        // After any interrupt entry above, so this reflects the instruction genuinely about to
+        // After any interrupt entry above, so both reflect the instruction genuinely about to
         // run this step rather than the one interrupted.
+        self.update_in_bios();
         self.update_open_bus();
         if self.intercept_bios_call() {
             // The call is answered without running the instruction, so it costs nothing beyond
