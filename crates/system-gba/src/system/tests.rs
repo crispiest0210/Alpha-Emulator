@@ -974,3 +974,44 @@ mod hblank_dma {
         );
     }
 }
+
+/// There is no floating bus on a `None`-typed emulated read: an unmapped address, or the BIOS
+/// read from outside it, has to answer *something*, and hardware answers with whatever it last
+/// fetched. Driven from `GbaSystem::update_open_bus`, called once per `step_instruction` from the
+/// program counter about to run.
+mod open_bus {
+    use super::*;
+
+    /// A physical address nothing in this crate maps, so a read here can only be open bus.
+    const UNMAPPED: u32 = 0x1000_0000;
+
+    #[test]
+    fn an_unmapped_read_returns_the_last_arm_word_fetched() {
+        // `system()`'s ROM is `b .` (0xEAFF_FFFE) at the cartridge entry, in ARM state.
+        let mut gba = system();
+        gba.step_instruction();
+        assert_eq!(
+            gba.bus_mut().memory.read32(UNMAPPED),
+            Some(0xEAFF_FFFE),
+            "open bus mirrors the last instruction fetched"
+        );
+    }
+
+    #[test]
+    fn an_unmapped_read_returns_the_last_thumb_halfword_duplicated_into_both_halves() {
+        let mut gba = system();
+        {
+            gba.cpu.cpsr.set_thumb(true);
+            // Internal WRAM rather than the cartridge entry: ROM writes are no-ops, and this test
+            // needs to plant its own instruction.
+            gba.cpu.regs.set_pc(0x0300_0000);
+            gba.bus_mut().write16(0x0300_0000, 0xE7FE); // Thumb `b .`
+        }
+        gba.step_instruction();
+        assert_eq!(
+            gba.bus_mut().memory.read32(UNMAPPED),
+            Some(0xE7FE_E7FE),
+            "a Thumb fetch is a halfword; open bus duplicates it into both halves of the word"
+        );
+    }
+}

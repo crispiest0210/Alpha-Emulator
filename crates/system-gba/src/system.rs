@@ -629,6 +629,33 @@ impl GbaSystem {
         &mut self.cpu
     }
 
+    /// Approximate the bus's floating value from the instruction about to run.
+    ///
+    /// There is no such thing as an unmapped read on real hardware: it returns whatever was last
+    /// driven on the bus, and that is almost always the instruction fetch, because nothing else
+    /// contends for the bus as often. Modelled here rather than by instrumenting every access,
+    /// because the fetch this approximates is a property of *where the CPU is*, not of any one
+    /// read — an unmapped data read and the fetch that preceded it see the same value on real
+    /// hardware precisely because the fetch was the last thing to touch the bus.
+    ///
+    /// Peeked rather than read for the same reason [`Self::intercept_bios_call`] peeks: this is
+    /// answering a question about the word the CPU is about to fetch itself, and reading it a
+    /// second time through the bus would charge, latch, and log an access that never happened.
+    fn update_open_bus(&mut self) {
+        let pc = self.cpu.regs.pc();
+        if self.cpu.is_thumb() {
+            // A halfword bus duplicated into both halves of the word open-bus reads are
+            // reconstructed from, matching the width the fetch actually was.
+            if let Some(half) = self.bus.peek16(pc & !1) {
+                self.bus
+                    .memory
+                    .set_open_bus((half as u32) | ((half as u32) << 16));
+            }
+        } else if let Some(word) = self.bus.peek32(pc & !3) {
+            self.bus.memory.set_open_bus(word);
+        }
+    }
+
     /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
     ///
     /// Intercepted *before* the instruction executes rather than by trapping the exception
@@ -867,6 +894,9 @@ impl System for GbaSystem {
         if self.intercept_bios_irq_return() {
             return Cycles(3);
         }
+        // After any interrupt entry above, so this reflects the instruction genuinely about to
+        // run this step rather than the one interrupted.
+        self.update_open_bus();
         if self.intercept_bios_call() {
             // The call is answered without running the instruction, so it costs nothing beyond
             // a nominal cycle — the real BIOS is slower, and that will matter for a game timing

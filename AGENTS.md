@@ -323,6 +323,14 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   the window. `dma::address_mask` is applied twice — once when a transfer's addresses latch on the
   enable edge, and again after every step — because masking only at latch time still lets a
   repeating transfer's running address walk out through the top of the window one step later.
+- **`GbaBus::set_open_bus` had no caller.** The plumbing for open-bus reads existed — an unmapped
+  address or a BIOS read from outside it was meant to return whatever the bus last carried — but
+  nothing ever drove it, so it stayed zero forever. `GbaSystem::update_open_bus` now sets it once
+  per `step_instruction`, from the instruction about to run: a `peek` of the same width the fetch
+  will be (a word in ARM, a halfword duplicated into both halves in Thumb), for the same reason
+  `intercept_bios_call`'s own peek exists — it is answering what the CPU is about to fetch itself,
+  and reading it a second time through the bus would charge, latch, and log an access that never
+  happened.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.
