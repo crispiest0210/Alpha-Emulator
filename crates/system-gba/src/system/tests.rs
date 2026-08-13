@@ -877,3 +877,100 @@ mod intr_wait {
     }
 }
 
+/// HBlank DMA does not run during vertical blanking, only the interrupt does.
+///
+/// Driven straight at `GbaSystemBus::advance` rather than through the CPU: one call per scanline
+/// gives exactly one hblank edge per call, which is what a real instruction stream also produces
+/// — no instruction costs anywhere near the 272 cycles between hblank start and a line's end, so
+/// `video::VideoTiming::tick` never has to fold more than one edge into a single report outside a
+/// test built to call it a whole line at a time, as this one deliberately does.
+mod hblank_dma {
+    use super::*;
+
+    /// Channel 0's registers, and the control bits this test needs. `dma::control` is private to
+    /// that module, so the bits actually in use are named here instead of imported.
+    const SOURCE: u32 = crate::dma::BASE;
+    const DESTINATION: u32 = crate::dma::BASE + 4;
+    const WORD_COUNT: u32 = crate::dma::BASE + 8;
+    const CONTROL: u32 = crate::dma::BASE + 10;
+    /// Source fixed (bits 7-8 = 2), repeat (bit 9), HBlank timing (bits 12-13 = 2), enable (bit
+    /// 15). Destination step is left at its default, `Increment`.
+    const ARM_HBLANK_REPEATING_FIXED_SOURCE: u16 = 0x0100 | 0x0200 | 0x2000 | 0x8000;
+
+    /// A single halfword this test recognises, so counting how many destination slots hold it
+    /// counts how many transfers actually ran — the closest a test outside `dma.rs` can get to
+    /// counting `DmaController::take_transfer` calls directly.
+    const MARK: u16 = 0xAAAA;
+    const SOURCE_ADDR: u32 = 0x0200_0000;
+    const DEST_BASE: u32 = 0x0200_1000;
+
+    /// Arm channel 0 to copy [`MARK`] into successive halfwords on every HBlank, repeating.
+    fn arm_marking_channel(gba: &mut GbaSystem) {
+        let bus = gba.bus_mut();
+        bus.memory.write16(SOURCE_ADDR, MARK);
+        bus.write32(SOURCE, SOURCE_ADDR);
+        bus.write32(DESTINATION, DEST_BASE);
+        bus.write16(WORD_COUNT, 1);
+        bus.write16(CONTROL, ARM_HBLANK_REPEATING_FIXED_SOURCE);
+    }
+
+    /// How many consecutive marked halfwords sit at `DEST_BASE`, i.e. how many transfers ran.
+    fn marks_written(gba: &mut GbaSystem) -> u32 {
+        let mut count = 0u32;
+        while gba.bus_mut().memory.read16(DEST_BASE + count * 2) == Some(MARK) {
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn hblank_dma_runs_on_the_hundred_and_sixty_visible_lines_and_no_more() {
+        let mut gba = system();
+        arm_marking_channel(&mut gba);
+
+        for _ in 0..crate::video::LINES_PER_FRAME {
+            gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        }
+
+        assert_eq!(
+            marks_written(&mut gba),
+            crate::video::SCREEN_HEIGHT,
+            "one transfer per visible line, none during the 68 lines of vertical blanking"
+        );
+    }
+
+    #[test]
+    fn the_hblank_interrupt_still_fires_during_vertical_blanking() {
+        // DMA arming is gated on the visible lines; the interrupt line is a separate signal and
+        // must not be, or a game using HBlank purely for an interrupt-driven effect during
+        // VBlank — rare, but real — would stop being told about it.
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(
+                crate::video::reg::DISPSTAT,
+                crate::video::dispstat::HBLANK_IRQ,
+            );
+            bus.write16(crate::irq::reg::IE, crate::irq::source::HBLANK);
+            bus.write16(crate::irq::reg::IME, 1);
+        }
+
+        // Every visible line's own HBlank interrupt fires along the way; run past all of them and
+        // acknowledge before isolating a line that is entirely inside vertical blanking.
+        for _ in 0..crate::video::SCREEN_HEIGHT {
+            gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        }
+        gba.bus_mut()
+            .irq
+            .write16(crate::irq::reg::IF, crate::irq::source::ALL);
+        assert_eq!(gba.bus_mut().irq.read16(crate::irq::reg::IF), Some(0));
+
+        // One more full line: entirely inside VBlank, so this is the interrupt under test.
+        gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        assert_eq!(
+            gba.bus_mut().irq.read16(crate::irq::reg::IF).unwrap() & crate::irq::source::HBLANK,
+            crate::irq::source::HBLANK,
+            "HBlank still interrupts in VBlank even though its DMA no longer arms there"
+        );
+    }
+}

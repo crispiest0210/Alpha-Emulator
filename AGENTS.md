@@ -308,6 +308,15 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   display control register, the interrupt registers, and the handler pointer, on one page.
   `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state` prints
   it at four points in a run, which is what turned that black screen into three specific bugs.
+- **`entered_hblank` fires on all 228 lines; `scanline_ready` does not.** Hardware does not run
+  HBlank DMA during vertical blanking, only the interrupt fires there — and `entered_hblank` alone
+  cannot tell the two cases apart, since `video::VideoTiming::tick` sets it on every line including
+  the 68 in VBlank. `scanline_ready` is the field that already carries the distinction (`Some` only
+  for the 160 visible lines), computed at the exact instant hblank was entered rather than derived
+  from `vcount` afterwards — which matters, because by the time a caller could re-check `vcount`,
+  `advance_line` may already have moved it onto the next line in the same call. A per-scanline
+  scroll, gradient, or window effect corrupts progressively when this is missed, as its HDMA source
+  pointer advances 68 times too many per frame.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

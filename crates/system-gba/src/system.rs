@@ -213,7 +213,14 @@ impl GbaSystemBus {
                 layer.advance_line();
             }
         }
-        if events.entered_hblank {
+        // Hardware does not run HBlank DMA during vertical blanking, only the interrupt fires
+        // there — and `entered_hblank` alone cannot tell the two apart, since it is set on all
+        // 228 lines. `scanline_ready` already carries the distinction: it is `Some` precisely
+        // when this hblank belongs to one of the 160 visible lines, computed by `video.tick` at
+        // the exact instant hblank was entered. Reusing it here is more robust than re-testing
+        // `vcount` after the fact, which by this point may already have been advanced onto the
+        // next line by `advance_line`.
+        if events.entered_hblank && events.scanline_ready.is_some() {
             self.dma.on_hblank();
         }
         if events.entered_vblank {
@@ -745,8 +752,7 @@ impl GbaSystem {
         // costs a game one early return; erring the other way is a hang.
         let serviced = self.bus.irq.active();
         let already = self.bus.read16(bios::INTRWAIT_FLAGS);
-        self.bus
-            .write16(bios::INTRWAIT_FLAGS, already | serviced);
+        self.bus.write16(bios::INTRWAIT_FLAGS, already | serviced);
 
         // Enter the exception properly — banked registers, mode, and mask all change.
         let lr = self.cpu.regs.pc().wrapping_add(4);
