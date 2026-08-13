@@ -33,11 +33,16 @@ produces a framebuffer and a sample buffer, and the frontend decides what to do 
 This is enforced by `cargo deny check bans` in CI (see `deny.toml`), not by review alone. If your
 PR fails that job, do not add your crate to the `wrappers` allowlist — fix the dependency.
 
+Within system crates: a variant of a system may depend on the system it varies (e.g., `system-gbc`
+may depend on `system-gb`), but unrelated systems may not depend on each other (e.g., neither GBA
+nor DS may depend on Game Boy).
+
 Allowed direction:
 
 ```
 frontend-native / frontend-headless  ->  frontend-core, library, debugger, system-*
 system-*                             ->  cpu-*, ppu-tile2d, apu-shared, cart-common, core-common
+system-gbc                           ->  system-gb (variant may depend on base system)
 cpu-* / ppu-* / apu-* / cart-common  ->  core-common, savestate
 ```
 
@@ -93,6 +98,15 @@ this path, at this frame — and never waits on a lock, because it has a 16.7 ms
   test time and never committed to this repository** — see `testing/harness/`.
 - Adding a new accuracy test ROM: register it with the harness rather than adding a bespoke test
   binary, so it participates in the CI suite and per-system status reporting automatically.
+
+**Before editing any status table or accuracy claim**, run:
+```sh
+cargo xtask fetch-test-roms
+cargo xtask test --accuracy
+```
+`cargo xtask test` skips the accuracy suite by default, so a contributor can edit a status row, see
+green, and commit a false claim. The test-ROM fetch and accuracy suite must be run before any
+documentation edit that makes a claim about what passes or fails.
 
 ### Known failures are tracked, not silenced
 

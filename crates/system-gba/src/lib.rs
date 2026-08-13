@@ -17,8 +17,8 @@
 //! - **The four `apu-shared` PSG channels are not mixed** alongside the two FIFO channels, so a
 //!   game whose music comes through them is silent. What blocks it is smaller than it looks and
 //!   was recorded here backwards for a while: the *channels* already live in `apu-shared` and are
-//!   directly usable. What lives in `system-gb::apu`, unreachable because `system-*` crates may
-//!   not depend on each other, is the **address decode** — and the GBA's is genuinely different
+//!   directly usable. What lives in `system-gb::apu`, unreachable because unrelated systems may not
+//!   depend on each other, is the **address decode** — and the GBA's is genuinely different
 //!   anyway. Its registers are halfwords at `0x0400_0060`, laid out with gaps rather than as the
 //!   Game Boy's contiguous `NR10`-`NR52`; its wave RAM is two banks of sixteen bytes with the CPU
 //!   seeing whichever is not playing; and it has a 75% volume step the Game Boy lacks. So this is

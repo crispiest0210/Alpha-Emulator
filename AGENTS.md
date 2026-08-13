@@ -307,8 +307,10 @@ Advance are **playable** — window, audio, input, save states, rewind — with 
 and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
 and draws both screens with sound and 3D**.
 
-- **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
-  17 (testing).
+- **Complete:** prompts 12 (GBA), 14 (frontend), 16 (savestate and rewind), 17 (testing).
+- **Mostly done:** prompt 11 (GB/GBC). Passes all Blargg `cpu_instrs`, `instr_timing`, `mem_timing`,
+  and `dmg-acid2` suites; plays commercial games with picture and sound. The `dmg_sound` suite:
+  9 of 12 sub-tests pass.
 - **Mostly done:** prompt 15. The in-app `egui` debugger works — registers, disassembly with the
   program counter highlighted and click-to-toggle breakpoints, a hex viewer with a region jump list,
   instruction stepping, execution breakpoints, and read/write/range watchpoints, all of which halt.
@@ -321,9 +323,8 @@ and draws both screens with sound and 3D**.
   only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
   and the session drains it after each instruction. That costs one branch per bus access whether or
   not anything is watching — **+1.7% of a Game Boy frame, +4.5% of a GBA one, and +3.7% of a DS one**, measured under
-  prompt 18, and **+3.7% of a Nintendo DS one**. See "Performance" below: the cost is kept
-  deliberately and recorded as a deviation from prompt 15's "zero measurable overhead" constraint
-  rather than reported as compliance.
+  prompt 18. See "Performance" below: the cost is kept deliberately and recorded as a deviation from
+  prompt 15's "zero measurable overhead" constraint rather than reported as compliance.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
@@ -344,13 +345,14 @@ and draws both screens with sound and 3D**.
   `cargo build --release` and uploads the result meets that without a generated file that must not
   be hand-edited. Revisit that the moment real installers are wanted — an `.msi`, a signed `.app`,
   a `.deb` — which is exactly what those tools are for.
-- **Mostly done:** prompt 13 (NDS). The machine boots a `.nds` ROM through direct boot, runs both
-  cores, draws both screens in 2D and 3D, plays sound, and can be single-stepped in the in-app
-  debugger. Thirteen modules, all unit-tested: two memory maps over one store, all nine VRAM banks,
-  both 2D engines, the 3D core, the sixteen-channel sound hardware, IPC, interrupts, timers, DMA,
-  video timing, keypad and touchscreen, the card transfer interface, and save states over all of it.
-  What is missing is a cartridge save chip, DS accuracy-corpus coverage, and the 3D core's rarer
-  effects. See "The biggest gap".
+- **Mostly done:** prompt 13 (NDS). The machine boots `.nds` test programs and hand-assembled ROMs
+  through direct boot, runs both cores, draws both screens in 2D and 3D, plays sound, and can be
+  single-stepped in the in-app debugger. BIOS calls and cartridge DMA are not implemented, so
+  commercial ROMs are not supported. Thirteen modules, all unit-tested: two memory maps over one
+  store, all nine VRAM banks, both 2D engines, the 3D core, the sixteen-channel sound hardware, IPC,
+  interrupts, timers, DMA, video timing, keypad and touchscreen, the card transfer interface, and
+  save states over all of it. What is missing is a cartridge save chip, DS accuracy-corpus coverage,
+  and the 3D core's rarer effects. See "The biggest gap".
 
 **Every one of the twenty prompts has now been built.** What remains is finishing work, listed
 under "The biggest gap"; there is no next prompt file to open.
@@ -382,12 +384,15 @@ the module that made it.
   of triangles. Nothing needs it today.
 
 One more, not foreseen and worth knowing: **the timer block is duplicated from `system-gba`** rather
-than shared. `system-*` crates may not depend on each other and `core-common` is closed to
-platform-specific behaviour, so sharing needs a new crate. This was filed as the same question the
-GBA's PSG register layer was stuck on; that one turned out not to be a placement question at all
-(see "The biggest gap"), so this is the only live instance. It is also the weaker case: the two
-timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
-of structure for a little reuse. Worth doing only when a third caller appears.
+than shared. A variant of a system may depend on the system it varies, but unrelated systems may not,
+and `core-common` is closed to platform-specific behaviour, so sharing needs a new crate. The timer
+is a case where even the variant rule does not apply (it is a block common to both cores, not unique
+to one system). This was filed as the same question the GBA's PSG register layer was stuck on; that
+one turned out not to be a placement question at all (see "The biggest gap"), so this is the only
+live instance. It is also the weaker case: the two timer blocks are similar but not identical, and a
+shared crate for one duplicated module is a lot of structure for a little reuse. Worth doing only
+when a third caller appears. Note: both the timer duplication and the PSG "blocker" justifications
+rest on a rule that was never true.
 
 ### The biggest gap
 
