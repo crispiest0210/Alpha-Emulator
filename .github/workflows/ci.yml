@@ -78,6 +78,18 @@ jobs:
         run: cargo xtask fetch-test-roms
       - name: Accuracy suite
         run: cargo xtask test --accuracy
+      - name: Upload golden mismatches
+        # A failed hash comparison tells you nothing on its own; the rendered frame it produced
+        # does. The golden runner (testing/harness/src/golden.rs) writes one PNG per mismatch to
+        # target/golden-fail/, and this is what makes that reachable from a CI failure instead of
+        # requiring someone to reproduce it locally. `if-no-files-found: ignore` because most job
+        # failures are not a golden mismatch, and there is nothing to upload from those.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-fail-${{ matrix.os }}
+          path: target/golden-fail/
+          if-no-files-found: ignore
       - name: Benchmarks compile
         # Compiled, never run. Benchmark *timings* on a shared CI runner are noise and would either
         # fail randomly or teach everyone to ignore them; what CI can usefully protect is that the

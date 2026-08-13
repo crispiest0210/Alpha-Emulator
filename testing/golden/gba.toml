@@ -1,0 +1,130 @@
+# The GBA rendering golden manifest.
+#
+# Run by `testing/harness/src/golden.rs` — see that file's module docs for the mechanism, and
+# CONTRIBUTING.md for the provenance rule this file exists to enforce. In short:
+#
+#   - Each `[[case]]` names a ROM already in the accuracy corpus (`testing/corpus`) and a
+#     handful of frame numbers to hash and check — a trail across frames, not one final hash,
+#     so a mismatch names *when* a run diverged rather than only *that* it did.
+#   - `hashes` must be either empty or exactly as long as `frames`. Empty means pending: the
+#     case still runs every time (so a crash or a parse failure is still caught), but nothing
+#     is asserted, and the runner prints what it actually saw so a future validation pass has
+#     something to start from.
+#   - `provenance` is mandatory on every case, pending or not. A hash this emulator produced
+#     and never checked against anything independent would enshrine whatever bug is already
+#     present as the expected answer forever, so every non-pending hash here was checked
+#     against something outside this codebase before being committed, and the provenance line
+#     says what. A pending case's provenance says what *was* checked and why that fell short of
+#     independent validation, not just "TODO".
+#
+# Phase 2's fixes will change several of the currently-empty entries' underlying pictures, and
+# some may change what a *validated* entry here should read too. When that happens the fix
+# re-validates the new hash against the reference named in `provenance` — a hash does not
+# become trustworthy by a test going green, only by being checked again.
+
+[[case]]
+name = "gba_suite_arm"
+rom = "gba/gba-suite/arm.gba"
+frames = [1, 2, 5, 30, 60]
+hashes = [
+    "8f68687253dc1b25",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+]
+provenance = """
+Compared by eye, 2026-08-12, against the pass/fail report screenshot in jsmolka/gba-tests' own
+README.md (https://github.com/jsmolka/gba-tests/blob/master/README.md), rendered by eggvance and
+captioned there as this suite's documented convention: background mode 4, a white background,
+and centered black monospace text reading either "All tests passed" or "Failed test NNN". This
+emulator's render from frame 2 onward matches that convention exactly — background colour, text
+colour, font, message, and position — and frame 1 is a plausible pre-render blank (the suite
+calls a single m_vsync before drawing its report). It is also byte-identical to
+gba_suite_memory's render at every one of the same checkpoints below: two independently
+assembled ROMs that share nothing but the report-drawing library code, which corroborates the
+README comparison rather than replacing it.
+
+This is a convention match, not a pixel-diffed image comparison — the README's picture is a
+scaled, cropped window screenshot with title-bar chrome, not a raw 240x160 dump, so there is
+nothing to diff byte-for-byte against. See gba_suite_thumb's entry in testing/corpus/src/lib.rs
+for what this same comparison found instead of a match: that ROM's registers report a pass but
+its own rendered text does not, which is exactly the class of bug this file exists to catch —
+found here, by exactly this mechanism, while it was being built.
+"""
+
+[[case]]
+name = "gba_suite_memory"
+rom = "gba/gba-suite/memory.gba"
+frames = [1, 2, 5, 30, 60]
+hashes = [
+    "8f68687253dc1b25",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+    "e5ab36d2fca96065",
+]
+provenance = """
+Same comparison and same date as gba_suite_arm above, and the same result: matches the
+pass/fail report convention documented and screenshotted (via eggvance) in jsmolka/gba-tests'
+own README.md, and is byte-identical to gba_suite_arm's render at every checkpoint here despite
+the two ROMs sharing no test code, only the report renderer.
+"""
+
+# The three jsmolka ppu/ ROMs, added alongside this manifest. None of the three has a published
+# reference image — dmg-acid2 and cgb-acid2 ship one; ppu/ does not — and no independent GBA
+# renderer was available to generate one in the environment this manifest was built in (mGBA
+# 0.10.5 was installed for exactly this purpose; its Qt frontend has no scriptable headless
+# screenshot path, and driving its GUI would mean opening a window on whoever is running this
+# job's desktop, which was judged worse than an honestly pending entry). So: pending. What
+# follows for each is what *was* checked, which is more than "it renders something."
+
+[[case]]
+name = "ppu_hello"
+rom = "gba/gba-suite/ppu/hello.gba"
+frames = [1, 2, 5, 30, 60]
+hashes = []
+provenance = """
+PENDING — not yet validated against an independent reference. What was checked, 2026-08-12: the
+rendered picture is a black background with white "Hello world!" text, centered around the
+position ppu/hello.asm's own source targets (m_text_pos 72, 76), which is exactly what that
+source says to draw — read side by side with the rendered PNG. Frame 1 is solid black, which
+matches the source's single m_vsync call before the text is drawn rather than looking like
+corruption (see this file's "Stop and reassess" rule in testing/harness/src/golden.rs's module
+docs, which this satisfies: frame 1 does not disagree with the ROM, it just hasn't drawn yet).
+Fill in `hashes` only once checked against mGBA, real hardware, or another independent
+implementation — not from this emulator's own output, which is exactly the guess this field
+exists to prevent.
+"""
+
+[[case]]
+name = "ppu_shades"
+rom = "gba/gba-suite/ppu/shades.gba"
+frames = [1, 2, 5, 30, 60]
+hashes = []
+provenance = """
+PENDING — not yet validated against an independent reference. What was checked, 2026-08-12: the
+rendered picture is sixteen vertical bands of increasing blue intensity, black to full blue —
+exactly "shades of blue", which is the source's own comment on the loop that builds them
+(sixteen palette entries, each 2 shl 10 bluer than the last). Frame 1 already shows the full
+gradient and is not corrupted; it differs by hash from frame 2 onward in a handful of pixels
+too small to see by eye, plausibly the PPU scanning out the top rows before the CPU's
+palette/VRAM setup — which runs well inside one frame's cycle budget on real hardware too —
+finishes within that same first frame. Not chased further; recorded as a pending trail rather
+than a finding, since nothing here looks wrong, only unconfirmed. Fill in `hashes` only once
+checked against an independent reference, not from this emulator's own output.
+"""
+
+[[case]]
+name = "ppu_stripes"
+rom = "gba/gba-suite/ppu/stripes.gba"
+frames = [1, 2, 5, 30, 60]
+hashes = []
+provenance = """
+PENDING — not yet validated against an independent reference. What was checked, 2026-08-12: the
+rendered picture is alternating single-tile-wide vertical stripes of two blue-grey shades,
+matching the source's "Generate map in alternating order" comment and its two configured
+palette colours (0x560B, 0x6290). Stable from frame 1 onward — the setup has no vsync wait and
+finishes well inside one frame, consistent with ppu_shades' timing above. Fill in `hashes` only
+once checked against an independent reference, not from this emulator's own output.
+"""

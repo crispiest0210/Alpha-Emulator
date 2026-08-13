@@ -286,10 +286,11 @@ Current Game Boy results:
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
-| `gba-suite` arm, thumb, memory | **pass** |
+| `gba-suite` arm, thumb, memory | **pass** by register, but see below for `thumb` |
 | `gba-suite` save/none | **pass** |
 | `gba-suite` bios | fails — see below |
 | `gba-suite` save/sram, save/flash64, save/flash128 | fail — see below |
+| `gba-suite` ppu/hello, shades, stripes | render plausibly; unvalidated — see below |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
 
 **Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
@@ -385,6 +386,44 @@ mystery:**
 All four are recorded as `expected_failure` in `testing/corpus/src/lib.rs`, so the suite stays
 green for *regressions* while they are open and fails loudly if one starts passing.
 
+### The GBA golden manifest
+
+Until now, not one GBA frame in this repository had been compared against a reference —
+`Convention::GbaSuite` checks a register, and every GBA rendering bug this project had found
+(colour index 0 drawn opaque, the backwards alpha blend, Game-Boy-shaped sprite priority) was
+found by looking at a picture, not by a test failing. `testing/golden/gba.toml`, run by
+`testing/harness/src/golden.rs` as part of `cargo xtask test --accuracy`, is the mechanism that
+replaces the looking: each case hashes a ROM's framebuffer at several frames — `[1, 2, 5, 30,
+60]`, not just the last one, so a mismatch names *when* a run diverged — and a mismatch writes
+the actual frame to `target/golden-fail/<name>-<frame>.png`, which CI uploads as an artifact on
+failure.
+
+**Building it found a bug immediately, before the mechanism was even finished.** `gba_suite_arm`
+and `gba_suite_memory` render a byte-identical "All tests passed" picture, matched by eye against
+the pass/fail report screenshot in jsmolka/gba-tests' own README (rendered there by eggvance) —
+both are validated golden entries. `gba_suite_thumb` does not: its *rendered* report reads
+"Failed test 229" from frame 2 onward, but `run_gba_suite`'s register check reads `r12=0` at
+settle and reports a pass — so the table above still says thumb passes, because that convention's
+own verdict says so, and `expected_failure` is checked against that verdict specifically (marking
+it failed there would make the suite panic with "expected failure but passed"). The likely cause
+is in `gba-suite`'s own failure-report routine (`lib/macros.inc`'s `m_test_eval`): it pushes
+`r0-r12`, computes the failing test's digits via two BIOS `Div` calls and a `bl` to a text
+routine, then restores `r0-r12` with a final `ldmfd` before idling — and something in that
+sequence is not putting r12 back. Full diagnosis is in `testing/corpus/src/lib.rs`'s
+`gba_suite_thumb` entry and `testing/golden/gba.toml`'s `gba_suite_arm` case; fixing it is
+separate work from building the mechanism that found it.
+
+The three jsmolka `ppu/` ROMs (`hello`, `shades`, `stripes`) are in the corpus now too, using
+`Convention::Framebuffer`, and in the golden manifest as pending cases. Each renders exactly what
+its own source says it should — readable "Hello world!" text, a sixteen-step blue gradient,
+alternating stripes in the two configured colours — but `ppu/` ships no reference image the way
+dmg-acid2 and cgb-acid2 do, and no independent GBA renderer was available to make one: mGBA 0.10.5
+was installed for exactly that, but its Qt frontend has no scriptable headless screenshot path,
+and driving its GUI would mean opening a window on someone's desktop for a background job to
+control, which was judged worse than an honestly pending entry. `hashes = []` and a provenance
+line saying precisely that is what's committed instead — a guess with authority is worse than an
+admitted gap. See `testing/golden/gba.toml` for what was and was not checked on each.
+
 The Game Boy Color's colour *rendering* is now validated against a reference — that is what
 cgb-acid2 covers. Its speed switch and VRAM DMA are still checked against hardware documentation
 and unit tests only, `OPRI` is not modelled at all, and the Mooneye CGB suite is not in the corpus
@@ -439,8 +478,11 @@ Linux, macOS, and Windows:
 ### What CI checks
 
 `ci.yml` runs on every push and pull request: `rustfmt` and `clippy`, the crate-boundary rule via
-`cargo deny`, unit tests and the full accuracy suite on Linux, macOS, and Windows, `cargo doc` with
-warnings denied, a release-profile build of the two shipped binaries, and `cargo bench --no-run`.
+`cargo deny`, unit tests and the full accuracy suite (including the GBA golden manifest) on Linux,
+macOS, and Windows, `cargo doc` with warnings denied, a release-profile build of the two shipped
+binaries, and `cargo bench --no-run`. A golden-manifest mismatch uploads the rendered frame(s)
+from `target/golden-fail/` as a build artifact, so the wrong picture is one click away rather than
+something you have to reproduce locally.
 
 The last two are there because both fail in ways nothing else catches. `panic = "abort"` and thin LTO
 apply only to the release profile, so a release-only compile error is real and would otherwise be

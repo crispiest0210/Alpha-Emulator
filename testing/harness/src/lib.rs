@@ -37,6 +37,10 @@
 /// caller in this crate already uses.
 pub use corpus;
 
+/// The GBA rendering golden manifest — see that module's docs for why it exists and how
+/// `hashes = []` is read.
+pub mod golden;
+
 use core_common::{Framebuffer, InputState, RegisterValue, System};
 
 /// A system the harness can inspect beyond what [`System`] exposes.
@@ -307,20 +311,6 @@ pub fn capture_framebuffer<S: TestableSystem + ?Sized>(system: &mut S, frames: u
         system.step_frame(InputState::default());
     }
     system.framebuffer().clone()
-}
-
-/// A stable, readable digest of a framebuffer.
-///
-/// FNV-1a rather than a cryptographic hash: this identifies a picture, it does not defend
-/// against anyone constructing a collision. Rendered as hex so a snapshot diff shows a changed
-/// value rather than a wall of binary.
-pub fn framebuffer_hash(framebuffer: &Framebuffer) -> String {
-    let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
-    for byte in framebuffer.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    format!("{hash:016x}")
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +585,7 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
             .map_or(0, |r| r.value)
     };
 
-    let initial_frame_hash = framebuffer_hash(system.framebuffer());
+    let initial_frame_hash = system.framebuffer().fnv1a_hex();
 
     let mut previous_pc = u64::MAX;
     let mut settled = 0;
@@ -623,7 +613,7 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
             };
         }
 
-        return if framebuffer_hash(system.framebuffer()) != initial_frame_hash {
+        return if system.framebuffer().fnv1a_hex() != initial_frame_hash {
             TestOutcome::Passed {
                 report: "all sub-tests passed".into(),
                 frames: frame,

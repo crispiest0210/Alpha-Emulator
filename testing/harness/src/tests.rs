@@ -412,34 +412,6 @@ fn a_genuine_failure_is_still_recognized() {
 }
 
 // ---------------------------------------------------------------------------
-// Framebuffer hashing
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_hash_distinguishes_pictures_and_is_stable() {
-    let mut a = Framebuffer::new(4, 4);
-    let b = Framebuffer::new(4, 4);
-    assert_eq!(framebuffer_hash(&a), framebuffer_hash(&b));
-
-    a.set_pixel(1, 1, core_common::Rgba8::rgb(1, 2, 3));
-    assert_ne!(framebuffer_hash(&a), framebuffer_hash(&b));
-
-    // Stable across calls, which is what makes it usable as a committed expectation.
-    assert_eq!(framebuffer_hash(&a), framebuffer_hash(&a));
-    assert_eq!(framebuffer_hash(&a).len(), 16);
-}
-
-#[test]
-fn a_single_changed_pixel_changes_the_hash() {
-    // A hash that only caught gross differences would let subtle rendering regressions
-    // through, which is the whole class dmg-acid2 exists to catch.
-    let base = Framebuffer::new(16, 16);
-    let mut changed = base.clone();
-    changed.set_pixel(15, 15, core_common::Rgba8::rgb(0, 0, 1));
-    assert_ne!(framebuffer_hash(&base), framebuffer_hash(&changed));
-}
-
-// ---------------------------------------------------------------------------
 // Determinism utilities
 // ---------------------------------------------------------------------------
 
@@ -557,6 +529,76 @@ fn the_save_state_round_trip_check_passes_a_correct_system() {
     assert!(result.is_ok(), "{result:?}");
 }
 
+/// A tiny Game Boy Advance program that spins, incrementing a counter into EWRAM each pass —
+/// the GBA counterpart of `gb_test_rom` above. It touches real memory rather than sitting on a
+/// single `b .`, so `the_determinism_check_passes_a_deterministic_gba_system` and
+/// `the_save_state_round_trip_check_passes_a_correct_gba_system` below are proving those checks
+/// hold up under real bus traffic every frame, not just for a machine that never does anything.
+///
+/// Three instructions, hand-assembled rather than pulled from a `.gba` file so this test has no
+/// dependency on the fetched corpus: `add r0, r0, #1` / `str r0, [r1]` / `b` back, with `r1`
+/// loaded once from a PC-relative literal to EWRAM's base (`0x02000000`) — plain RAM with none
+/// of the cartridge save window's quirks, so this exercises the CPU and memory bus rather than
+/// anything this session's other findings touched. `the_gba_test_rom_actually_increments_its_counter`
+/// below is the check that this hand-assembly is correct: neither `check_deterministic` nor
+/// `check_save_state_round_trip` looks at EWRAM, only at the framebuffer, audio, and
+/// `step_frame`'s own return value, so a wrong offset here would not fail either of them.
+fn gba_test_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x1000];
+    let program: [u32; 6] = [
+        0xE3A0_0000, // mov r0, #0
+        0xE59F_1008, // ldr r1, [pc, #8]  -> r1 = 0x02000000 (EWRAM base)
+        0xE280_0001, // loop: add r0, r0, #1
+        0xE581_0000, //       str r0, [r1]
+        0xEAFF_FFFC, //       b loop
+        0x0200_0000, // literal: EWRAM base address
+    ];
+    for (index, word) in program.iter().enumerate() {
+        rom[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    rom
+}
+
+#[test]
+fn the_gba_test_rom_actually_increments_its_counter() {
+    let mut gba = system_gba::GbaSystem::new(gba_test_rom(), None).unwrap();
+    for _ in 0..2 {
+        gba.step_frame(InputState::default());
+    }
+    use core_common::Bus;
+    let counter = gba.bus_mut().read32(0x0200_0000);
+    assert_ne!(
+        counter, 0,
+        "the loop should have incremented EWRAM's counter well past zero by now"
+    );
+}
+
+#[test]
+fn the_determinism_check_passes_a_deterministic_gba_system() {
+    let result = check_deterministic(
+        || system_gba::GbaSystem::new(gba_test_rom(), None).unwrap(),
+        &[
+            InputState::default(),
+            InputState {
+                buttons: core_common::Buttons::A,
+                touch: None,
+            },
+        ],
+        60,
+    );
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn the_save_state_round_trip_check_passes_a_correct_gba_system() {
+    let result = check_save_state_round_trip(
+        || system_gba::GbaSystem::new(gba_test_rom(), None).unwrap(),
+        30,
+        60,
+    );
+    assert!(result.is_ok(), "{result:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Reporting
 // ---------------------------------------------------------------------------
@@ -627,7 +669,7 @@ fn run_on<S: TestableSystem>(rom: &TestRom, mut system: S) -> Option<(TestOutcom
         Convention::GbaSuite => run_gba_suite(&mut system, rom.max_frames),
         Convention::Framebuffer => {
             let framebuffer = capture_framebuffer(&mut system, rom.max_frames);
-            let hash = framebuffer_hash(&framebuffer);
+            let hash = framebuffer.fnv1a_hex();
             match rom.expected_hash {
                 Some(expected) if expected == hash => TestOutcome::Passed {
                     report: hash,
@@ -717,6 +759,64 @@ fn gb_accuracy_suite() {
         "these ROMs are marked as expected failures but passed; remove the marker: {unexpected_passes:?}"
     );
     assert!(report.is_success(), "{summary}");
+}
+
+// ---------------------------------------------------------------------------
+// The GBA rendering golden manifest
+// ---------------------------------------------------------------------------
+
+/// Runs `testing/golden/gba.toml` — see [`crate::golden`] for the mechanism.
+///
+/// One test for the whole manifest, same reasoning as `gb_accuracy_suite`: a single report
+/// naming every divergence is more useful than stopping at the first, and an unfetched corpus
+/// produces one clear skip message rather than five.
+#[test]
+fn gba_golden_frames() {
+    let summary = crate::golden::run_golden_manifest();
+
+    if summary.checked.is_empty() && summary.pending.is_empty() && !summary.skipped.is_empty() {
+        eprintln!("no golden ROMs present; run `cargo xtask fetch-test-roms` to enable this suite");
+        return;
+    }
+
+    eprintln!(
+        "\nGBA golden manifest: {} checked, {} pending, {} skipped",
+        summary.checked.len(),
+        summary.pending.len(),
+        summary.skipped.len()
+    );
+    if !summary.pending.is_empty() {
+        eprintln!(
+            "  pending (no independent reference recorded yet): {}",
+            summary.pending.join(", ")
+        );
+    }
+    if !summary.skipped.is_empty() {
+        eprintln!(
+            "  skipped (run `cargo xtask fetch-test-roms`): {}",
+            summary.skipped.join(", ")
+        );
+    }
+
+    assert!(
+        summary.is_success(),
+        "{} golden mismatch(es); the rendered frame for each is on disk — see the path printed \
+         above for each one:\n{}",
+        summary.mismatches.len(),
+        summary
+            .mismatches
+            .iter()
+            .map(|m| format!(
+                "  {} frame {}: expected {}, got {} -> {}",
+                m.case,
+                m.frame,
+                m.expected,
+                m.actual,
+                m.png_path.display()
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------

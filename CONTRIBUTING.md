@@ -124,6 +124,29 @@ cartridge RAM. Picking the wrong one makes a ROM look like it hangs when it has 
 finished and reported. `cargo test -p harness --release -- --ignored --nocapture
 dmg_sound_results` prints what the memory-protocol ROMs actually said.
 
+### A committed hash is a claim someone checked, not a claim this emulator agrees with itself
+
+`testing/golden/gba.toml` tracks GBA rendering across several frames per ROM, not just one —
+see `testing/harness/src/golden.rs` for the mechanism. The rule that makes it worth anything:
+
+- **Every `hashes` entry needs a `provenance` line naming what it was checked against.** A hash
+  this emulator produced and never compared to anything else is not a validated answer, it is
+  this emulator's opinion of itself, and committing it would enshrine whatever bug is already
+  present as the expected one. `provenance` says what independent thing it was checked against
+  — a published reference image, another emulator's screenshot, real hardware — and when.
+- **Can't validate it yet? Commit `hashes = []` with a `provenance` line explaining why not, and
+  what *was* checked instead.** An honestly pending case is worth more than a confidently wrong
+  one, and the runner still exercises it every time — a crash or a parse failure is still
+  caught, only the pixel comparison is skipped.
+- **A fix that changes a validated hash re-validates it against the reference named in
+  `provenance`, not the other way round.** A hash does not become trustworthy by the suite
+  going green; it becomes trustworthy by being checked again, the same way it was validated the
+  first time. Update the provenance line to say so, with the date.
+
+On a mismatch the runner writes the actual frame to `target/golden-fail/<name>-<frame>.png` and
+CI uploads that directory as an artifact when the job fails — a wrong picture is worth looking
+at, a hex string that differs is not.
+
 ## Licensing
 
 Dual-licensed under MIT or Apache-2.0, at the user's option — `LICENSE-MIT` and `LICENSE-APACHE`.

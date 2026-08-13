@@ -1421,11 +1421,14 @@ dependencies = [
  "core-common",
  "corpus",
  "criterion",
+ "frontend-core",
  "insta",
+ "serde",
  "system-gb",
  "system-gba",
  "system-gbc",
  "system-nds",
+ "toml",
  "tracing",
 ]
 

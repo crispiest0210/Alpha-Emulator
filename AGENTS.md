@@ -46,6 +46,9 @@ Affected documentation means every surface making a claim the change just falsif
   `.github/workflows/ci.yml`; those three must move together)
 - Crate-level `//!` docs, especially their Status sections
 - `testing/corpus/src/lib.rs` — `expected_failure` notes, added or removed
+- `testing/golden/gba.toml` — a `provenance` line whenever `hashes` changes from empty to
+  filled, from filled to empty, or from one filled value to another; a hash re-validated only
+  because a test went green is exactly the guess this file exists to prevent
 
 Write a handoff prompt **only** when the context window is genuinely near its limit — not at
 every stopping point. Below that, committing and keeping the docs current *is* the handoff, and

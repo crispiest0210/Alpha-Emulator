@@ -211,7 +211,7 @@ fn main() -> Result<()> {
                 }
                 if let Some(every) = trace_every {
                     if every > 0 && frame.is_multiple_of(every) {
-                        println!("{frame:>8}  {}", hash(system.framebuffer()));
+                        println!("{frame:>8}  {}", system.framebuffer().fnv1a_hex());
                     }
                 }
             }
@@ -219,7 +219,7 @@ fn main() -> Result<()> {
             println!(
                 "audio  {audio_count} samples, {audio_nonzero} non-silent, peak {audio_peak:.4}"
             );
-            println!("hash   {}", hash(system.framebuffer()));
+            println!("hash   {}", system.framebuffer().fnv1a_hex());
 
             if let Some(path) = save_state {
                 // `AEF1` and a frame number, then the payload: what the window writes and reads.

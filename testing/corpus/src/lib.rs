@@ -564,8 +564,9 @@ pub const CGB_ROMS: &[TestRom] = &[
 /// is the direct check on this project's BIOS HLE: the `swi` dispatcher and the interrupt-return
 /// wrapper. The `save` ROMs each format their cartridge for one backup type (SRAM, 64K flash,
 /// 128K flash, or none) and exercise it, covering the path `README.md` otherwise admits is
-/// unverified. `ppu/` is left for a later prompt that builds the framebuffer convention it
-/// needs.
+/// unverified. The `ppu` ROMs (`hello`, `shades`, `stripes`) use [`Convention::Framebuffer`]
+/// instead — they have no self-report, so the rendered picture is the result — and are also
+/// tracked at several frame checkpoints, not just one, by `testing/golden/gba.toml`.
 pub const GBA_ROMS: &[TestRom] = &[
     TestRom {
         name: "gba_suite_arm",
@@ -586,6 +587,34 @@ pub const GBA_ROMS: &[TestRom] = &[
         hardware: Hardware::Gba,
         max_frames: 600,
         expected_hash: None,
+        // `expected_failure` stays `None` here on purpose, even though this ROM does not
+        // actually pass — see testing/golden/gba.toml's `gba_suite_thumb` case for why, and
+        // read this comment before reaching for that field.
+        //
+        // `run_gba_suite` reads r12=0 once the PC settles (frame 5) and reports a pass. But
+        // the ROM's own rendered report — stable from frame 2 through at least frame 40,
+        // found while building the golden manifest and confirmed by rendering it and
+        // looking — reads "Failed test 229", not "All tests passed". `gba_suite_arm` and
+        // `gba_suite_memory` render a byte-identical "All tests passed" picture (same hash,
+        // both plausible against the pass/fail screenshots in jsmolka/gba-tests' own
+        // README), so the report renderer itself is trustworthy; this ROM is the one whose
+        // r12 does not survive to be read by the time this convention checks it.
+        //
+        // The suite's own source (lib/macros.inc's `m_test_eval`) explains why that is
+        // possible at all: on a failure it pushes r0-r12, computes the failing test's digits
+        // via two BIOS `Div` calls and `bl text_char`, then restores r0-r12 with a final
+        // `ldmfd sp!, {r0-r12}` before falling into `idle: b idle` — so r12 should read back
+        // as 229 once settled, not 0. Something in that sequence — the block-transfer
+        // restore, the `bl`/return handling inside `text_char`, or the Thumb-to-ARM mode
+        // transition between this ROM's own Thumb tests and the shared ARM report code —
+        // is not preserving it. Which one has not been isolated; that is separate work from
+        // building the mechanism that found this.
+        //
+        // `expected_failure` cannot carry this: it is checked against *this convention's own*
+        // verdict (`gb_accuracy_suite`'s `unexpected_passes` check), and by that verdict this
+        // ROM currently passes — marking it failed here would make the suite panic with
+        // "expected failure but passed" the moment someone runs it, which is exactly backwards
+        // for a bug the register check cannot see in the first place.
         expected_failure: None,
         licence: "MIT (Julian Smolka)",
     },
@@ -686,6 +715,62 @@ pub const GBA_ROMS: &[TestRom] = &[
         max_frames: 600,
         expected_hash: None,
         expected_failure: None,
+        licence: "MIT (Julian Smolka)",
+    },
+    // jsmolka/gba-tests' `ppu/` set: no self-report, so the rendered picture is the result,
+    // same as dmg-acid2 and cgb-acid2 above. Unlike those two, nothing in jsmolka/gba-tests
+    // ships a reference image for these, and no independent GBA renderer was available to
+    // produce one when these were added (see testing/golden/gba.toml's provenance for these
+    // three, which records exactly what was and was not checked). `expected_hash` stays `None`
+    // — an unvalidated render is not a pass — until that changes.
+    TestRom {
+        name: "gba_ppu_hello",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/ppu/hello.gba",
+        path: "gba/gba-suite/ppu/hello.gba",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Gba,
+        max_frames: 60,
+        expected_hash: None,
+        expected_failure: Some(
+            "unvalidated, not broken: it renders a plausible \"Hello world!\" (checked against \
+             the ROM's own source — see testing/golden/gba.toml's ppu_hello case for exactly \
+             what that means), but no independent reference was available to confirm it, so \
+             this stays a known-pending entry rather than a claimed pass. Remove this note only \
+             alongside setting expected_hash, once one is validated",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_ppu_shades",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/ppu/shades.gba",
+        path: "gba/gba-suite/ppu/shades.gba",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Gba,
+        max_frames: 60,
+        expected_hash: None,
+        expected_failure: Some(
+            "unvalidated, not broken: it renders a plausible sixteen-step blue gradient \
+             (checked against the ROM's own source — see testing/golden/gba.toml's ppu_shades \
+             case), but no independent reference was available to confirm it. Remove this note \
+             only alongside setting expected_hash, once one is validated",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_ppu_stripes",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/ppu/stripes.gba",
+        path: "gba/gba-suite/ppu/stripes.gba",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Gba,
+        max_frames: 60,
+        expected_hash: None,
+        expected_failure: Some(
+            "unvalidated, not broken: it renders plausible alternating stripes in the ROM's two \
+             configured colours (checked against the ROM's own source — see \
+             testing/golden/gba.toml's ppu_stripes case), but no independent reference was \
+             available to confirm it. Remove this note only alongside setting expected_hash, \
+             once one is validated",
+        ),
         licence: "MIT (Julian Smolka)",
     },
 ];

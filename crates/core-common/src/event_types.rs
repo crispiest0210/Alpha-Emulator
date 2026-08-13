@@ -331,6 +331,22 @@ impl Framebuffer {
         self.pixels
             .resize(width as usize * height as usize * BYTES_PER_PIXEL, 0);
     }
+
+    /// A stable, readable digest of the pixels, as lowercase hex.
+    ///
+    /// FNV-1a rather than a cryptographic hash: this identifies a picture for a snapshot test or
+    /// a bug report, it does not defend against anyone constructing a collision. Lives here, not
+    /// duplicated in every caller that wants one — the test harness and the headless frontend
+    /// both used to carry their own copy of this exact loop, and a fix to one silently would not
+    /// have reached the other.
+    pub fn fnv1a_hex(&self) -> String {
+        let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
+        for byte in self.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        format!("{hash:016x}")
+    }
 }
 
 impl Savable for Framebuffer {
@@ -455,6 +471,30 @@ mod tests {
         fb.row_mut(1).copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(fb.pixel(0, 1), Rgba8::rgba(1, 2, 3, 4));
         assert_eq!(fb.pixel(1, 1), Rgba8::rgba(5, 6, 7, 8));
+    }
+
+    #[test]
+    fn the_hash_distinguishes_pictures_and_is_stable() {
+        let mut a = Framebuffer::new(4, 4);
+        let b = Framebuffer::new(4, 4);
+        assert_eq!(a.fnv1a_hex(), b.fnv1a_hex());
+
+        a.set_pixel(1, 1, Rgba8::rgb(1, 2, 3));
+        assert_ne!(a.fnv1a_hex(), b.fnv1a_hex());
+
+        // Stable across calls, which is what makes it usable as a committed expectation.
+        assert_eq!(a.fnv1a_hex(), a.fnv1a_hex());
+        assert_eq!(a.fnv1a_hex().len(), 16);
+    }
+
+    #[test]
+    fn a_single_changed_pixel_changes_the_hash() {
+        // A hash that only caught gross differences would let subtle rendering regressions
+        // through, which is the whole class dmg-acid2 and the golden manifest exist to catch.
+        let base = Framebuffer::new(16, 16);
+        let mut changed = base.clone();
+        changed.set_pixel(15, 15, Rgba8::rgb(0, 0, 1));
+        assert_ne!(base.fnv1a_hex(), changed.fnv1a_hex());
     }
 
     #[test]
