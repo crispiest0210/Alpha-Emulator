@@ -35,6 +35,8 @@
 //!   and games handle it — but the clock never advances.
 //! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
 //!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
+//!   `bios::intr_wait` is the one call that keeps state between steps, and the one worth reading
+//!   before trusting anything about frame pacing.
 //!
 //! # The failure mode this system keeps producing
 //!
@@ -62,6 +64,13 @@
 //! inside it. What a commercial game lost was nine tenths of its processor, and what that looked
 //! like was a frozen picture with the CPU visibly running. See `system::GbaSystemBus::charge`:
 //! charge once, at the width the CPU asked for, and charge only the waiting.
+//!
+//! The second one has the same shape and is worth the same suspicion: `IntrWait` and
+//! `VBlankIntrWait` were implemented as a plain halt, so they returned on *any* interrupt rather
+//! than the ones named in `r1`. A game that also enables HBlank or a timer — which is most of them
+//! — ran its main loop **618 times across three frames where hardware runs it 3**. Again no test
+//! failed and the speed reading stayed at 100%; only the emulated machine's sense of a frame was
+//! wrong, which makes every downstream symptom look like an unrelated bug. See `bios::intr_wait`.
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that

@@ -92,6 +92,15 @@ Three causes compounded, all now fixed and pinned by
 - The wait-state table reports an access's whole cost including its first cycle, and the CPU core's
   S/N/I total already counted that cycle. Only the waiting is charged now.
 
+A second bug of exactly that shape turned up later and is worth the same suspicion. **The two BIOS
+wait calls were implemented as a plain halt**, so they woke on *any* interrupt instead of the ones
+the game named. A game that also enables HBlank for a raster effect or a timer for its sound driver
+— which is most commercial software — got `VBlankIntrWait` back on the next HBlank: measured at
+**618 returns across three frames where hardware gives 3**. Nothing failed and the speed reading
+stayed at 100%; the emulated machine simply ran its main loop two hundred times a frame, and every
+symptom downstream of frame pacing looked like a separate bug. The wait now reads the BIOS's flag
+word at `0x0300_7FF8`, which the interrupt path maintains, and is pinned by the `intr_wait` tests.
+
 Three rendering defects surfaced afterwards, all of which had produced a complete and plausible
 *wrong* picture rather than a missing one — the failure mode this project treats as the dangerous
 one:

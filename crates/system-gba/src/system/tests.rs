@@ -660,3 +660,220 @@ fn disassemble_at(system: &GbaSystem, addr: u32, thumb: bool) -> String {
         None => format!("{addr:08X}  {word}  ??"),
     }
 }
+
+/// The `IntrWait` tests share one small machine: a main loop that waits and counts, and an
+/// interrupt handler that acknowledges `IF` the way a real one does.
+///
+/// Both halves matter. A handler that does not acknowledge leaves the source pending, so the
+/// machine re-enters it forever and no test below can distinguish a correct wait from a wrong one.
+mod intr_wait {
+    use super::*;
+
+    /// Where the game leaves its handler, and where these tests assemble one.
+    const HANDLER: u32 = 0x0300_0100;
+    /// The counter the main loop keeps. `r4` survives the interrupt wrapper, which pushes only the
+    /// registers the procedure standard lets a callee clobber.
+    const COUNTER: usize = 4;
+
+    /// A main loop of `SWI <call>; add r4, r4, #1; b .-16`.
+    ///
+    /// `r4` therefore counts *completed waits*, which is the one number every test here is about:
+    /// a wait that returns on the wrong interrupt shows up as a count in the hundreds.
+    fn rom_waiting_on(call: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x1000];
+        for (index, word) in [
+            0xEF00_0000 | (call as u32) << 16, // swi <call>
+            0xE284_4001,                       // add r4, r4, #1
+            0xEAFF_FFFC,                       // b back to the swi
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            rom[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        rom
+    }
+
+    /// A machine running that loop, with an interrupt handler that acknowledges `IF`.
+    ///
+    /// `enabled` goes into `IE` and picks the matching `DISPSTAT` enables; `r0` and `r1` are the
+    /// call's arguments, which for `SWI 0x04` are the discard flag and the mask.
+    fn machine(call: u8, enabled: u16, r0: u32, r1: u32) -> GbaSystem {
+        let mut gba = GbaSystem::new(rom_waiting_on(call), None).expect("the ROM is valid");
+        {
+            let bus = gba.bus_mut();
+            bus.write32(crate::irq::HLE_HANDLER_POINTER, HANDLER);
+
+            let mut status = 0;
+            if enabled & crate::irq::source::VBLANK != 0 {
+                status |= crate::video::dispstat::VBLANK_IRQ;
+            }
+            if enabled & crate::irq::source::HBLANK != 0 {
+                status |= crate::video::dispstat::HBLANK_IRQ;
+            }
+            bus.write16(crate::video::reg::DISPSTAT, status);
+            bus.write16(crate::irq::reg::IE, enabled);
+            bus.write16(crate::irq::reg::IME, 1);
+
+            // ldr r0, [pc, #12] / ldrh r1, [r0] / strh r1, [r0] / bx lr, then the address of `IF`.
+            // Writing `IF` back over itself is how this hardware acknowledges: a one clears.
+            for (offset, word) in [
+                (0x00, 0xE59F_000C),
+                (0x04, 0xE1D0_10B0),
+                (0x08, 0xE1C0_10B0),
+                (0x0C, 0xE12F_FF1E),
+                (0x14, crate::irq::reg::IF),
+            ] {
+                bus.write32(HANDLER + offset, word);
+            }
+        }
+        gba.cpu.set_reg(0, r0);
+        gba.cpu.set_reg(1, r1);
+        gba
+    }
+
+    fn run_frames(gba: &mut GbaSystem, frames: usize) -> u32 {
+        for _ in 0..frames {
+            gba.step_frame(InputState::default());
+        }
+        gba.cpu().reg(COUNTER)
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_on_vertical_blank_and_not_on_the_horizontal_one() {
+        // The bug this whole change exists for. With `HBlank` also enabled — which is most
+        // commercial software, using it for raster effects — a `VBlankIntrWait` implemented as a
+        // plain halt returns on whichever interrupt happens to be next. That is up to 160 returns
+        // a frame instead of one, and every symptom downstream of frame pacing follows from it.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        let completed = run_frames(&mut gba, 3);
+        assert!(
+            (1..=3).contains(&completed),
+            "three frames should complete about three waits, not {completed} — \
+             a count in the hundreds means it returned on every HBlank"
+        );
+    }
+
+    #[test]
+    fn intr_wait_returns_on_a_source_it_named_and_not_on_one_it_did_not() {
+        // A multi-bit mask naming vertical blank and a timer, while horizontal blank is *enabled*
+        // but unnamed. Only the named one may end the wait.
+        let mask = crate::irq::source::VBLANK | crate::irq::source::TIMER0;
+        let mut gba = machine(
+            0x04,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            1,
+            mask as u32,
+        );
+        let completed = run_frames(&mut gba, 3);
+        assert!(
+            (1..=3).contains(&completed),
+            "{completed} completions means the unnamed HBlank was ending the wait"
+        );
+    }
+
+    #[test]
+    fn the_interrupt_path_records_what_it_serviced_and_the_wait_consumes_it() {
+        // The two halves of the flag word's contract, which only work as a pair: the interrupt
+        // path sets a bit, and the wait that was asking for it clears that bit and no other.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        assert_eq!(
+            gba.bus_mut().read16(crate::bios::INTRWAIT_FLAGS),
+            0,
+            "nothing has been serviced yet"
+        );
+
+        run_frames(&mut gba, 2);
+        let flags = gba.bus_mut().read16(crate::bios::INTRWAIT_FLAGS);
+        assert_eq!(
+            flags & crate::irq::source::HBLANK,
+            crate::irq::source::HBLANK,
+            "HBlank was serviced and nothing asked for it, so it stays set"
+        );
+        assert_eq!(
+            flags & crate::irq::source::VBLANK,
+            0,
+            "but VBlank was consumed by the wait that was asking for it"
+        );
+    }
+
+    #[test]
+    fn a_wait_for_an_interrupt_that_is_never_enabled_does_not_livelock() {
+        // Hardware hangs here, and so does this — deliberately. What must not happen is the
+        // frontend hanging with it: `step_frame` is bounded, so the frame comes back regardless
+        // and the machine is left visibly sitting on its `SWI` rather than wedging the process.
+        let mut gba = machine(
+            0x04,
+            crate::irq::source::VBLANK,
+            1,
+            crate::irq::source::SERIAL as u32,
+        );
+        let completed = run_frames(&mut gba, 2);
+        assert_eq!(completed, 0, "nothing can satisfy it, so it never returns");
+        assert!(
+            core_common::DebugTarget::is_halted(&gba),
+            "and it is sitting in the wait rather than having run off somewhere"
+        );
+    }
+
+    #[test]
+    fn a_state_saved_mid_wait_resumes_into_the_wait_rather_than_restarting_it() {
+        // Where a game spends most of its time is inside this call, so most quicksaves land here.
+        // Restoring into a *fresh* call would discard the flags the wait had already begun on,
+        // which costs a frame; restoring with the mask intact resumes the same wait.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        gba.step_frame(InputState::default());
+        assert_eq!(
+            gba.intr_wait,
+            Some(crate::irq::source::VBLANK),
+            "the frame ended with the machine waiting"
+        );
+
+        let state = gba.save_state();
+        let mut restored = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        restored.load_state(&state).expect("the state is valid");
+        assert_eq!(restored.intr_wait, gba.intr_wait);
+
+        gba.step_frame(InputState::default());
+        restored.step_frame(InputState::default());
+        assert_eq!(
+            restored.cpu().reg(COUNTER),
+            gba.cpu().reg(COUNTER),
+            "and it completed the same number of waits from there"
+        );
+    }
+
+    #[test]
+    fn halt_still_wakes_on_any_interrupt_at_all() {
+        // Pinned because `Halt` used to share an arm with the two waits above, and splitting that
+        // arm is exactly the kind of change that quietly takes the other case with it. `Halt` has
+        // no mask: whatever the controller raises wakes it.
+        let mut gba = machine(0x02, crate::irq::source::HBLANK, 0, 0);
+        let completed = run_frames(&mut gba, 1);
+        assert!(
+            completed > 1,
+            "HBlank alone should wake a plain Halt many times a frame, not {completed}"
+        );
+    }
+}
+

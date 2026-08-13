@@ -24,6 +24,7 @@
 //! leaves a caller with unchanged registers — visible in a trace, unlike a plausible-looking
 //! wrong answer.
 
+use crate::irq::{reg, source};
 use core_common::Bus;
 use cpu_arm7tdmi::Arm7Tdmi;
 
@@ -96,18 +97,48 @@ impl BiosCall {
     }
 }
 
+/// The BIOS's own interrupt-flag word, at the top of internal WRAM.
+///
+/// Separate from `IF`, and the two are acknowledged by different code at different times: `IF` is
+/// cleared by the game's handler as it services a source, while this word *accumulates* what has
+/// been serviced so that [`BiosCall::IntrWait`] — which runs long after — can tell whether the
+/// source it is waiting for has arrived. A wait that consulted `IF` instead would see it already
+/// cleared and sleep forever.
+pub const INTRWAIT_FLAGS: u32 = 0x0300_7FF8;
+
 /// What the caller must do after the call, beyond returning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BiosEffect {
-    /// The CPU should stop until an interrupt arrives.
-    pub halt: bool,
+pub enum BiosEffect {
+    /// Carry on at the instruction after the `SWI`.
+    ///
+    /// Also wakes a halted CPU, because the only way to reach a `SWI` while halted is the
+    /// [`BiosEffect::Retry`] path below finishing its wait.
+    #[default]
+    Return,
+    /// Stop the CPU until an interrupt arrives. The call itself is finished.
+    Halt,
+    /// The call has *not* finished: stop the CPU and run this same `SWI` again on the next step.
+    ///
+    /// This is how a wait that hardware implements as a loop inside the BIOS is expressed in an
+    /// emulator whose CPU cannot be suspended part-way through an instruction. See `intr_wait`.
+    Retry,
 }
 
 /// Perform a BIOS call in place of the ROM.
 ///
 /// Takes the CPU and the bus rather than a register array because several calls move memory,
 /// and splitting "which registers" from "what it does" would put the contract in two places.
-pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -> BiosEffect {
+///
+/// `wait` carries the one piece of state a BIOS call keeps between steps: the mask of an
+/// `intr_wait` that has begun and not yet been satisfied. Every other call here is a pure
+/// function of the registers and memory, which is why it is one parameter rather than a context
+/// struct.
+pub fn dispatch<B: Bus + ?Sized>(
+    cpu: &mut Arm7Tdmi,
+    bus: &mut B,
+    wait: &mut Option<u16>,
+    comment: u8,
+) -> BiosEffect {
     let mut effect = BiosEffect::default();
 
     match BiosCall::from_comment(comment) {
@@ -130,9 +161,12 @@ pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -
         }
         BiosCall::CpuSet => cpu_set(cpu, bus, false),
         BiosCall::CpuFastSet => cpu_set(cpu, bus, true),
-        BiosCall::Halt | BiosCall::Stop | BiosCall::IntrWait | BiosCall::VBlankIntrWait => {
-            effect.halt = true;
-        }
+        // `Halt` and `Stop` sleep until *any* interrupt arrives, and the controller decides what
+        // counts as one. They are genuinely the "wake on anything" calls, which is why the two
+        // below them — which are not — no longer share this arm.
+        BiosCall::Halt | BiosCall::Stop => effect = BiosEffect::Halt,
+        BiosCall::IntrWait => effect = intr_wait(cpu, bus, wait, false),
+        BiosCall::VBlankIntrWait => effect = intr_wait(cpu, bus, wait, true),
         BiosCall::RegisterRamReset => register_ram_reset(cpu, bus),
         BiosCall::BgAffineSet => affine_set(cpu, bus, true),
         BiosCall::ObjAffineSet => affine_set(cpu, bus, false),
@@ -159,6 +193,106 @@ pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -
         BiosCall::SoftReset => {}
     }
     effect
+}
+
+/// `IntrWait` and `VBlankIntrWait`: sleep until one of the interrupts named in `r1` has been
+/// serviced.
+///
+/// # This is not `Halt`
+///
+/// It was implemented as one for a long time, and the difference is the whole point. `Halt` wakes
+/// on *any* interrupt. `IntrWait` wakes only on the sources named in its mask, and it decides that
+/// by reading [`INTRWAIT_FLAGS`] — a word that accumulates what has been serviced — rather than by
+/// asking whether the CPU woke up.
+///
+/// A game that enables `HBlank` for a raster effect and a timer for its sound driver, which is most
+/// commercial software, calls `VBlankIntrWait` once a frame and gets it back on the next `HBlank`
+/// instead: up to 160 returns per frame rather than one. Nothing errors. The game simply runs its
+/// main loop at 160 times the rate it expects, and every symptom downstream of frame pacing —
+/// animation speed, input handling, and any rendering read mid-frame — is wrong in a way that looks
+/// like a dozen unrelated bugs.
+///
+/// # Why the `SWI` is re-executed instead of looping here
+///
+/// Hardware implements this as a loop *inside* the BIOS, which an emulator can only match if it can
+/// suspend a CPU part-way through an instruction. Nothing in this codebase's core can: `step` runs
+/// one instruction to completion.
+///
+/// So the wait is spread across steps instead. An unsatisfied wait returns [`BiosEffect::Retry`],
+/// the system assembly leaves the program counter *on* the `SWI`, and the same call runs again next
+/// step — testing the flag word each time until it is satisfied. The observable behaviour is the
+/// same and no core change is needed.
+///
+/// The alternative considered was polling the condition from the system's step loop and leaving the
+/// program counter past the `SWI`. Rejected because it puts half of one BIOS call in `system.rs` and
+/// half here, and the half in `system.rs` would run on every step of every machine including the
+/// ones not waiting.
+///
+/// `wait` holds the mask of a wait already begun. It has to be real state rather than something
+/// re-derived from the registers, because `r0` — "discard what has already arrived" — must be
+/// honoured on the first pass and ignored on every later one, and after the first pass there is
+/// nothing in the machine that distinguishes the two.
+fn intr_wait<B: Bus + ?Sized>(
+    cpu: &mut Arm7Tdmi,
+    bus: &mut B,
+    wait: &mut Option<u16>,
+    vblank_only: bool,
+) -> BiosEffect {
+    // A later pass of a wait already begun: the discard is done, so only the test remains.
+    if let Some(mask) = *wait {
+        let flags = bus.read16(INTRWAIT_FLAGS);
+        let matched = flags & mask;
+        if matched == 0 {
+            return BiosEffect::Retry;
+        }
+        // Consume only what was waited for. Another source serviced meanwhile stays set for
+        // whoever asks next, which is what makes two waits on different sources compose.
+        bus.write16(INTRWAIT_FLAGS, flags & !matched);
+        *wait = None;
+        return BiosEffect::Return;
+    }
+
+    // The first pass. `SWI 0x05` is `SWI 0x04` with the mask fixed to vertical blank and the
+    // discard flag forced on, which is exactly how the BIOS implements it.
+    let (mask, discard) = if vblank_only {
+        (source::VBLANK, true)
+    } else {
+        ((cpu.reg(1) as u16) & source::ALL, cpu.reg(0) != 0)
+    };
+
+    // Hardware sets `IME` on entry, unconditionally. A game that called this with interrupts
+    // masked off would otherwise never be woken by anything — and some do, relying on the BIOS
+    // to turn them back on.
+    bus.write16(reg::IME, 1);
+
+    let flags = bus.read16(INTRWAIT_FLAGS);
+    if discard {
+        // "Wait for a *new* one": forget what has already arrived, then sleep.
+        bus.write16(INTRWAIT_FLAGS, flags & !mask);
+    } else {
+        let matched = flags & mask;
+        if matched != 0 {
+            // Already arrived, so this call does not sleep at all.
+            bus.write16(INTRWAIT_FLAGS, flags & !matched);
+            return BiosEffect::Return;
+        }
+    }
+
+    // A wait nothing can satisfy hangs on hardware, and this hangs too — deliberately, because
+    // inventing a wake-up would turn a game's bug into a wrong picture somewhere far away. It is
+    // said out loud, once, because the alternative is a machine that looks like it crashed.
+    let enabled = bus.read16(reg::IE);
+    if mask & enabled == 0 {
+        tracing::warn!(
+            mask = format_args!("{mask:#06X}"),
+            enabled = format_args!("{enabled:#06X}"),
+            "IntrWait is waiting for an interrupt that is not enabled; nothing can satisfy it, \
+             and the machine will sit here exactly as hardware would"
+        );
+    }
+
+    *wait = Some(mask);
+    BiosEffect::Retry
 }
 
 /// `RegisterRamReset`: clear the areas named by a bitmask in `r0`.
@@ -628,7 +762,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 100);
         cpu.set_reg(1, 7);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0), 14);
         assert_eq!(cpu.reg(1), 2);
         assert_eq!(cpu.reg(3), 14);
@@ -642,7 +776,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, (-7i32) as u32);
         cpu.set_reg(1, 2);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0) as i32, -3);
         assert_eq!(cpu.reg(1) as i32, -1);
         assert_eq!(cpu.reg(3), 3, "the absolute quotient");
@@ -654,7 +788,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 7);
         cpu.set_reg(1, 100);
-        dispatch(&mut cpu, &mut bus, 0x07);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x07);
         assert_eq!(cpu.reg(0), 14, "100 / 7, not 7 / 100");
     }
 
@@ -666,7 +800,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 42);
         cpu.set_reg(1, 0);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0), 42);
     }
 
@@ -676,7 +810,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         for (input, expected) in [(0u32, 0u32), (1, 1), (2, 1), (16, 4), (17, 4), (10000, 100)] {
             cpu.set_reg(0, input);
-            dispatch(&mut cpu, &mut bus, 0x08);
+            dispatch(&mut cpu, &mut bus, &mut None, 0x08);
             assert_eq!(cpu.reg(0), expected, "sqrt({input})");
         }
     }
@@ -693,7 +827,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 4); // four halfwords
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
 
         for index in 0..4u32 {
             assert_eq!(bus.read16(0x40 + index * 2), 0x1000 + index as u16);
@@ -710,7 +844,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 2 | (1 << 26));
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
         assert_eq!(bus.read32(0x40), 0xDEAD_BEEF);
         assert_eq!(bus.read32(0x44), 0xCAFE_F00D);
     }
@@ -723,7 +857,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 3 | (1 << 24) | (1 << 26));
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
         for index in 0..3u32 {
             assert_eq!(bus.read32(0x40 + index * 4), 0x1234_5678);
         }
@@ -737,18 +871,36 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 1); // the word bit is clear, and it makes no difference
-        dispatch(&mut cpu, &mut bus, 0x0C);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0C);
         assert_eq!(bus.read32(0x40), 0xAABB_CCDD);
     }
 
     #[test]
-    fn the_waiting_calls_ask_the_caller_to_halt() {
+    fn halt_and_stop_finish_the_call_but_the_waits_ask_to_run_again() {
+        // The distinction the shared arm used to hide. `Halt` is done when it returns and the
+        // program counter moves on; an `IntrWait` is not finished until its flag word says so, so
+        // it asks to be re-run rather than stepped over.
         let mut cpu = cpu();
         let mut bus = FlatBus::new(16);
-        for call in [0x02, 0x03, 0x04, 0x05] {
-            assert!(dispatch(&mut cpu, &mut bus, call).halt, "SWI {call:#04X}");
+        for call in [0x02, 0x03] {
+            assert_eq!(
+                dispatch(&mut cpu, &mut bus, &mut None, call),
+                BiosEffect::Halt,
+                "SWI {call:#04X}"
+            );
         }
-        assert!(!dispatch(&mut cpu, &mut bus, 0x06).halt, "but Div does not");
+        for call in [0x04, 0x05] {
+            assert_eq!(
+                dispatch(&mut cpu, &mut bus, &mut None, call),
+                BiosEffect::Retry,
+                "SWI {call:#04X}"
+            );
+        }
+        assert_eq!(
+            dispatch(&mut cpu, &mut bus, &mut None, 0x06),
+            BiosEffect::Return,
+            "but Div returns straight away"
+        );
     }
 
     #[test]
@@ -759,7 +911,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 0x1234);
         cpu.set_reg(1, 0x5678);
-        dispatch(&mut cpu, &mut bus, 0x99);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x99);
         assert_eq!(cpu.reg(0), 0x1234);
         assert_eq!(cpu.reg(1), 0x5678);
     }
@@ -788,7 +940,7 @@ mod decompression_tests {
         let mut cpu = Arm7Tdmi::default();
         cpu.set_reg(0, source);
         cpu.set_reg(1, destination);
-        dispatch(&mut cpu, bus, swi);
+        dispatch(&mut cpu, bus, &mut None, swi);
     }
 
     fn read_out(bus: &mut FlatBus, at: u32, len: usize) -> Vec<u8> {
@@ -967,7 +1119,7 @@ mod decompression_tests {
         let mut bus = FlatBus::new(0x100);
         let mut cpu = Arm7Tdmi::default();
         cpu.set_reg(0, 0x1234);
-        dispatch(&mut cpu, &mut bus, 0x20);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x20);
         assert_eq!(cpu.reg(0), 0x1234, "registers are left alone");
     }
 

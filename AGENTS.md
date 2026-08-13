@@ -281,6 +281,18 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   interrupts. Jumping straight to the handler leaves its `bx lr` returning into the interrupted
   code while still in IRQ mode with interrupts masked: the machine takes exactly one interrupt,
   then runs on and wanders into unmapped memory.
+- **`IntrWait` is not `Halt`, and implementing it as one runs a game's main loop ~200 times a
+  frame.** `Halt` (SWI 0x02) wakes on any interrupt. `IntrWait` (0x04) and `VBlankIntrWait` (0x05)
+  wake only on the sources named in `r1`, which they decide by reading the BIOS's own flag word at
+  `0x0300_7FF8` — *not* `IF`, which the game's handler has already cleared by the time the wait is
+  re-tested. Collapsing all four calls into one `halt = true` meant a game that also enables HBlank
+  for raster effects, or a timer for its sound driver, got `VBlankIntrWait` back on the next HBlank:
+  measured at **618 returns across three frames where hardware gives 3**. Nothing errors and no test
+  fails; the game simply runs at the wrong rate, and every symptom downstream of frame pacing —
+  animation speed, input handling, anything read mid-frame — presents as a separate bug. **Suspect
+  this before diagnosing pixels.** The wait is spread across steps by leaving the program counter
+  *on* the `SWI` and re-executing it, because no CPU core here can be suspended mid-instruction;
+  `bios::intr_wait` argues that choice and the rejected alternative.
 - **A cycle-accounting bug fails no test and looks exactly like a hang.** The GBA charged every
   memory access three to six times over — an ARM instruction in IWRAM cost 13 cycles against
   hardware's 1, and 49 from ROM against 6. Every test passed and the emulator held a measured 100%

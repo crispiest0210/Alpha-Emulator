@@ -49,7 +49,10 @@ use crate::waitstates::{Access, WaitControl};
 use crate::{background::Backgrounds, timers::Timers};
 
 /// Bumped on any change to what this system serializes.
-const STATE_VERSION: u32 = 1;
+///
+/// 2 added the in-progress `IntrWait` mask, which a state taken mid-wait needs to resume without
+/// discarding the flags it was waiting on a second time.
+const STATE_VERSION: u32 = 2;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;
@@ -571,6 +574,13 @@ pub struct GbaSystem {
     cpu: Arm7Tdmi,
     bus: GbaSystemBus,
     save_ram_dirty: bool,
+    /// The mask of a BIOS `IntrWait` that has begun and not yet been satisfied.
+    ///
+    /// Machine state, not a cache: it is what tells a re-executed `SWI` that its discard has
+    /// already happened. A save state taken while a game sits in `VBlankIntrWait` — which is where
+    /// a game spends most of its time, so most quicksaves land here — restores into the wait
+    /// rather than into a call that would discard the flags a second time.
+    intr_wait: Option<u16>,
 }
 
 impl GbaSystem {
@@ -581,6 +591,7 @@ impl GbaSystem {
             cpu: Arm7Tdmi::new(boot_state(has_bios)),
             bus: GbaSystemBus::new(cartridge, bios),
             save_ram_dirty: false,
+            intr_wait: None,
         };
         system.bus.memory.set_in_bios(has_bios);
         system.apply_startup_state();
@@ -632,6 +643,13 @@ impl GbaSystem {
         if self.bus.memory.has_bios() {
             return false;
         }
+        // A halted core runs nothing, and this runs *before* the core, so without this a `SWI`
+        // sitting immediately after a `Halt` would be answered while the machine was supposed to be
+        // asleep. The exception is a wait in progress: re-running its `SWI` is precisely how the
+        // wait is spread across steps, and it is the only call allowed to execute while halted.
+        if self.cpu.is_halted() && self.intr_wait.is_none() {
+            return false;
+        }
         let pc = self.cpu.regs.pc();
 
         // Both instruction sets, because a game may be in either and most of them are in Thumb.
@@ -665,13 +683,25 @@ impl GbaSystem {
             (((opcode >> 16) & 0xFF) as u8, 4)
         };
 
-        let effect = bios::dispatch(&mut self.cpu, &mut self.bus, comment);
-        if effect.halt {
-            self.cpu.halt();
+        match bios::dispatch(&mut self.cpu, &mut self.bus, &mut self.intr_wait, comment) {
+            // Step over the instruction the BIOS would have returned from — two bytes in Thumb,
+            // four in ARM.
+            //
+            // Waking the core here is what finishes an `IntrWait`: the only way to be executing a
+            // `SWI` while halted is a `Retry` below whose wait has just been satisfied.
+            bios::BiosEffect::Return => {
+                self.cpu.set_halted(false);
+                self.cpu.regs.set_pc(pc.wrapping_add(width));
+            }
+            bios::BiosEffect::Halt => {
+                self.cpu.halt();
+                self.cpu.regs.set_pc(pc.wrapping_add(width));
+            }
+            // Leave the program counter *on* the `SWI` so it runs again next step. That is how a
+            // wait hardware spends inside a BIOS loop is spread across steps here — see
+            // `bios::intr_wait`, which argues the choice and the alternative.
+            bios::BiosEffect::Retry => self.cpu.halt(),
         }
-        // Step over the instruction the BIOS would have returned from — two bytes in Thumb, four
-        // in ARM.
-        self.cpu.regs.set_pc(pc.wrapping_add(width));
         true
     }
 
@@ -704,6 +734,19 @@ impl GbaSystem {
         if handler == 0 {
             return;
         }
+
+        // Record what is being serviced where `IntrWait` will look for it. `IF` cannot serve that
+        // purpose: the game's handler clears it as it works, long before the wait is re-tested.
+        //
+        // On hardware this word is written by the *game's* handler — the BIOS only supplies the
+        // convention, and every mainstream library's `IntrMain` maintains it. It is written here as
+        // well because the two are idempotent (both set the same bits) and a game whose handler
+        // does not keep the word would otherwise wait forever. Erring towards a wait that completes
+        // costs a game one early return; erring the other way is a hang.
+        let serviced = self.bus.irq.active();
+        let already = self.bus.read16(bios::INTRWAIT_FLAGS);
+        self.bus
+            .write16(bios::INTRWAIT_FLAGS, already | serviced);
 
         // Enter the exception properly — banked registers, mode, and mask all change.
         let lr = self.cpu.regs.pc().wrapping_add(4);
@@ -955,11 +998,18 @@ impl Savable for GbaSystem {
     fn save(&self, w: &mut StateWriter) {
         self.cpu.save(w);
         self.bus.save(w);
+        // Written as a present flag and a mask rather than a sentinel mask, because zero is a
+        // legal mask — a game can ask to wait for nothing, and hardware then never returns.
+        w.write_bool(self.intr_wait.is_some());
+        w.write_u16(self.intr_wait.unwrap_or(0));
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.cpu.load(r)?;
         self.bus.load(r)?;
+        let waiting = r.read_bool()?;
+        let mask = r.read_u16()?;
+        self.intr_wait = waiting.then_some(mask);
         Ok(())
     }
 }
