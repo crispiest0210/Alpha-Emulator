@@ -258,6 +258,30 @@ fn a_save_state_round_trips_and_resumes_identically() {
 }
 
 #[test]
+fn a_layer_override_never_changes_the_save_state_bytes() {
+    // `LayerOverrides` is a debugger lens over the picture, not part of the machine — see
+    // `core_common::LayerOverrides` and `GbaSystemBus::layer_overrides`'s docs for the
+    // contract. This is the direct check on it: toggling one must not perturb a single byte of
+    // what gets written to disk, or a save file made with the debugger open would stop matching
+    // one made without it.
+    let mut plain = system();
+    plain.step_frame(InputState::default());
+    let plain_state = plain.save_state();
+
+    let mut with_overrides = system();
+    with_overrides.step_frame(InputState::default());
+    with_overrides.bus.layer_overrides = core_common::LayerOverrides {
+        bg_hidden: [true, false, true, false],
+        obj_hidden: true,
+        win_hidden: [true, true],
+        solo: Some(core_common::DebugLayer::Bg2),
+    };
+    let overridden_state = with_overrides.save_state();
+
+    assert_eq!(plain_state, overridden_state);
+}
+
+#[test]
 fn two_identical_runs_produce_identical_output() {
     // Determinism is what save states, rewind, and replay all rest on.
     let mut first = system();

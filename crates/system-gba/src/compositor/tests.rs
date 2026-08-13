@@ -14,6 +14,7 @@ struct Scene {
     vram: Vec<u8>,
     palette: Vec<u8>,
     oam: Vec<u8>,
+    overrides: core_common::LayerOverrides,
 }
 
 impl Scene {
@@ -36,6 +37,7 @@ impl Scene {
                 }
                 oam
             },
+            overrides: core_common::LayerOverrides::default(),
         }
     }
 
@@ -71,6 +73,7 @@ impl Scene {
             vram: &self.vram,
             palette: &self.palette,
             oam: &self.oam,
+            overrides: self.overrides,
         }
     }
 
@@ -781,4 +784,124 @@ fn a_background_larger_than_one_screen_block_reaches_its_other_blocks() {
         0xFF,
         "scrolled into the second screen block, its tile should be what draws"
     );
+}
+
+// -- Debugger layer isolation ------------------------------------------------
+
+#[test]
+fn hiding_a_background_falls_through_to_whatever_is_behind_it() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.simple_layer(0, 0, 8);
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "drawn normally");
+
+    scene.overrides.bg_hidden[0] = true;
+    assert_eq!(
+        scene.render(0).pixel(0, 0).b,
+        0xFF,
+        "hidden BG0 must fall through to the backdrop"
+    );
+}
+
+#[test]
+fn hiding_obj_removes_every_sprite_but_leaves_backgrounds_drawn() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(257, GREEN);
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the sprite wins normally"
+    );
+
+    scene.overrides.obj_hidden = true;
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "with OBJ hidden the background underneath shows instead"
+    );
+}
+
+#[test]
+fn soloing_a_background_hides_every_other_layer_including_sprites() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(2, GREEN);
+    scene.colour(257, GREEN);
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+
+    // A second layer, in a spare screen block, so there is something else to prove is hidden.
+    for row in 0..8 {
+        scene.vram[0x40 + row * 4..0x40 + row * 4 + 4].copy_from_slice(&[0x22; 4]);
+    }
+    scene.vram[crate::background::SCREEN_BLOCK * 9..crate::background::SCREEN_BLOCK * 9 + 2]
+        .copy_from_slice(&2u16.to_le_bytes());
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 2, 9 << 8); // BG1: screen base 9
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 9));
+
+    scene.overrides.solo = Some(core_common::DebugLayer::Bg0);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "the soloed background still draws"
+    );
+}
+
+#[test]
+fn hiding_a_window_lets_everything_draw_as_though_it_did_not_exist() {
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    // `simple_layer` only paints map cell (0,0), i.e. screen pixels x=0..8 — so the window has
+    // to cover exactly that region, or there would be nothing there to reveal either way.
+    scene.simple_layer(0, 0, 8);
+
+    // Window 0 covers the painted tile and admits nothing, so it reads as backdrop despite BG0
+    // being enabled and drawn everywhere `resolve_into` alone would show it.
+    scene.effects.write16(crate::effects::reg::WIN0H, 8); // left 0, right 8
+    scene.effects.write16(crate::effects::reg::WIN0V, 160); // top 0, bottom 160
+    scene.effects.write16(crate::effects::reg::WININ, 0); // nothing shows inside window 0
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13)); // enable window 0
+    assert_eq!(
+        scene.render(0).pixel(0, 0).b,
+        0xFF,
+        "inside window 0, which admits nothing"
+    );
+
+    scene.overrides.win_hidden[0] = true;
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "with window 0 hidden the background draws there too"
+    );
+}
+
+#[test]
+fn a_layer_override_never_changes_the_picture_when_nothing_is_toggled() {
+    // The default overrides must be a true no-op: every existing test above this one in the
+    // file rendered with `LayerOverrides::default()` and none of them expected to account for
+    // it, which only holds if the default hides and solos nothing.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(257, GREEN);
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+
+    let with_default_overrides = scene.render(0);
+    scene.overrides = core_common::LayerOverrides::default();
+    let with_explicit_default = scene.render(0);
+    assert_eq!(with_default_overrides, with_explicit_default);
 }

@@ -660,6 +660,17 @@ impl Emulator {
                 self.last_debug_request = Some(request);
                 self.serve_debug_snapshot(request);
             }
+            SessionCommand::RequestPpuDebug(request) => {
+                self.serve_ppu_debug(request);
+            }
+            SessionCommand::SetLayerOverrides(overrides) => {
+                if let Some(target) = self.active.as_mut().and_then(|a| a.system.ppu_debug()) {
+                    target.set_layer_overrides(overrides);
+                }
+                // Silently a no-op otherwise — see `SessionCommand::SetLayerOverrides`'s docs
+                // for why this does not answer `DebugUnavailable` the way the CPU debugger's
+                // controls do.
+            }
             SessionCommand::AddBreakpoint(addr) => {
                 self.breakpoints.add_execution(addr);
                 self.pacer.reset();
@@ -755,6 +766,29 @@ impl Emulator {
             }
         };
         self.emit(SessionEvent::DebugSnapshot(Box::new(snapshot)));
+    }
+
+    /// Capture a PPU snapshot and send it. See [`serve_debug_snapshot`](Self::serve_debug_snapshot)
+    /// for why this runs on the emulation thread and answers `DebugUnavailable` rather than
+    /// panicking on a system with nothing to show.
+    fn serve_ppu_debug(&mut self, request: core_common::PpuDebugRequest) {
+        let snapshot = match self
+            .active
+            .as_mut()
+            .and_then(|active| active.system.ppu_debug())
+        {
+            Some(target) => target.ppu_snapshot(&request),
+            None => {
+                let reason = if self.active.is_none() {
+                    "no cartridge is loaded"
+                } else {
+                    "this system offers no PPU introspection"
+                };
+                self.emit(SessionEvent::PpuDebugUnavailable(reason.into()));
+                return;
+            }
+        };
+        self.emit(SessionEvent::PpuDebugSnapshot(Box::new(snapshot)));
     }
 
     fn set_paused(&mut self, paused: bool) {

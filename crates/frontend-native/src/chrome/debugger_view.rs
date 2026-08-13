@@ -78,6 +78,7 @@ pub fn window(
             });
             ui.separator();
             breakpoints(chrome, ui, state, actions);
+            super::ppu_debugger_view::section(chrome, ui, state, actions);
         });
     chrome.show_debugger = open;
 

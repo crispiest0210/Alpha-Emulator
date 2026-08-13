@@ -238,9 +238,385 @@ pub trait DebugTarget {
     fn address_digits(&self) -> u8;
 }
 
+// ---------------------------------------------------------------------------
+// PPU introspection: palettes, tiles, sprites, and the registers that place them
+// ---------------------------------------------------------------------------
+//
+// A second, optional debugger extension, the same shape as `DebugTarget` and for the same
+// reason `System::debug` gives one: "why does the picture look wrong" is a different question
+// from "why did the CPU do that", and answering it needs the PPU's own data — palettes, tile
+// data, OAM, and the registers that place them — none of which a CPU-only `DebugTarget` has
+// any reason to carry.
+//
+// # Why the decoded output lives here, not the decoding
+//
+// [`PpuSnapshot`] is built entirely from this crate's own types (`Rgba8`, plain integers), so
+// it can live in `core-common` without this crate depending on `ppu-tile2d` or any system
+// crate — that dependency would run backwards, since those crates already depend on this one.
+// The *decoding* — turning raw tile bytes into an `Rgba8` bitmap using `ppu-tile2d`'s pixel
+// math — happens on the implementing system's side of the trait, exactly as
+// [`DebugTarget::disassemble`] decodes with a CPU crate's disassembler and hands back this
+// crate's plain [`DisasmInstruction`].
+
+use crate::Rgba8;
+
+/// A background or object layer that a debugger can isolate.
+///
+/// Windows are deliberately not members of this enum: a window does not draw a picture of its
+/// own, so "solo this window" does not mean anything the way "solo this background" does. A
+/// window can only be force-hidden — see [`LayerOverrides::win_hidden`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DebugLayer {
+    Bg0,
+    Bg1,
+    Bg2,
+    Bg3,
+    Obj,
+}
+
+/// A debugging override on what the PPU draws, layered on top of the machine's real registers.
+///
+/// # Why this must never touch save states or emulation state
+///
+/// This is a lens over the picture, not a change to the machine underneath it. A system that
+/// implements [`PpuDebugTarget`] must apply it only at the last moment — inside the per-pixel
+/// compositing decision — and must exclude it from its `Savable` implementation. Two
+/// consequences follow, and both are load-bearing: a game's own logic can never observe that a
+/// layer is hidden (nothing it can read is affected), and a save state written with an override
+/// active restores to the same bytes as one written without it. `testing/golden/gba.toml`'s
+/// hashes stay meaningful only because of the first property, and a save file stays portable
+/// only because of the second.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayerOverrides {
+    /// Force each background layer off, independent of `DISPCNT`'s enable bits.
+    pub bg_hidden: [bool; 4],
+    /// Force every sprite off, independent of `DISPCNT`'s object enable bit.
+    pub obj_hidden: bool,
+    /// Force window 0 or window 1's masking off, so every layer draws as though that window did
+    /// not exist. The object window is not included: it is a property of individual sprites
+    /// (`GraphicsMode::ObjectWindow`) rather than a switch this override layer can meaningfully
+    /// flip on its own.
+    pub win_hidden: [bool; 2],
+    /// When set, only this layer (and the backdrop) draws — every other background and the
+    /// sprite layer are hidden regardless of `bg_hidden`/`obj_hidden`. Windows are unaffected:
+    /// soloing a background does not imply anything about which regions a window still masks.
+    pub solo: Option<DebugLayer>,
+}
+
+impl LayerOverrides {
+    /// Whether background layer `index` should draw, given `DISPCNT`'s own enable bit for it.
+    #[inline]
+    pub fn bg_visible(&self, index: usize) -> bool {
+        if self.bg_hidden[index] {
+            return false;
+        }
+        match self.solo {
+            None => true,
+            Some(DebugLayer::Bg0) => index == 0,
+            Some(DebugLayer::Bg1) => index == 1,
+            Some(DebugLayer::Bg2) => index == 2,
+            Some(DebugLayer::Bg3) => index == 3,
+            Some(DebugLayer::Obj) => false,
+        }
+    }
+
+    /// Whether sprites should draw at all.
+    #[inline]
+    pub fn obj_visible(&self) -> bool {
+        if self.obj_hidden {
+            return false;
+        }
+        matches!(self.solo, None | Some(DebugLayer::Obj))
+    }
+
+    /// Whether window `index` (0 or 1) still masks other layers.
+    #[inline]
+    pub fn win_visible(&self, index: usize) -> bool {
+        !self.win_hidden[index]
+    }
+}
+
+/// A tile's bit depth, for the tile/VRAM viewer.
+///
+/// Mirrors the two GBA-relevant variants of `ppu_tile2d::BitDepth` (its third, `Two`, is the
+/// Game Boy's two-bitplane format and never applies here) — kept as a separate type rather than
+/// reused directly because `core-common` cannot depend on `ppu-tile2d` without the dependency
+/// running backwards; see the module docs above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TileBitDepth {
+    /// 16 colours, 32 bytes per 8x8 tile.
+    Four,
+    /// 256 colours, 64 bytes per 8x8 tile.
+    Eight,
+}
+
+/// What the tile/VRAM viewer is asking to see.
+///
+/// Bounded the same way [`DebugTarget`]'s memory viewer is: decoding every tile in VRAM to
+/// `Rgba8` on every poll would be tens of thousands of pixels the panel is not displaying,
+/// several times a second, whether or not the tile view is scrolled there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PpuDebugRequest {
+    /// Byte offset into VRAM's character data where the requested tiles start.
+    pub tile_char_base: usize,
+    /// How many consecutive tiles to decode, from `tile_char_base`.
+    pub tile_count: usize,
+    pub tile_depth: TileBitDepth,
+    /// Which of the sixteen 16-colour palette banks to decode a 4bpp tile against. Ignored for
+    /// 8bpp tiles, which are not banked.
+    pub tile_palette_bank: u8,
+}
+
+impl Default for PpuDebugRequest {
+    fn default() -> Self {
+        Self {
+            tile_char_base: 0,
+            // 512 tiles is one whole 16 KiB character block at 4bpp — enough to fill a viewer
+            // without decoding VRAM that is not being looked at.
+            tile_count: 512,
+            tile_depth: TileBitDepth::Four,
+            tile_palette_bank: 0,
+        }
+    }
+}
+
+impl PpuDebugRequest {
+    /// Clamp to a size a debugger poll can afford to decode several times a second.
+    pub fn clamped(mut self) -> Self {
+        self.tile_count = self.tile_count.min(1024);
+        self
+    }
+}
+
+/// One decoded palette entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteSwatch {
+    pub color: Rgba8,
+    /// The raw 15-bit BGR value, for a hover readout — the format the hardware and every GBA
+    /// reference document actually describes, which `color` alone cannot reconstruct exactly
+    /// (alpha is synthesised, not stored).
+    pub raw: u16,
+}
+
+/// One decoded 8x8 tile, row-major from the top-left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileBitmap {
+    pub pixels: [Rgba8; 64],
+}
+
+/// One row of the OAM viewer's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OamRow {
+    pub index: usize,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub priority: u8,
+    pub palette: u8,
+    pub tile: u16,
+    /// Which of the affine matrices this entry uses, when its mode is affine.
+    pub affine_index: Option<usize>,
+    pub graphics_mode: &'static str,
+    pub mode: &'static str,
+    /// Whether this sprite covers the scanline the PPU is about to draw (or just drew, for a
+    /// paused machine) — the fact that answers "is this even one of the sprites in play right
+    /// now" without the reader cross-referencing `y`/`height` against `VCOUNT` by hand.
+    pub on_current_scanline: bool,
+}
+
+/// One background layer's registers, decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BgRegisters {
+    pub control: u16,
+    pub enabled: bool,
+    pub priority: u8,
+    pub char_base: u32,
+    pub screen_base: u32,
+    /// 4 or 8.
+    pub bpp: u8,
+    pub size_tiles: (u32, u32),
+    /// Read from the system's own stored scroll state, not from the bus — `BGxHOFS`/`BGxVOFS`
+    /// are write-only, and a bus read of a write-only register answers zero. A debugger that
+    /// read them the ordinary way would show every layer parked at (0,0) no matter how far a
+    /// game had actually scrolled it.
+    pub scroll_x: u16,
+    pub scroll_y: u16,
+    pub mosaic: bool,
+}
+
+/// One window's rectangle and which layers it lets through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowRegisters {
+    pub enabled: bool,
+    pub left: u8,
+    pub right: u8,
+    pub top: u8,
+    pub bottom: u8,
+    /// Low six bits of this window's `WININ`/`WINOUT` half: which of BG0-3, OBJ, and the colour
+    /// effect are let through inside it.
+    pub layers_in: u8,
+}
+
+/// Every PPU register a debugger view names, decoded rather than left as hex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PpuRegisters {
+    pub dispcnt: u16,
+    pub mode: u16,
+    pub forced_blank: bool,
+    pub obj_1d_mapping: bool,
+    pub dispstat: u16,
+    pub vcount: u16,
+    pub backgrounds: [BgRegisters; 4],
+    /// Window 0 and window 1.
+    pub windows: [WindowRegisters; 2],
+    /// The "outside all windows" layer bits — always in effect wherever no window claims a
+    /// pixel, so it has no rectangle of its own to go with `windows` above.
+    pub winout: u8,
+    /// The object window's layer bits, from `WINOUT`'s upper half.
+    pub obj_window_layers: u8,
+    pub bldcnt: u16,
+    pub bldalpha: u16,
+    /// Also write-only on hardware; read from the system's stored value for the same reason
+    /// `scroll_x`/`scroll_y` above are.
+    pub bldy: u16,
+}
+
+/// One PPU debugger poll, all five views' data at once.
+///
+/// Bundled into one snapshot rather than five separate requests because they are cheap next to
+/// the tile decode that dominates the cost, and because a debugger reading them a moment apart
+/// could show a palette and a tile view that each describe a different instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PpuSnapshot {
+    /// All 256 background palette entries, in index order.
+    pub bg_palette: Vec<PaletteSwatch>,
+    /// All 256 sprite palette entries, in index order.
+    pub sprite_palette: Vec<PaletteSwatch>,
+    /// The tiles named by the request that produced this snapshot.
+    pub tiles: Vec<TileBitmap>,
+    /// All 128 OAM entries, in table order.
+    pub oam: Vec<OamRow>,
+    pub registers: PpuRegisters,
+    /// The overrides in effect when this snapshot was taken, echoed back so the panel's toggle
+    /// state and the machine's actual state cannot silently drift apart.
+    pub overrides: LayerOverrides,
+}
+
+/// PPU introspection, when a system offers it.
+///
+/// `&self` throughout except the override setter: every one of these views is read-only, and
+/// keeping them so is what makes capturing a snapshot safe to do from a live, running machine —
+/// the same reasoning [`DebugTarget::peek8`] rests on.
+pub trait PpuDebugTarget {
+    fn ppu_snapshot(&self, request: &PpuDebugRequest) -> PpuSnapshot;
+
+    /// Replace the layer overrides in effect. See [`LayerOverrides`] for what this must and
+    /// must not be allowed to affect.
+    fn set_layer_overrides(&mut self, overrides: LayerOverrides);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_hidden_is_the_default_and_hides_nothing() {
+        let overrides = LayerOverrides::default();
+        for i in 0..4 {
+            assert!(overrides.bg_visible(i));
+        }
+        assert!(overrides.obj_visible());
+        assert!(overrides.win_visible(0));
+        assert!(overrides.win_visible(1));
+    }
+
+    #[test]
+    fn hiding_one_background_leaves_the_others_and_obj_alone() {
+        let overrides = LayerOverrides {
+            bg_hidden: [false, true, false, false],
+            ..Default::default()
+        };
+        assert!(overrides.bg_visible(0));
+        assert!(!overrides.bg_visible(1));
+        assert!(overrides.bg_visible(2));
+        assert!(overrides.bg_visible(3));
+        assert!(overrides.obj_visible());
+    }
+
+    #[test]
+    fn hiding_obj_leaves_every_background_alone() {
+        let overrides = LayerOverrides {
+            obj_hidden: true,
+            ..Default::default()
+        };
+        assert!(!overrides.obj_visible());
+        for i in 0..4 {
+            assert!(overrides.bg_visible(i));
+        }
+    }
+
+    #[test]
+    fn soloing_a_background_hides_every_other_background_and_obj() {
+        let overrides = LayerOverrides {
+            solo: Some(DebugLayer::Bg2),
+            ..Default::default()
+        };
+        assert!(!overrides.bg_visible(0));
+        assert!(!overrides.bg_visible(1));
+        assert!(overrides.bg_visible(2), "the soloed layer still draws");
+        assert!(!overrides.bg_visible(3));
+        assert!(!overrides.obj_visible());
+    }
+
+    #[test]
+    fn soloing_obj_hides_every_background() {
+        let overrides = LayerOverrides {
+            solo: Some(DebugLayer::Obj),
+            ..Default::default()
+        };
+        assert!(overrides.obj_visible());
+        for i in 0..4 {
+            assert!(
+                !overrides.bg_visible(i),
+                "BG{i} must not draw while OBJ is soloed"
+            );
+        }
+    }
+
+    #[test]
+    fn hide_wins_over_solo_for_the_same_layer() {
+        // Asking for a layer both soloed and hidden is a contradictory request, and hidden is
+        // the more specific, more recently-set-feeling instruction — it wins rather than being
+        // silently overridden by solo.
+        let overrides = LayerOverrides {
+            bg_hidden: [false, false, true, false],
+            solo: Some(DebugLayer::Bg2),
+            ..Default::default()
+        };
+        assert!(!overrides.bg_visible(2));
+    }
+
+    #[test]
+    fn windows_are_independent_of_background_and_obj_overrides() {
+        let overrides = LayerOverrides {
+            win_hidden: [true, false],
+            solo: Some(DebugLayer::Bg0),
+            ..Default::default()
+        };
+        assert!(!overrides.win_visible(0));
+        assert!(overrides.win_visible(1));
+    }
+
+    #[test]
+    fn a_ppu_debug_request_clamps_an_absurd_tile_count() {
+        let request = PpuDebugRequest {
+            tile_count: usize::MAX,
+            ..PpuDebugRequest::default()
+        }
+        .clamped();
+        assert_eq!(request.tile_count, 1024);
+    }
 
     #[test]
     fn a_region_covers_its_inclusive_end() {

@@ -94,5 +94,13 @@ pub use debugger::{
     Snapshot as DebugSnapshot, Watchpoint,
 };
 
+/// The PPU debugger's data types, curated here for the same reason the CPU debugger's are:
+/// `chrome` reaches this crate's session API, not `core-common` directly, so the surface a
+/// panel can see stays exactly what `SessionEvent`/`SessionCommand` actually carry.
+pub use core_common::{
+    BgRegisters, DebugLayer, LayerOverrides, OamRow, PaletteSwatch, PpuDebugRequest, PpuRegisters,
+    PpuSnapshot, TileBitDepth, TileBitmap, WindowRegisters,
+};
+
 #[cfg(test)]
 mod tests;

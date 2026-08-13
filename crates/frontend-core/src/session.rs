@@ -160,6 +160,21 @@ pub enum SessionCommand {
     SetDebugAttached(bool),
     /// Ask for a fresh [`Snapshot`]. Answered with [`SessionEvent::DebugSnapshot`].
     RequestDebugSnapshot(debugger::Request),
+    /// Ask for a fresh PPU snapshot — palettes, tiles, OAM, and decoded registers. Answered with
+    /// [`SessionEvent::PpuDebugSnapshot`], or [`SessionEvent::DebugUnavailable`] on a system
+    /// that offers no [`core_common::PpuDebugTarget`].
+    ///
+    /// A second request/response pair rather than folding this into
+    /// [`RequestDebugSnapshot`](Self::RequestDebugSnapshot)'s `Snapshot`, because most of its
+    /// cost — decoding the tiles a scrolled-to VRAM view names — is not something every CPU
+    /// debugger poll should pay for, on systems that have no such view open or no such view at
+    /// all.
+    RequestPpuDebug(core_common::PpuDebugRequest),
+    /// Replace the debugger's layer isolation toggles. Silently has no effect on a system that
+    /// offers no [`core_common::PpuDebugTarget`] — there is nothing to isolate there yet, and
+    /// failing loudly over a debug-only control the player never asked for would be the wrong
+    /// kind of strict.
+    SetLayerOverrides(core_common::LayerOverrides),
     AddBreakpoint(u32),
     RemoveBreakpoint(u32),
     ClearBreakpoints,
@@ -203,6 +218,11 @@ pub enum SessionEvent {
     /// in this enum is a handful of bytes — an unboxed variant would make the whole enum that large
     /// for the sixty-times-a-second ones too.
     DebugSnapshot(Box<Snapshot>),
+    /// A PPU snapshot, in answer to [`SessionCommand::RequestPpuDebug`].
+    ///
+    /// Boxed for the same reason `DebugSnapshot` is — 512 palette swatches and up to 1024 decoded
+    /// tiles are considerably more than a handful of bytes.
+    PpuDebugSnapshot(Box<core_common::PpuSnapshot>),
     /// Execution stopped at a breakpoint. The session is paused when this arrives.
     BreakpointHit {
         addr: u32,
@@ -218,6 +238,15 @@ pub enum SessionEvent {
     },
     /// The debugger asked for something this machine cannot offer.
     DebugUnavailable(String),
+    /// [`SessionCommand::RequestPpuDebug`] asked a system with no
+    /// [`core_common::PpuDebugTarget`].
+    ///
+    /// Not folded into [`DebugUnavailable`](Self::DebugUnavailable): that event already answers
+    /// several unrelated requests (a failed `SetProgramCounter`, an unsupported watchpoint), and
+    /// its receiver clears the *CPU* debugger's snapshot when it arrives. A PPU-specific reason
+    /// arriving on a machine that only lacks a `PpuDebugTarget` must not blank a CPU debugger
+    /// view that is working fine.
+    PpuDebugUnavailable(String),
 }
 
 /// How to start a session.

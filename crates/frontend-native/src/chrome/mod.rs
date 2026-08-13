@@ -19,12 +19,14 @@ mod debugger_view;
 mod hud;
 mod keybinds;
 mod library_view;
+mod ppu_debugger_view;
 mod settings;
 mod states;
 pub mod theme;
 
 pub use debugger_view::request as debug_request;
 pub use keybinds::resolve_capture;
+pub use ppu_debugger_view::request as ppu_debug_request;
 
 use frontend_core::{
     Action, ChromeAction, KeybindMap, LoadedRom, PhysicalKey, RewindConfig, ScalingMode,
@@ -100,6 +102,13 @@ pub struct ChromeState<'a> {
     pub debug: Option<&'a frontend_core::DebugSnapshot>,
     /// Why introspection is not available, when it is not.
     pub debug_unavailable: Option<&'a str>,
+    /// The most recent PPU debugger snapshot — palettes, tiles, OAM, decoded registers — if the
+    /// panel has one yet and the running system offers one at all.
+    pub ppu_debug: Option<&'a frontend_core::PpuSnapshot>,
+    /// Why PPU introspection is not available, when it is not — distinct from `debug_unavailable`
+    /// because a system can offer one and not the other, and the two panels must not blank each
+    /// other over an unrelated system's limits. See `SessionEvent::PpuDebugUnavailable`.
+    pub ppu_debug_unavailable: Option<&'a str>,
     pub fullscreen: bool,
     /// Recent notices and errors, newest last.
     pub messages: &'a [Message],
@@ -148,6 +157,17 @@ pub struct Chrome {
     pub debugger_add_breakpoint: String,
     pub debugger_add_watch: String,
 
+    /// PPU debugger section state — see `chrome::ppu_debugger_view`. Presentational, same as the
+    /// CPU debugger fields above; the overrides mirror what was last *sent*, so the layer
+    /// toggles can be drawn without waiting on a round trip through the session.
+    pub debugger_ppu_open: bool,
+    pub debugger_layer_overrides: frontend_core::LayerOverrides,
+    pub debugger_tile_char_base: usize,
+    pub debugger_tile_depth: frontend_core::TileBitDepth,
+    pub debugger_tile_palette_bank: u8,
+    /// Show every OAM row rather than only the ones covering the current scanline.
+    pub debugger_oam_show_all: bool,
+
     /// The keybind editor is waiting for a key press for this action.
     pub capturing: Option<Action>,
 }
@@ -180,6 +200,12 @@ impl Default for Chrome {
             debugger_memory_goto: String::new(),
             debugger_add_breakpoint: String::new(),
             debugger_add_watch: String::new(),
+            debugger_ppu_open: false,
+            debugger_layer_overrides: frontend_core::LayerOverrides::default(),
+            debugger_tile_char_base: 0,
+            debugger_tile_depth: frontend_core::TileBitDepth::Four,
+            debugger_tile_palette_bank: 0,
+            debugger_oam_show_all: false,
             capturing: None,
         }
     }

@@ -820,6 +820,102 @@ fn gba_golden_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// The debugger's layer isolation vs. the golden manifest
+// ---------------------------------------------------------------------------
+
+/// Layer isolation must be a pure rendering overlay: toggling one off changes what is on
+/// screen, and toggling it back on must restore the *exact* picture that was there before —
+/// not a similar one. `testing/golden/gba.toml`'s own validated hash is the fixture this proves
+/// it against, so this is checking the real thing a debugger session would show, not a hash
+/// invented for the test.
+#[test]
+fn toggling_a_layer_off_and_back_on_leaves_the_golden_hash_unchanged() {
+    use core_common::{LayerOverrides, System};
+
+    let Some(bytes) =
+        std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
+    else {
+        eprintln!("gba_suite_arm.gba not present; run `cargo xtask fetch-test-roms`");
+        return;
+    };
+    let mut gba = system_gba::GbaSystem::new(bytes, None).expect("the ROM parses");
+    for _ in 0..30 {
+        gba.step_frame(InputState::default());
+    }
+
+    let baseline = gba.framebuffer().fnv1a_hex();
+    assert_eq!(
+        baseline, "e5ab36d2fca96065",
+        "this is testing/golden/gba.toml's own validated gba_suite_arm@30 hash — if this \
+         assertion is what broke, the golden fixture moved and this test needs to follow it, \
+         not be deleted or have this literal edited to match"
+    );
+
+    // arm.gba's report renders through background mode 4's bitmap, which occupies BG2's slot —
+    // see `compositor::render_scanline`'s bitmap branch — so hiding "BG2" is what hides it here.
+    gba.ppu_debug().expect("GbaSystem offers PpuDebugTarget").set_layer_overrides(
+        LayerOverrides {
+            bg_hidden: [false, false, true, false],
+            ..Default::default()
+        },
+    );
+    gba.step_frame(InputState::default());
+    let hidden = gba.framebuffer().fnv1a_hex();
+    assert_ne!(
+        hidden, baseline,
+        "hiding the layer the report renders through must visibly change the picture, or the \
+         override is not doing anything"
+    );
+
+    gba.ppu_debug()
+        .unwrap()
+        .set_layer_overrides(LayerOverrides::default());
+    gba.step_frame(InputState::default());
+    let restored = gba.framebuffer().fnv1a_hex();
+    assert_eq!(
+        restored, baseline,
+        "toggling the layer back on must restore the exact validated golden hash"
+    );
+}
+
+/// The other half of the same contract: an override must never reach anything a save state
+/// captures, on a real ROM rather than the synthetic one `system-gba`'s own unit test uses.
+#[test]
+fn a_layer_override_does_not_perturb_a_real_roms_save_state() {
+    use core_common::{DebugLayer, LayerOverrides, System};
+
+    let Some(bytes) =
+        std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
+    else {
+        eprintln!("gba_suite_arm.gba not present; run `cargo xtask fetch-test-roms`");
+        return;
+    };
+
+    let mut plain = system_gba::GbaSystem::new(bytes.clone(), None).expect("the ROM parses");
+    for _ in 0..30 {
+        plain.step_frame(InputState::default());
+    }
+    let plain_state = plain.save_state();
+
+    let mut overridden = system_gba::GbaSystem::new(bytes, None).expect("the ROM parses");
+    for _ in 0..30 {
+        overridden.step_frame(InputState::default());
+    }
+    overridden
+        .ppu_debug()
+        .unwrap()
+        .set_layer_overrides(LayerOverrides {
+            bg_hidden: [true, true, true, true],
+            obj_hidden: true,
+            win_hidden: [true, true],
+            solo: Some(DebugLayer::Obj),
+        });
+    let overridden_state = overridden.save_state();
+
+    assert_eq!(plain_state, overridden_state);
+}
+
+// ---------------------------------------------------------------------------
 // Banking
 // ---------------------------------------------------------------------------
 

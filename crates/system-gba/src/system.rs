@@ -30,7 +30,7 @@
 use cart_common::GbaHeader;
 use core_common::{
     AccessKind, AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer,
-    InputState, Savable, StateError, StateReader, StateWriter, System,
+    InputState, LayerOverrides, Savable, StateError, StateReader, StateWriter, System,
 };
 use cpu_arm7tdmi::{Arm7Tdmi, BootState, Exception, Mode};
 
@@ -82,6 +82,12 @@ pub struct GbaSystemBus {
     pub sound: DirectSound,
     pub waits: WaitControl,
 
+    /// The debugger's layer isolation toggles. A lens over the picture, not part of the
+    /// machine — kept out of save states for exactly the reason `watch` above is, and
+    /// consulted only inside [`render_line`](Self::render_line), never by anything a game's own
+    /// code could observe. See [`core_common::LayerOverrides`] for the contract this rests on.
+    pub layer_overrides: LayerOverrides,
+
     framebuffer: Framebuffer,
     samples: Vec<AudioSample>,
     drained: Vec<AudioSample>,
@@ -116,6 +122,7 @@ impl GbaSystemBus {
             watch: AccessLog::new(),
             sound: DirectSound::new(),
             waits: WaitControl::new(),
+            layer_overrides: LayerOverrides::default(),
             framebuffer: Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT),
             samples: Vec::with_capacity(1024),
             drained: Vec::with_capacity(1024),
@@ -235,6 +242,7 @@ impl GbaSystemBus {
             vram: self.memory.vram(),
             palette: self.memory.palette(),
             oam: self.memory.oam(),
+            overrides: self.layer_overrides,
         };
         compositor::render_scanline(&frame, line, &mut framebuffer);
         self.framebuffer = framebuffer;
@@ -806,6 +814,10 @@ impl System for GbaSystem {
     /// possible at all from outside — `step_frame` is far too coarse to see where a wrong branch
     /// was taken.
     fn debug(&mut self) -> Option<&mut dyn core_common::DebugTarget> {
+        Some(self)
+    }
+
+    fn ppu_debug(&mut self) -> Option<&mut dyn core_common::PpuDebugTarget> {
         Some(self)
     }
 

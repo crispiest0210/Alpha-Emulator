@@ -162,8 +162,12 @@ impl GbaSystem {
         for layer in 0..4u32 {
             let enabled = dispcnt & (1 << (8 + layer)) != 0;
             let cnt = bus.read16(0x0400_0008 + layer * 2);
-            let hofs = bus.read16(0x0400_0010 + layer * 4);
-            let vofs = bus.read16(0x0400_0012 + layer * 4);
+            // `BGxHOFS`/`BGxVOFS` are write-only, so a bus read of either always answers zero —
+            // the system's own stored value is the only place that reflects what a game actually
+            // scrolled to. See `crates/system-gba/src/debug_ppu.rs`'s module docs for the same
+            // trap, fixed the same way, in the newer decoded register view.
+            let scroll = bus.backgrounds.layers[layer as usize];
+            let (hofs, vofs) = (scroll.scroll_x, scroll.scroll_y);
             // Bits 6 and 7 mean different things on an affine layer than on a text one, which is
             // the decode a reader is most likely to get wrong by hand.
             let affine = matches!((mode, layer), (1, 2) | (1, 3) | (2, 2) | (2, 3));
@@ -192,7 +196,8 @@ impl GbaSystem {
 
         let bldcnt = bus.read16(0x0400_0050);
         let bldalpha = bus.read16(0x0400_0052);
-        let bldy = bus.read16(0x0400_0054);
+        // `BLDY` is write-only too, same trap as the scroll registers above.
+        let bldy = bus.effects.bldy();
         let effect = match (bldcnt >> 6) & 3 {
             0 => "none",
             1 => "alpha blend",
@@ -252,6 +257,31 @@ mod tests {
 
     fn system() -> GbaSystem {
         GbaSystem::new(arm_rom(), None).expect("a hand-built cartridge")
+    }
+
+    #[test]
+    fn graphics_dump_reports_the_real_scroll_position_not_a_bus_read_of_zero() {
+        // BGxHOFS/BGxVOFS are write-only, so `bus.read16` of either always answers zero — this
+        // is the regression test for reading the stored value instead.
+        let mut gba = system();
+        gba.bus_mut().backgrounds.layers[0].scroll_x = 320;
+        gba.bus_mut().backgrounds.layers[0].scroll_y = 64;
+        let dump = gba.graphics_dump();
+        assert!(
+            dump.contains("scroll=(320,64)"),
+            "expected the real scroll position in:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn graphics_dump_reports_the_real_bldy_not_a_bus_read_of_zero() {
+        let mut gba = system();
+        gba.bus_mut().effects.write16(crate::effects::reg::BLDY, 9);
+        let dump = gba.graphics_dump();
+        assert!(
+            dump.contains("BLDY=9"),
+            "expected the real BLDY value in:\n{dump}"
+        );
     }
 
     #[test]

@@ -292,6 +292,31 @@ fn gba_spin_rom() -> Vec<u8> {
     rom
 }
 
+/// Enables BG0 and OBJ (mode 0), then spins — the case the debugger's layer isolation overrides
+/// are measured against.
+///
+/// `gba/spin` alone is not enough for that measurement: it leaves `DISPCNT` at zero, so
+/// `render_scanline`'s tile-mode branch never calls `draw_text_layer` or `draw_sprites`, and
+/// `LayerOverrides::obj_visible` is short-circuited away by the *existing* `dispcnt & OBJ == 0`
+/// check before it is ever reached. With both layers actually enabled, every override check this
+/// prompt added runs on every one of the 160 scanlines a frame draws, VRAM and OAM being empty
+/// notwithstanding — the cost of walking the code path does not depend on what is in memory,
+/// only on whether the path is taken at all.
+fn gba_layer_overrides_rom() -> Vec<u8> {
+    let program: [u32; 5] = [
+        0xE3A0_0C01, // mov r0, #0x100          (DISPCNT: mode 0, BG0 enable)
+        0xE380_0A01, // orr r0, r0, #0x1000      (+ OBJ enable)
+        0xE3A0_1404, // mov r1, #0x0400_0000     (I/O base)
+        0xE581_0000, // str r0, [r1]             (DISPCNT = 0x1100)
+        0xEAFF_FFFE, // b .
+    ];
+    let mut rom = vec![0u8; 0x1000];
+    for (index, word) in program.iter().enumerate() {
+        rom[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    rom
+}
+
 /// A DS cartridge whose ARM9 half fills a VRAM bank through display mode 2 and then spins, and
 /// whose ARM7 half spins.
 ///
@@ -396,6 +421,12 @@ fn gba_frames(c: &mut Criterion) {
     let rom = gba_spin_rom();
     bench_frame(&mut group, "spin", || {
         Box::new(system_gba::GbaSystem::new(rom.clone(), None).expect("a hand-built cartridge"))
+    });
+    let layers_rom = gba_layer_overrides_rom();
+    bench_frame(&mut group, "layer_overrides", || {
+        Box::new(
+            system_gba::GbaSystem::new(layers_rom.clone(), None).expect("a hand-built cartridge"),
+        )
     });
     group.finish();
 }

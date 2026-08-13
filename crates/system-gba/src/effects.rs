@@ -154,6 +154,13 @@ impl Effects {
         (self.win0h, self.win1h, self.win0v, self.win1v)
     }
 
+    /// `BLDY`, for diagnostics. Write-only to a game like the four bounds above — a bus read of
+    /// it answers zero, so a debugger reading it that way would show a brightness/darken amount
+    /// of zero no matter what a game actually set.
+    pub fn bldy(&self) -> u16 {
+        self.bldy
+    }
+
     pub fn blend_mode(&self) -> BlendMode {
         match (self.bldcnt >> 6) & 3 {
             1 => BlendMode::Alpha,

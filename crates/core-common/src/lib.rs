@@ -43,7 +43,11 @@ mod mock_system;
 
 pub use bus::{Addr, Bus, MapError, MemoryRegion, Ram, RegionMap};
 pub use cpu::{Cpu, CpuIntrospect, DisasmInstruction, Disassemble, RegisterValue};
-pub use debug::{Access, AccessKind, AccessLog, DebugRegion, DebugTarget};
+pub use debug::{
+    Access, AccessKind, AccessLog, BgRegisters, DebugLayer, DebugRegion, DebugTarget,
+    LayerOverrides, OamRow, PaletteSwatch, PpuDebugRequest, PpuDebugTarget, PpuRegisters,
+    PpuSnapshot, TileBitDepth, TileBitmap, WindowRegisters,
+};
 pub use event_types::{
     AudioSample, Buttons, Cycles, Framebuffer, InputState, Rgba8, TouchPoint, AUDIO_SAMPLE_RATE,
     BYTES_PER_PIXEL,

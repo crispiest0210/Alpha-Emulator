@@ -13,8 +13,8 @@
 use anyhow::Result;
 use frontend_core::{
     catalog, screen_size, Action, ChromeAction, Config, DebugSnapshot, Frame, InputTracker,
-    KeybindMap, LoadedRom, Session, SessionCommand, SessionEvent, SessionOptions, SessionStats,
-    SessionStatus,
+    KeybindMap, LoadedRom, PpuSnapshot, Session, SessionCommand, SessionEvent, SessionOptions,
+    SessionStats, SessionStatus,
 };
 use library::{AppPaths, Library, RomEntry, RomId, SaveStateEntry};
 use std::path::PathBuf;
@@ -81,6 +81,14 @@ pub struct App {
     /// When the next snapshot request goes out. The panel is refreshed on a timer while running and
     /// on every stop by the session itself.
     next_debug_request: Instant,
+
+    /// The most recent PPU debugger snapshot — palettes, tiles, OAM, and decoded registers.
+    /// `None` on a system that offers no `PpuDebugTarget`, distinguished from "not requested
+    /// yet" by `ppu_debug_unavailable` rather than by a third state, since the panel that reads
+    /// this only cares whether there is something to show.
+    ppu_debug: Option<Box<PpuSnapshot>>,
+    ppu_debug_unavailable: Option<String>,
+    next_ppu_debug_request: Instant,
 
     cursor: Option<(f32, f32)>,
     pointer_down: bool,
@@ -153,6 +161,9 @@ impl App {
             debug: None,
             debug_unavailable: None,
             next_debug_request: Instant::now(),
+            ppu_debug: None,
+            ppu_debug_unavailable: None,
+            next_ppu_debug_request: Instant::now(),
             cursor: None,
             pointer_down: false,
             fullscreen: false,
@@ -310,6 +321,14 @@ impl App {
                 SessionEvent::DebugUnavailable(reason) => {
                     self.debug = None;
                     self.debug_unavailable = Some(reason);
+                }
+                SessionEvent::PpuDebugSnapshot(snapshot) => {
+                    self.ppu_debug_unavailable = None;
+                    self.ppu_debug = Some(snapshot);
+                }
+                SessionEvent::PpuDebugUnavailable(reason) => {
+                    self.ppu_debug = None;
+                    self.ppu_debug_unavailable = Some(reason);
                 }
             }
         }
@@ -594,6 +613,26 @@ impl App {
         ));
     }
 
+    /// The PPU debugger's counterpart to [`request_debug_snapshot_if_due`](Self::request_debug_snapshot_if_due).
+    ///
+    /// Gated on the PPU section actually being open, not just the debugger window — this is what
+    /// keeps the cost of a closed debugger at zero: nothing here runs, and nothing on the
+    /// emulation thread ever decodes a tile, unless a contributor is looking at that specific
+    /// view.
+    fn request_ppu_debug_if_due(&mut self) {
+        const INTERVAL: Duration = Duration::from_millis(200);
+        if !self.chrome.show_debugger || !self.chrome.debugger_ppu_open || self.loaded.is_none() {
+            return;
+        }
+        if Instant::now() < self.next_ppu_debug_request {
+            return;
+        }
+        self.next_ppu_debug_request = Instant::now() + INTERVAL;
+        self.session.send(SessionCommand::RequestPpuDebug(
+            crate::chrome::ppu_debug_request(&self.chrome),
+        ));
+    }
+
     // --- drawing --------------------------------------------------------------------------
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -646,6 +685,8 @@ impl App {
                 library_error: self.library_error.as_deref(),
                 debug: self.debug.as_deref(),
                 debug_unavailable: self.debug_unavailable.as_deref(),
+                ppu_debug: self.ppu_debug.as_deref(),
+                ppu_debug_unavailable: self.ppu_debug_unavailable.as_deref(),
                 fullscreen: self.fullscreen,
                 messages: &self.messages,
             };
@@ -863,6 +904,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.pump_session_events();
         self.request_debug_snapshot_if_due();
+        self.request_ppu_debug_if_due();
 
         // If the emulation thread has died — a panic in a system — say so once and stop, rather
         // than presenting a frozen picture that looks like a hang.

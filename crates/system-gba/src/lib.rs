@@ -84,6 +84,7 @@ pub mod bitmap;
 pub mod cartridge;
 pub mod compositor;
 pub mod debug;
+pub mod debug_ppu;
 pub mod dma;
 pub mod effects;
 pub mod fifo;

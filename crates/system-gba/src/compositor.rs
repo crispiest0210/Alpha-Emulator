@@ -14,7 +14,7 @@
 //! this wrong does not produce a subtly wrong picture; it produces a layer drawn from memory
 //! that holds something else entirely.
 
-use core_common::{Framebuffer, Rgba8};
+use core_common::{Framebuffer, LayerOverrides, Rgba8};
 use ppu_tile2d::{
     render_sprites, render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource,
     ScanlineBuffer, SpriteRule,
@@ -91,6 +91,11 @@ pub struct Frame<'a> {
     pub vram: &'a [u8],
     pub palette: &'a [u8],
     pub oam: &'a [u8],
+    /// The debugger's layer isolation toggles. Consulted only here, at the very edge of
+    /// rendering — never earlier, and never by anything that feeds back into emulated state —
+    /// which is what keeps a toggle from being observable to a game or visible in a save state.
+    /// See `core_common::LayerOverrides` for the contract.
+    pub overrides: LayerOverrides,
 }
 
 /// Composite one scanline.
@@ -122,14 +127,25 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     // composited on top of it afterwards.
     if (3..=5).contains(&mode) {
         let row = framebuffer.row_mut(line);
-        bitmap::render_scanline(
-            mode,
-            line,
-            frame.vram,
-            frame.palette,
-            frame.video.bitmap_frame_offset(),
-            row,
-        );
+        // The bitmap occupies background 2's slot in these modes, so hiding or soloing "BG2"
+        // hides or solos it too — a debugger toggle should not have a different name depending
+        // on which mode a game happens to be in.
+        if frame.overrides.bg_visible(2) {
+            bitmap::render_scanline(
+                mode,
+                line,
+                frame.vram,
+                frame.palette,
+                frame.video.bitmap_frame_offset(),
+                row,
+            );
+        } else {
+            for pixel in row.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 0, 0xFF]);
+            }
+        }
+        // `draw_sprites` checks `overrides.obj_visible()` itself, so a hidden OBJ layer simply
+        // leaves `scanline` empty and this overlay writes nothing.
         draw_sprites(frame, line, &mut scanline);
         let palette = GbaPalette {
             bytes: frame.palette,
@@ -145,7 +161,8 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
         frame.video.dispcnt & (1 << 10) != 0,
         frame.video.dispcnt & (1 << 11) != 0,
     ];
-    let present = std::array::from_fn(|i| enabled[i] && kinds[i].is_some());
+    let present =
+        std::array::from_fn(|i| enabled[i] && kinds[i].is_some() && frame.overrides.bg_visible(i));
 
     for index in frame.backgrounds.draw_order(present) {
         match kinds[index] {
@@ -302,9 +319,11 @@ fn apply_effects(
         under,
         object_window,
     } = composed;
+    // The object window (index 2) has no override of its own — see `LayerOverrides::win_hidden`
+    // — so only windows 0 and 1 are masked against the debugger's toggles here.
     let windows = [
-        frame.video.dispcnt & (1 << 13) != 0,
-        frame.video.dispcnt & (1 << 14) != 0,
+        frame.video.dispcnt & (1 << 13) != 0 && frame.overrides.win_visible(0),
+        frame.video.dispcnt & (1 << 14) != 0 && frame.overrides.win_visible(1),
         frame.video.dispcnt & (1 << 15) != 0,
     ];
     let mode = frame.effects.blend_mode();
@@ -471,7 +490,7 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
 /// shared compositor does not describe. They are skipped rather than drawn untransformed,
 /// because an untransformed rotated sprite looks like a deliberate picture that is simply wrong.
 fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
-    if frame.video.dispcnt & dispcnt::OBJ == 0 {
+    if frame.video.dispcnt & dispcnt::OBJ == 0 || !frame.overrides.obj_visible() {
         return;
     }
     let oam = ObjectAttributeMemory::decode(frame.oam);

@@ -7,7 +7,7 @@
 //! into a third-party core's private object graph, and refusing to expose that path is a
 //! deliberate structural choice, not an oversight.
 
-use crate::debug::{AccessLog, DebugTarget};
+use crate::debug::{AccessLog, DebugTarget, PpuDebugTarget};
 use crate::{AudioSample, Cycles, Framebuffer, InputState};
 use savestate::{decode_state, encode_state, Savable, StateError};
 use thiserror::Error;
@@ -151,6 +151,17 @@ pub trait System: Savable {
     /// introspect — which is the state the Nintendo DS is in. A frontend shows the debugger panel
     /// as unavailable rather than empty.
     fn debug(&mut self) -> Option<&mut dyn DebugTarget> {
+        None
+    }
+
+    /// PPU inspection — palettes, tile data, OAM, and the registers that place them — when this
+    /// system offers it.
+    ///
+    /// `None` by default, the same reasoning as [`debug`](System::debug): most of this
+    /// workspace's history is a GBA-shaped one, and every system should be free to reach a
+    /// working `step_frame` long before it has anything here to show. A frontend hides the
+    /// relevant panel sections rather than showing them empty.
+    fn ppu_debug(&mut self) -> Option<&mut dyn PpuDebugTarget> {
         None
     }
 
