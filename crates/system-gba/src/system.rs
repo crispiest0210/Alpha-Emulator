@@ -84,8 +84,8 @@ pub struct GbaSystemBus {
 
     /// The debugger's layer isolation toggles. A lens over the picture, not part of the
     /// machine — kept out of save states for exactly the reason `watch` above is, and
-    /// consulted only inside [`render_line`](Self::render_line), never by anything a game's own
-    /// code could observe. See [`core_common::LayerOverrides`] for the contract this rests on.
+    /// consulted only inside `render_line`, never by anything a game's own code could observe.
+    /// See [`core_common::LayerOverrides`] for the contract this rests on.
     pub layer_overrides: LayerOverrides,
 
     framebuffer: Framebuffer,

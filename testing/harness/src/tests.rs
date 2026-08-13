@@ -832,8 +832,7 @@ fn gba_golden_frames() {
 fn toggling_a_layer_off_and_back_on_leaves_the_golden_hash_unchanged() {
     use core_common::{LayerOverrides, System};
 
-    let Some(bytes) =
-        std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
+    let Some(bytes) = std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
     else {
         eprintln!("gba_suite_arm.gba not present; run `cargo xtask fetch-test-roms`");
         return;
@@ -853,12 +852,12 @@ fn toggling_a_layer_off_and_back_on_leaves_the_golden_hash_unchanged() {
 
     // arm.gba's report renders through background mode 4's bitmap, which occupies BG2's slot —
     // see `compositor::render_scanline`'s bitmap branch — so hiding "BG2" is what hides it here.
-    gba.ppu_debug().expect("GbaSystem offers PpuDebugTarget").set_layer_overrides(
-        LayerOverrides {
+    gba.ppu_debug()
+        .expect("GbaSystem offers PpuDebugTarget")
+        .set_layer_overrides(LayerOverrides {
             bg_hidden: [false, false, true, false],
             ..Default::default()
-        },
-    );
+        });
     gba.step_frame(InputState::default());
     let hidden = gba.framebuffer().fnv1a_hex();
     assert_ne!(
@@ -884,8 +883,7 @@ fn toggling_a_layer_off_and_back_on_leaves_the_golden_hash_unchanged() {
 fn a_layer_override_does_not_perturb_a_real_roms_save_state() {
     use core_common::{DebugLayer, LayerOverrides, System};
 
-    let Some(bytes) =
-        std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
+    let Some(bytes) = std::fs::read(crate::corpus::corpus_dir().join("gba/gba-suite/arm.gba")).ok()
     else {
         eprintln!("gba_suite_arm.gba not present; run `cargo xtask fetch-test-roms`");
         return;

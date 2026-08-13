@@ -135,6 +135,31 @@
 //! stepping without one — under a nanosecond per instruction, which is the price of a debugging
 //! session and not of playing a game.
 //!
+//! ## The PPU debugger's layer isolation, measured closed
+//!
+//! The claim is "indistinguishable from zero when the panel is closed", and unlike the watchpoint
+//! recorder above this one can actually be met, because the check is four comparisons against
+//! `false` per scanline rather than a call through anything — see `LayerOverrides::bg_visible`.
+//! Measured with `gba/spin` (`DISPCNT` left at zero, so the check still runs on every scanline
+//! even though nothing is enabled) and the new `gba/layer_overrides` (`BG0` and `OBJ` both on, so
+//! `draw_text_layer` and `draw_sprites` run too — the fuller exercise of what the render path
+//! actually added), each against a `--save-baseline` of the code from immediately before this
+//! change:
+//!
+//! | workload | before | after | change |
+//! |---|---|---|---|
+//! | `gba/spin` | 2 392 µs | 2 440 µs | +2.0% |
+//! | `gba/layer_overrides` | 1 507 µs | 1 539 µs | +2.1% |
+//!
+//! Both regressions are smaller than the **±2x swing this file already documents from thermal
+//! state alone** — recall `gba/spin` moving from 1 372 µs to 2 665 µs on the same code across two
+//! sessions. A 2% change on a workload whose honest noise floor is closer to 100% is exactly what
+//! "indistinguishable from zero" looks like in a number rather than as a claim. Reproduce it with
+//! `cargo xtask bench --filter gba/ --save-baseline before`, then revert
+//! `LayerOverrides`/`PpuDebugTarget` and everything that reads them — `core-common`'s
+//! `debug.rs`/`system.rs` and every touched file under `system-gba/src/` — and run again with
+//! `--baseline before`.
+//!
 //! ## What has been optimised, and what has not
 //!
 //! Prompt 18 requires every optimisation to be justified by a before/after benchmark, and the

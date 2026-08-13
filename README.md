@@ -36,7 +36,8 @@ speed.** The Game Boy and Game Boy Color are the two held to a full accuracy bar
 below each of the other two. The application has a
 ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
 a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
-viewer, breakpoints, and watchpoints.
+viewer, breakpoints, and watchpoints. For the GBA, the debugger also has a PPU panel — layer
+isolation, palette and tile viewers, an OAM table, and decoded video registers.
 
 ### Where the Game Boy Advance actually is
 
@@ -266,6 +267,7 @@ Component status:
 | `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |
 | `system-nds` diagnostics — VRAM bank map, per-layer decode, dual-core state dump | done and tested; side-effect free, so a dump can be taken from anywhere |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
+| `frontend-native` GBA PPU debugger panel | layer isolation (hide/solo BG0-3, OBJ, both windows), 256-entry palette viewers, character-block tile viewer at both bit depths, a 128-row OAM table with current-scanline highlighting, and decoded `DISPCNT`/`DISPSTAT`/`BGxCNT`/scroll/window/blend registers; layer toggles are a render-only override, excluded from save states |
 | Everything else | not started |
 
 ### Accuracy suite
@@ -622,6 +624,12 @@ Three findings worth surfacing:
   overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
   leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
   deliberate deviation with the number, not as compliance.
+- **The GBA PPU debugger's layer-isolation check, unlike the watchpoint recorder above, does meet
+  that constraint.** It is one `LayerOverrides` field consulted at the very end of compositing —
+  three flag checks per scanline, not per bus access — measured at +2.0% on `gba/spin` and +2.1% on
+  a hand-built `gba/layer_overrides` benchmark ROM with `cargo xtask bench --filter gba/`. Both are
+  smaller than this project's own documented ±2x thermal-variance noise floor (see below), so the
+  honest reading is "indistinguishable from zero," not "2% slower."
 
 Two things have been optimised, each with a profiled problem behind it and a before/after to show
 for it — the DS bus composing wide accesses out of byte accesses (−65% of a frame), and the GBA's

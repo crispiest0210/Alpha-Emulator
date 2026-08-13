@@ -327,6 +327,28 @@ and draws both screens with sound and 3D**.
   prompt 18, and **+3.7% of a Nintendo DS one**. See "Performance" below: the cost is kept
   deliberately and recorded as a deviation from prompt 15's "zero measurable overhead" constraint
   rather than reported as compliance.
+
+  The GBA also has a second debugger surface now: a PPU panel answering "the picture is wrong"
+  instead of "why did the code run." It has five views — layer isolation (force-hide or solo BG0-3,
+  OBJ, and each window), a 256-entry palette viewer for both banks, a tile/VRAM viewer at both bit
+  depths with a selectable palette bank, a 128-row OAM table with per-row current-scanline
+  highlighting, and a decoded register view (`DISPCNT`, `DISPSTAT`, each `BGxCNT`, scroll, window,
+  and blend registers). Layer isolation is a `core_common::LayerOverrides` field consulted only at
+  the end of compositing in `system-gba`'s `render_scanline`/`draw_sprites`/`apply_effects`, deliberately
+  excluded from `Savable::save`/`load` the same way `AccessLog` is, so toggling a layer off and back
+  on leaves both the framebuffer hash and the save-state bytes unchanged — proven by tests in
+  `crates/system-gba/src/compositor/tests.rs`, `crates/system-gba/src/system/tests.rs`, and
+  `testing/harness/src/tests.rs`. Unlike the watchpoint recorder, it meets prompt 15's "zero
+  measurable overhead" constraint: `cargo xtask bench --filter gba/` measured +2.0%/+2.1% with the
+  panel's checks compiled in but the panel closed, both inside the ±2x thermal-variance noise this
+  file documents under "Performance" — see `testing/harness/benches/systems.rs`.
+
+  The register view exists partly to avoid repeating a specific mistake: `BGxHOFS`/`BGxVOFS` and
+  `BLDY` are write-only, so reading them through the bus always answers zero, and
+  `GbaSystem::graphics_dump` did exactly that and showed `scroll=(0,0)` for a layer scrolled to 320
+  until this was fixed. The PPU debugger and the repaired `graphics_dump` both read scroll and
+  `BLDY` from where `system-gba` actually stores them (`bus.backgrounds.layers[i]`,
+  `bus.effects.bldy()`) instead of through `Bus::read16`. See `crates/system-gba/src/debug_ppu.rs`.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
