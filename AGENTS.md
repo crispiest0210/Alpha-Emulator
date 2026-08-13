@@ -317,6 +317,12 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   `advance_line` may already have moved it onto the next line in the same call. A per-scanline
   scroll, gradient, or window effect corrupts progressively when this is missed, as its HDMA source
   pointer advances 68 times too many per frame.
+- **DMA source and destination addresses are not full 32-bit values on this hardware.** Channel 0
+  drives 27 address lines and channels 1-3 drive 28; a stray high bit above that window does not
+  address a different region the way it would in ordinary 32-bit arithmetic, it wraps back inside
+  the window. `dma::address_mask` is applied twice — once when a transfer's addresses latch on the
+  enable edge, and again after every step — because masking only at latch time still lets a
+  repeating transfer's running address walk out through the top of the window one step later.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

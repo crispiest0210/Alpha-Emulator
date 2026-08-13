@@ -189,6 +189,22 @@ impl Channel {
     }
 }
 
+/// The address lines a channel actually drives.
+///
+/// Channel 0 cannot reach the cartridge at all — see the module docs — and 27 bits is exactly the
+/// window that excludes it; every other channel has 28. A game that sets a stray high bit above
+/// that window is not addressing a different region on hardware, because the pins to decode it do
+/// not exist: the address wraps within the window instead. Treating it as ordinary 32-bit
+/// arithmetic sends the access to whatever this codebase's flatter address space happens to have
+/// at that bit pattern, which is a real region here even though it is nothing on the console.
+fn address_mask(index: usize) -> u32 {
+    if index == 0 {
+        0x07FF_FFFF
+    } else {
+        0x0FFF_FFFF
+    }
+}
+
 /// All four channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DmaController {
@@ -290,13 +306,17 @@ impl DmaController {
 
         channel.armed = false;
 
-        // Walk the running addresses past what this transfer covered.
+        // Walk the running addresses past what this transfer covered, masked back into the
+        // channel's window so a step that would carry an address past it wraps there rather than
+        // running on into the full 32-bit space.
+        let mask = address_mask(index);
         let span = words as i64 * unit as i64;
-        channel.current_source = advance(channel.current_source, channel.source_step(), span);
+        channel.current_source =
+            advance(channel.current_source, channel.source_step(), span) & mask;
         channel.current_destination = match destination_step {
             // The reload variant snaps back so the next repeat refills the same buffer.
-            AddressStep::IncrementReload => channel.destination,
-            step => advance(channel.current_destination, step, span),
+            AddressStep::IncrementReload => channel.destination & mask,
+            step => advance(channel.current_destination, step, span) & mask,
         };
 
         if !channel.repeats() {
@@ -347,8 +367,9 @@ impl DmaController {
                 // adjusts the repeat or interrupt bit of a running transfer and must not have
                 // its addresses snap back to the start.
                 if !was_enabled && channel.enabled() {
-                    channel.current_source = channel.source;
-                    channel.current_destination = channel.destination;
+                    let mask = address_mask(index);
+                    channel.current_source = channel.source & mask;
+                    channel.current_destination = channel.destination & mask;
                     if channel.timing() == StartTiming::Immediate {
                         channel.armed = true;
                     }
