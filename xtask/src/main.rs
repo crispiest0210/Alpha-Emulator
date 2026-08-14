@@ -481,6 +481,10 @@ const TEST_ROMS: &[(&str, &str)] = &[
         "gba/gba-suite/memory.gba",
         "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
     ),
+    (
+        "gba/gba-suite/bios.gba",
+        "https://github.com/jsmolka/gba-tests/raw/master/bios/bios.gba",
+    ),
 ];
 
 /// The workspace root, found from this crate rather than the current directory.

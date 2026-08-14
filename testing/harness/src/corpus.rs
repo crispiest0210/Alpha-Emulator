@@ -576,6 +576,23 @@ pub const GBA_ROMS: &[TestRom] = &[
         expected_failure: None,
         licence: "MIT (Julian Smolka)",
     },
+    TestRom {
+        name: "gba_suite_bios",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/bios/bios.gba",
+        path: "gba/gba-suite/bios.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 1: reading BIOS memory from outside the BIOS right after startup must \
+             return the specific opcode a real BIOS's boot sequence last fetched, not zero. This \
+             machine never executes real BIOS code with no BIOS supplied, so nothing produces \
+             that trace yet; the fix is a documented per-checkpoint constant, not something this \
+             call implementation touches",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
 ];
 
 #[cfg(test)]

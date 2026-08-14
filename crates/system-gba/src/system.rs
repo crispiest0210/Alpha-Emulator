@@ -60,11 +60,18 @@ pub const FRAME_CYCLES: u64 = 280_896;
 pub const CLOCK_HZ: u64 = 16_777_216;
 
 /// Where a cartridge's code begins.
-const CARTRIDGE_ENTRY: u32 = 0x0800_0000;
+///
+/// `pub(crate)`: `bios::soft_reset` jumps here too, since a `SoftReset` is documented as
+/// re-entering the machine exactly where a cold boot without a BIOS does.
+pub(crate) const CARTRIDGE_ENTRY: u32 = 0x0800_0000;
 /// Stacks the BIOS sets up before handing control to the game.
-const SP_SYSTEM: u32 = 0x0300_7F00;
-const SP_IRQ: u32 = 0x0300_7FA0;
-const SP_SUPERVISOR: u32 = 0x0300_7FE0;
+///
+/// `pub(crate)` for the same reason as [`CARTRIDGE_ENTRY`]: `SoftReset` sets up the identical
+/// three stacks, because a reset is documented as leaving the machine in the same state a cold
+/// boot does.
+pub(crate) const SP_SYSTEM: u32 = 0x0300_7F00;
+pub(crate) const SP_IRQ: u32 = 0x0300_7FA0;
+pub(crate) const SP_SUPERVISOR: u32 = 0x0300_7FE0;
 
 /// Everything the CPU can reach.
 pub struct GbaSystemBus {
@@ -752,6 +759,9 @@ impl GbaSystem {
             // wait hardware spends inside a BIOS loop is spread across steps here — see
             // `bios::intr_wait`, which argues the choice and the alternative.
             bios::BiosEffect::Retry => self.cpu.halt(),
+            // `SoftReset` already set the program counter to its own entry point and is
+            // documented as never returning to the caller, so there is nothing to step over.
+            bios::BiosEffect::Jump => self.cpu.set_halted(false),
         }
         true
     }

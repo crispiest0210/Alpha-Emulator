@@ -9,8 +9,11 @@
 //! **Commercial games run.** A cartridge boots, the display renders through the compositor, DMA
 //! and timers drive the sound FIFOs, and interrupts reach the game's handler with or without a
 //! BIOS. A save state round-trips frame-exactly and two runs of the same ROM are identical. All
-//! three `gba-suite` ROMs pass — the instruction set in both states, and memory — and a real game
-//! plays in the window at a measured 100% speed with no dropped frames or audio samples.
+//! three original `gba-suite` ROMs pass — the instruction set in both states, and memory — and a
+//! fourth, `bios.gba`, exercises the BIOS's documented call behaviour and is three sub-tests of
+//! four; the last is the BIOS's open-bus quirks, tracked in `testing/harness/src/corpus.rs`. A
+//! real game plays in the window at a measured 100% speed with no dropped frames or audio
+//! samples.
 //!
 //! What is not done, in rough order of how much it matters:
 //!
@@ -33,10 +36,20 @@
 //! - **No cartridge GPIO**, so a game with a real-time clock finds none. That is a supported
 //!   hardware state rather than a failure — a cartridge with a dead battery behaves the same way
 //!   and games handle it — but the clock never advances.
-//! - The HLE BIOS in [`bios`] answers the calls games actually make; the rest change nothing
-//!   rather than guessing, which shows up in a trace instead of surfacing far from its cause.
-//!   `bios::intr_wait` is the one call that keeps state between steps, and the one worth reading
-//!   before trusting anything about frame pacing.
+//! - The HLE BIOS in [`bios`] answers every call with a small, well-documented contract:
+//!   `Div`/`DivArm`/`Sqrt`/`ArcTan`/`ArcTan2`, `CpuSet`/`CpuFastSet`, `GetBiosChecksum`, all five
+//!   decompressors plus `BitUnPack`, `BgAffineSet`/`ObjAffineSet`, `RegisterRamReset`,
+//!   `SoftReset`, `Halt`/`Stop`/`IntrWait`/`VBlankIntrWait`, and `MidiKey2Freq`. `SoundBias` is
+//!   recognised — MP2K's own init calls it — but does not ramp `SOUNDBIAS`, because nothing in
+//!   this crate owns that register yet; see `bios::dispatch`'s `SoundBias` arm. **Not
+//!   implemented, deliberately:** the M4A/MP2K sound-engine entry points at `SWI` 0x1A-0x1E and
+//!   0x20-0x2A (`SoundDriverInit`/`Main`/`Mode`/`VSync`, the `MusicPlayer*` family,
+//!   `SoundChannelClear`) — these are not small pure functions but the BIOS-resident sound
+//!   engine itself, and reproducing them means building that engine, not transcribing a
+//!   contract — plus `MultiBoot`, `HardReset`, and `CustomHalt`. Every other call changes
+//!   nothing rather than guessing, which shows up in a trace instead of surfacing far from its
+//!   cause. `bios::intr_wait` is the one call that keeps state between steps, and the one worth
+//!   reading before trusting anything about frame pacing.
 //!
 //! # The failure mode this system keeps producing
 //!
