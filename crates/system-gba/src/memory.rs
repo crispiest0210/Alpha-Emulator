@@ -19,7 +19,8 @@
 //!
 //! Unmapped addresses, and BIOS reads from outside the BIOS, return whatever was last driven on
 //! the bus. Games read there by accident and a few read there deliberately; returning zero is a
-//! visible difference. See [`GbaBus::open_bus32`].
+//! visible difference. See [`GbaBus::open_bus32`] for unmapped addresses; a BIOS read from
+//! outside the BIOS is a separate, sticky mechanism — see the `bios_open_bus` field's own docs.
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
 
@@ -107,6 +108,21 @@ pub struct GbaBus {
     /// from nowhere returns the matching byte *of the last word*, not the last byte.
     open_bus: u32,
 
+    /// The last opcode *the BIOS itself* fetched, which a read of BIOS memory from outside it
+    /// returns.
+    ///
+    /// Deliberately not the same field as [`Self::open_bus`]. GBATEK documents these as two
+    /// separate rules: an ordinary unmapped read mirrors the pipeline's own most recent fetch
+    /// (`[$+8]` of the *reading* instruction, in ARM state), which changes on every instruction
+    /// regardless of where it is fetched from; a BIOS read from outside the BIOS instead returns
+    /// whatever the BIOS last fetched *from within itself* — sticky across every instruction the
+    /// game executes afterward, since none of them are BIOS fetches. A machine with no BIOS
+    /// supplied never executes real BIOS code to update this naturally, so the four moments a
+    /// real BIOS would touch it — startup, a completed `SWI`, IRQ entry, and IRQ return — are
+    /// each stamped with their documented constant by the HLE path that stands in for that
+    /// moment. See `system::GbaSystem::intercept_bios_call` and its neighbours.
+    bios_open_bus: u32,
+
     /// Whether the CPU is currently executing from BIOS.
     ///
     /// The BIOS is readable only by code running inside it. A game that reads BIOS from its own
@@ -131,6 +147,7 @@ impl GbaBus {
             vram: vec![0; VRAM_SIZE].into_boxed_slice(),
             oam: vec![0; OAM_SIZE].into_boxed_slice(),
             open_bus: 0,
+            bios_open_bus: 0,
             in_bios: false,
         }
     }
@@ -152,6 +169,13 @@ impl GbaBus {
     #[inline]
     pub fn open_bus32(&self) -> u32 {
         self.open_bus
+    }
+
+    /// Record that the BIOS itself fetched `value`, for the next read of BIOS memory from
+    /// outside it to return. See the `bios_open_bus` field's own docs for why this is a separate
+    /// mechanism from [`Self::set_open_bus`].
+    pub fn set_bios_open_bus(&mut self, value: u32) {
+        self.bios_open_bus = value;
     }
 
     pub fn palette(&self) -> &[u8] {
@@ -182,8 +206,9 @@ impl GbaBus {
         Some(match Region::of(addr) {
             Region::Bios => match (&self.bios, self.in_bios) {
                 (Some(bios), true) => bios.get(addr as usize).copied().unwrap_or(0),
-                // Outside BIOS code, or with no BIOS supplied, the region reads as open bus.
-                _ => self.open_bus_byte(addr),
+                // Outside BIOS code, or with no BIOS supplied: not the general open-bus rule,
+                // but the BIOS's own sticky last-fetched value — see `bios_open_bus`.
+                _ => self.bios_open_bus_byte(addr),
             },
             Region::EWram => self.ewram[(addr as usize) & (EWRAM_SIZE - 1)],
             Region::IWram => self.iwram[(addr as usize) & (IWRAM_SIZE - 1)],
@@ -289,6 +314,12 @@ impl GbaBus {
     fn open_bus_byte(&self, addr: u32) -> u8 {
         (self.open_bus >> ((addr & 3) * 8)) as u8
     }
+
+    /// The byte of the BIOS's own last-fetched word that corresponds to this address.
+    #[inline]
+    fn bios_open_bus_byte(&self, addr: u32) -> u8 {
+        (self.bios_open_bus >> ((addr & 3) * 8)) as u8
+    }
 }
 
 impl Savable for GbaBus {
@@ -301,6 +332,7 @@ impl Savable for GbaBus {
         w.write_bytes(&self.vram);
         w.write_bytes(&self.oam);
         w.write_u32(self.open_bus);
+        w.write_u32(self.bios_open_bus);
         w.write_bool(self.in_bios);
     }
 
@@ -311,6 +343,7 @@ impl Savable for GbaBus {
         r.read_bytes(&mut self.vram)?;
         r.read_bytes(&mut self.oam)?;
         self.open_bus = r.read_u32()?;
+        self.bios_open_bus = r.read_u32()?;
         self.in_bios = r.read_bool()?;
         Ok(())
     }

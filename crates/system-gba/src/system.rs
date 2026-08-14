@@ -51,8 +51,8 @@ use crate::{background::Backgrounds, timers::Timers};
 /// Bumped on any change to what this system serializes.
 ///
 /// 2 added the in-progress `IntrWait` mask, which a state taken mid-wait needs to resume without
-/// discarding the flags it was waiting on a second time.
-const STATE_VERSION: u32 = 2;
+/// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`.
+const STATE_VERSION: u32 = 3;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;
@@ -72,6 +72,17 @@ pub(crate) const CARTRIDGE_ENTRY: u32 = 0x0800_0000;
 pub(crate) const SP_SYSTEM: u32 = 0x0300_7F00;
 pub(crate) const SP_IRQ: u32 = 0x0300_7FA0;
 pub(crate) const SP_SUPERVISOR: u32 = 0x0300_7FE0;
+
+/// The four moments GBATEK documents a real BIOS's own last-fetched opcode for, and the constant
+/// value each one leaves — "the opcode at `[00DCh+8]` after startup and `SoftReset`, the opcode at
+/// `[0134h+8]` during IRQ execution, and opcode at `[013Ch+8]` after IRQ execution, and opcode at
+/// `[0188h+8]` after SWI execution." A no-BIOS machine never executes the real instructions that
+/// produce these, so the four HLE paths that stand in for those moments stamp the constant
+/// directly instead. See `memory::GbaBus::bios_open_bus`.
+const BIOS_OPCODE_AFTER_STARTUP: u32 = 0xE129_F000;
+const BIOS_OPCODE_AFTER_SWI: u32 = 0xE3A0_2004;
+const BIOS_OPCODE_DURING_IRQ: u32 = 0xE25E_F004;
+const BIOS_OPCODE_AFTER_IRQ: u32 = 0xE55E_C002;
 
 /// Everything the CPU can reach.
 pub struct GbaSystemBus {
@@ -611,6 +622,12 @@ impl GbaSystem {
         // the BIOS) exactly when a BIOS was supplied and the cartridge entry (outside it)
         // otherwise, so this agrees with `has_bios` here and stays correct once execution moves.
         system.update_in_bios();
+        if !has_bios {
+            system
+                .bus
+                .memory
+                .set_bios_open_bus(BIOS_OPCODE_AFTER_STARTUP);
+        }
         system.apply_startup_state();
         Ok(system)
     }
@@ -750,18 +767,25 @@ impl GbaSystem {
             bios::BiosEffect::Return => {
                 self.cpu.set_halted(false);
                 self.cpu.regs.set_pc(pc.wrapping_add(width));
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_SWI);
             }
             bios::BiosEffect::Halt => {
                 self.cpu.halt();
                 self.cpu.regs.set_pc(pc.wrapping_add(width));
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_SWI);
             }
             // Leave the program counter *on* the `SWI` so it runs again next step. That is how a
             // wait hardware spends inside a BIOS loop is spread across steps here — see
             // `bios::intr_wait`, which argues the choice and the alternative.
             bios::BiosEffect::Retry => self.cpu.halt(),
             // `SoftReset` already set the program counter to its own entry point and is
-            // documented as never returning to the caller, so there is nothing to step over.
-            bios::BiosEffect::Jump => self.cpu.set_halted(false),
+            // documented as never returning to the caller, so there is nothing to step over —
+            // and what it leaves on the bus is the startup trace, not the generic post-SWI one,
+            // because GBATEK documents both as the same value.
+            bios::BiosEffect::Jump => {
+                self.cpu.set_halted(false);
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_STARTUP);
+            }
         }
         true
     }
@@ -843,6 +867,7 @@ impl GbaSystem {
         self.cpu.regs.write(Mode::Irq, 14, HLE_IRQ_RETURN);
         self.cpu.regs.set_pc(handler);
         self.cpu.set_irq_line(false);
+        self.bus.memory.set_bios_open_bus(BIOS_OPCODE_DURING_IRQ);
     }
 
     /// The other half of the wrapper: unwind and leave the exception.
@@ -872,6 +897,7 @@ impl GbaSystem {
         // struck. Restoring `CPSR` is the step that unmasks interrupts again, so leaving it out
         // is what makes a machine take exactly one interrupt and then no more.
         self.cpu.exception_return(lr.wrapping_sub(4));
+        self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_IRQ);
         true
     }
 }

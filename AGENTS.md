@@ -324,13 +324,12 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   enable edge, and again after every step — because masking only at latch time still lets a
   repeating transfer's running address walk out through the top of the window one step later.
 - **`GbaBus::set_open_bus` had no caller.** The plumbing for open-bus reads existed — an unmapped
-  address or a BIOS read from outside it was meant to return whatever the bus last carried — but
-  nothing ever drove it, so it stayed zero forever. `GbaSystem::update_open_bus` now sets it once
-  per `step_instruction`, from the instruction about to run: a `peek` of the same width the fetch
-  will be (a word in ARM, a halfword duplicated into both halves in Thumb), for the same reason
-  `intercept_bios_call`'s own peek exists — it is answering what the CPU is about to fetch itself,
-  and reading it a second time through the bus would charge, latch, and log an access that never
-  happened.
+  address was meant to return whatever the bus last carried — but nothing ever drove it, so it
+  stayed zero forever. `GbaSystem::update_open_bus` now sets it once per `step_instruction`, from
+  the instruction about to run: a `peek` of the same width the fetch will be (a word in ARM, a
+  halfword duplicated into both halves in Thumb), for the same reason `intercept_bios_call`'s own
+  peek exists — it is answering what the CPU is about to fetch itself, and reading it a second
+  time through the bus would charge, latch, and log an access that never happened.
 - **`in_bios` was set once at construction and never touched again.** With a BIOS loaded, a game
   that calls into it and returns crosses the "am I inside the BIOS" boundary constantly, but the
   flag gating BIOS reads was computed once from `has_bios` at boot and left there — so after the
@@ -338,6 +337,20 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   instead of open bus, for the rest of the run. `GbaSystem::update_in_bios` recomputes it every
   step from the program counter (`pc < memory::BIOS_SIZE`), alongside `update_open_bus`, so the
   flag tracks wherever the CPU actually is rather than where it started.
+- **A BIOS read from outside the BIOS is not the general open-bus rule.** GBATEK documents them as
+  two separate mechanisms: an ordinary unmapped read mirrors the pipeline's own most recent fetch
+  (`[$+8]` of the *reading* instruction), which changes on every instruction the CPU executes; a
+  BIOS read from outside the BIOS returns whatever the BIOS *itself* last fetched, which is sticky
+  across every instruction the game runs afterward, because none of them are BIOS fetches. Sharing
+  one `open_bus` field for both — this crate's first attempt — made a no-BIOS machine's very first
+  memory read fail an independent test ROM (`jsmolka/gba-tests`' `bios.gba`) at its very first
+  sub-test, because a handful of the game's own instructions ran before the read under test and
+  each one overwrote the shared field with its own opcode. `GbaBus::bios_open_bus` is the separate,
+  sticky field; since a no-BIOS machine never executes real BIOS code to update it naturally, the
+  four moments GBATEK documents a real BIOS's own trace for — startup, a completed `SWI`, IRQ
+  entry, and IRQ return — are each stamped with their literal documented constant
+  (`system::BIOS_OPCODE_AFTER_STARTUP` and its three neighbours) by the HLE path standing in for
+  that moment.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

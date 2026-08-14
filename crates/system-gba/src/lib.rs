@@ -9,11 +9,9 @@
 //! **Commercial games run.** A cartridge boots, the display renders through the compositor, DMA
 //! and timers drive the sound FIFOs, and interrupts reach the game's handler with or without a
 //! BIOS. A save state round-trips frame-exactly and two runs of the same ROM are identical. All
-//! three original `gba-suite` ROMs pass — the instruction set in both states, and memory — and a
-//! fourth, `bios.gba`, exercises the BIOS's documented call behaviour and is three sub-tests of
-//! four; the last is the BIOS's open-bus quirks, tracked in `testing/harness/src/corpus.rs`. A
-//! real game plays in the window at a measured 100% speed with no dropped frames or audio
-//! samples.
+//! four `gba-suite` ROMs pass — the instruction set in both states, memory, and the BIOS's
+//! documented call and open-bus behaviour — and a real game plays in the window at a measured
+//! 100% speed with no dropped frames or audio samples.
 //!
 //! What is not done, in rough order of how much it matters:
 //!
