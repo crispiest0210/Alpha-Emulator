@@ -141,10 +141,32 @@ fn row_stride_depends_on_a_bit_that_applies_to_every_sprite_at_once() {
 }
 
 #[test]
-fn row_stride_is_measured_in_the_sprites_own_tile_size() {
+fn only_the_one_dimensional_row_stride_scales_with_colour_depth() {
+    // The half of this that is easy to get wrong, and did: in *one-dimensional* mapping a
+    // sprite's tiles are contiguous, so its rows really are further apart at 256 colours. In
+    // *two-dimensional* mapping the sheet is 32 slots wide and a slot is 32 bytes whatever the
+    // depth — the same unit a tile number counts in — so one row down is 1024 bytes for every
+    // sprite there has ever been.
+    //
+    // Scaling that by `tile_size()` gave 2048, which is two rows on. The top row of a 256-colour
+    // sprite decoded correctly and every row below it came from the wrong place, which reads as
+    // scrambled artwork rather than as a mapping bug.
     let object = Object::decode((1 << 14) | (1 << 13), 1 << 14, 0); // 32x8, 8bpp
-    assert_eq!(object.row_stride(true), 4 * 64);
-    assert_eq!(object.row_stride(false), 32 * 64);
+    assert_eq!(
+        object.row_stride(true),
+        4 * 64,
+        "contiguous tiles, so 256 colours doubles the distance"
+    );
+    assert_eq!(
+        object.row_stride(false),
+        1024,
+        "a sheet row is 32 slots of 32 bytes, whatever the depth"
+    );
+
+    // And the 16-colour sprite agrees, which is what makes 1024 a property of the sheet rather
+    // than a coincidence of this sprite's depth.
+    let sixteen = Object::decode(1 << 14, 1 << 14, 0); // 32x8, 4bpp
+    assert_eq!(sixteen.row_stride(false), object.row_stride(false));
 }
 
 #[test]

@@ -22,6 +22,14 @@
 //! sprite is the next tile or 32 tiles further on depends on a bit in `DISPCNT` that applies to
 //! every sprite at once. Both are easy to miss and both produce sprites made of the right tiles
 //! in the wrong arrangement.
+//!
+//! Those two facts share a cause worth stating on its own, because it is the one that was got
+//! wrong: the object area is a sheet of 32-byte *slots*, and a slot is 32 bytes whatever the
+//! sprite's colour depth. A 256-colour tile is two slots — which is why its tile numbers advance
+//! by two — but a *row* of the 2D-mapping sheet is 32 slots, so it is 1024 bytes for every sprite
+//! there has ever been. Scaling that by the sprite's own tile size gives 2048 for a 256-colour
+//! sprite, which is two rows on: the top row decodes correctly and everything below it comes from
+//! the wrong place. See [`OBJ_SLOT_SIZE`].
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
 use ppu_tile2d::{BitDepth, Sprite};
@@ -32,6 +40,13 @@ pub const OBJECT_COUNT: usize = 128;
 pub const MATRIX_COUNT: usize = 32;
 /// Where object tile data begins within VRAM.
 pub const OBJ_TILE_BASE: usize = 0x0001_0000;
+
+/// The unit a sprite's tile number counts in, and the width of one slot of the object sheet.
+///
+/// Always 32 bytes, which is one 16-colour tile — a 256-colour tile is two of these. Both facts
+/// that look like they should scale with colour depth and do not depend on it: the tile number's
+/// unit, and the 2D-mapping row stride.
+pub const OBJ_SLOT_SIZE: usize = 32;
 
 /// How a sprite is drawn, from the two mode bits of attribute 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +189,7 @@ impl Object {
     /// whether the row below a tile is the next tile or 32 tiles further on, which is the
     /// difference between a sprite's rows being adjacent and being scattered.
     pub fn tile_offset(&self, _one_dimensional: bool) -> usize {
-        OBJ_TILE_BASE + self.tile as usize * 32
+        OBJ_TILE_BASE + self.tile as usize * OBJ_SLOT_SIZE
     }
 
     /// How far apart two rows of this sprite's tiles are, in bytes.
@@ -183,9 +198,16 @@ impl Object {
             // The sprite's tiles are contiguous, so the next row starts after this one's width.
             (self.width / 8) as usize * self.depth.tile_size()
         } else {
-            // The whole object area is one 32-tile-wide sheet and the sprite is a window onto
-            // it, so the next row is always 32 tiles on — in this sprite's own tile size.
-            32 * self.depth.tile_size()
+            // The whole object area is one sheet 32 *slots* wide, and a slot is 32 bytes whatever
+            // the sprite's colour depth — the same 32-byte unit the tile number counts in. So one
+            // row down is always 1024 bytes.
+            //
+            // Scaling by `tile_size()` instead gave 2048 for a 256-colour sprite, which is two
+            // rows on: the top row of such a sprite decoded correctly and every row below it came
+            // from the wrong place, looking like scrambled artwork rather than a mapping bug. A
+            // 256-colour sprite is *two slots* wide per tile, which is why its tile numbers
+            // advance by two — not a reason for its rows to be twice as far apart.
+            32 * OBJ_SLOT_SIZE
         }
     }
 
@@ -214,6 +236,10 @@ impl Object {
             // `priority` against the background's instead.
             behind_background: false,
             row_stride: self.row_stride(one_dimensional),
+            // A semi-transparent sprite is always a blend first target, whatever `BLDCNT` selects,
+            // and forces an alpha blend even where `BLDCNT` asks for a brightness effect. That
+            // travels on the pixel because it varies per sprite, not per layer.
+            forces_blend: self.graphics_mode == GraphicsMode::SemiTransparent,
         }
     }
 }

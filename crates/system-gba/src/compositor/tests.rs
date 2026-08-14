@@ -351,7 +351,51 @@ impl Scene {
             self.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
         );
     }
+
+    /// Fill the first object tile slot with colour index 1 and enable objects.
+    ///
+    /// Unlike [`Scene::simple_sprite`] this writes no OAM entry, so a test can place several
+    /// sprites itself with [`Scene::set_sprite`].
+    fn sprite_tiles(&mut self) {
+        let base = crate::objects::OBJ_TILE_BASE;
+        for row in 0..8 {
+            for byte in 0..4 {
+                self.vram[base + row * 4 + byte] = 0x11;
+            }
+        }
+        self.video.write16(
+            reg::DISPCNT,
+            self.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+        );
+    }
+
+    /// Write one OAM entry's three attribute halfwords.
+    ///
+    /// Leaves the fourth halfword alone: it is not part of the sprite but one sixteenth of an
+    /// affine matrix, which [`Scene::identity_matrix`] writes separately.
+    fn set_sprite(&mut self, index: usize, attr0: u16, attr1: u16, attr2: u16) {
+        let base = index * 8;
+        self.oam[base..base + 2].copy_from_slice(&attr0.to_le_bytes());
+        self.oam[base + 2..base + 4].copy_from_slice(&attr1.to_le_bytes());
+        self.oam[base + 4..base + 6].copy_from_slice(&attr2.to_le_bytes());
+    }
+
+    /// Make matrix 0 the identity, so an affine sprite lands exactly where a plain one would.
+    ///
+    /// That is what lets a test compare the two paths at the same pixel: any difference is the
+    /// compositing rule, not the transform.
+    fn identity_matrix(&mut self) {
+        for (n, value) in [0x0100u16, 0x0000, 0x0000, 0x0100].iter().enumerate() {
+            self.oam[n * 8 + 6..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    }
 }
+
+/// Attribute-0 bits these tests set by name rather than by number.
+const AFFINE: u16 = 1 << 8;
+const SEMI_TRANSPARENT: u16 = 1 << 10;
+/// Attribute-2 bit 12: the low bit of the 16-colour palette number.
+const PALETTE_1: u16 = 1 << 12;
 
 #[test]
 fn a_sprite_draws_over_a_text_layer() {
@@ -959,5 +1003,179 @@ fn a_background_larger_than_one_screen_block_reaches_its_other_blocks() {
         scene.render(0).pixel(0, 0).r,
         0xFF,
         "scrolled into the second screen block, its tile should be what draws"
+    );
+}
+
+// -- Affine and plain sprites in one pass ----------------------------------
+
+#[test]
+fn an_affine_sprite_obeys_background_priority_in_both_directions() {
+    // The affine path wrote pixels straight into the buffer with no comparison against the
+    // background at all, so a rotated object punched through whatever was in front of it. Both
+    // directions are asserted because only writing unconditionally passes one of them.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0
+    scene.colour(257, GREEN); // the sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    // BG0 at priority 0, affine sprite at priority 3: the background is in front.
+    scene.simple_layer(0, 0, 8);
+    scene.set_sprite(0, AFFINE, 0, 3 << 10);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "a priority-3 affine sprite is behind a priority-0 background"
+    );
+
+    // The other way round: BG0 at priority 3, sprite at priority 0.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(257, GREEN);
+    scene.sprite_tiles();
+    scene.identity_matrix();
+    scene.simple_layer(0, 3, 8);
+    scene.set_sprite(0, AFFINE, 0, 0);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "and a priority-0 affine sprite is in front of a priority-3 background"
+    );
+}
+
+#[test]
+fn a_plain_sprite_does_not_overwrite_an_affine_one_that_wins_on_oam_order() {
+    // The two paths could not see each other: the shared renderer treated only a *background*
+    // pixel as something it could lose to, so an affine sprite's pixel was overwritten by any
+    // plain sprite regardless of which was in front. Equal priority, so OAM index decides.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // palette 0 — the affine sprite
+    scene.colour(273, RED); // palette 1 — the plain sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    scene.set_sprite(0, AFFINE, 0, 0); // affine, OAM 0
+    scene.set_sprite(4, 0, 0, PALETTE_1); // plain, OAM 4
+    let px = scene.render(0).pixel(0, 0);
+    assert_eq!(px.g, 0xFF, "the lower OAM index wins, affine or not");
+    assert_eq!(px.r, 0x00, "the farther plain sprite did not overwrite it");
+}
+
+#[test]
+fn an_affine_sprite_does_not_overwrite_a_plain_one_that_wins_on_oam_order() {
+    // The same rule the other way, which is the half that a back-to-front affine pass got wrong:
+    // it drew affine sprites *over* everything already placed.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // palette 0 — the affine sprite
+    scene.colour(273, RED); // palette 1 — the plain sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    scene.set_sprite(0, 0, 0, PALETTE_1); // plain, OAM 0
+    scene.set_sprite(4, AFFINE, 0, 0); // affine, OAM 4
+    let px = scene.render(0).pixel(0, 0);
+    assert_eq!(
+        px.r, 0xFF,
+        "the plain sprite at the lower index keeps the pixel"
+    );
+    assert_eq!(px.g, 0x00, "the farther affine sprite did not overwrite it");
+}
+
+#[test]
+fn a_semi_transparent_sprite_blends_even_when_objects_are_not_a_declared_blend_source() {
+    // The force path. A semi-transparent OBJ is a first target whatever `BLDCNT` selects and
+    // blends whatever mode it asks for — here the mode is "none" and the OBJ first-target bit is
+    // clear, so nothing but the graphics mode can be producing a blend. The mode was decoded and
+    // never read, and these sprites — shadows, water, reflections, battle-move flashes — came out
+    // as solid blocks.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0, underneath
+    scene.colour(257, GREEN); // the sprite
+    scene.simple_layer(0, 1, 8); // BG0 at priority 1, behind the sprite
+    scene.sprite_tiles();
+    scene.set_sprite(0, SEMI_TRANSPARENT, 0, 0);
+
+    // BG0 is a second target; OBJ is *not* a first target and the mode is none.
+    scene.effects.write16(ereg::BLDCNT, Layer::Bg0.bit() << 8);
+    scene.effects.write16(ereg::BLDALPHA, 8 | (8 << 8)); // half and half
+
+    let px = scene.render(0).pixel(0, 0);
+    assert!(
+        px.g > 0 && px.r > 0,
+        "the sprite blended with BG0 rather than replacing it: {px:?}"
+    );
+    assert!(px.g < 0xFF, "and it is a mix, not the sprite's own colour");
+}
+
+#[test]
+fn a_semi_transparent_sprite_is_not_brightened_by_an_active_brightness_effect() {
+    // Semi-transparency forces an *alpha* blend, which is what stops a brightness effect applying
+    // to it. With no second target declared there is nothing to blend with, so the sprite keeps
+    // its own colour — while an otherwise identical normal sprite is taken to white.
+    use crate::effects::{reg as ereg, Layer};
+    let build = |semi: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(257, GREEN);
+        scene.sprite_tiles();
+        scene.set_sprite(0, if semi { SEMI_TRANSPARENT } else { 0 }, 0, 0);
+        // Brighten, with OBJ as the first target and no second target at all.
+        scene
+            .effects
+            .write16(ereg::BLDCNT, Layer::Object.bit() | (2 << 6));
+        scene.effects.write16(ereg::BLDY, 16); // fully toward white
+        scene
+    };
+
+    let normal = build(false).render(0).pixel(0, 0);
+    assert_eq!(
+        (normal.r, normal.g, normal.b),
+        (0xFF, 0xFF, 0xFF),
+        "a normal sprite is taken to white"
+    );
+
+    let semi = build(true).render(0).pixel(0, 0);
+    assert_eq!(
+        (semi.r, semi.g, semi.b),
+        (0x00, 0xFF, 0x00),
+        "a semi-transparent one keeps its colour instead of being brightened"
+    );
+}
+
+#[test]
+fn an_eight_bit_sprite_in_two_dimensional_mapping_finds_its_second_row() {
+    // In 2D mapping the object sheet is 32 *slots* wide and a slot is 32 bytes whatever the
+    // depth, so one row down is 1024 bytes for every sprite. Scaling by the sprite's own tile size
+    // gave 2048 for a 256-colour sprite: its top row decoded correctly and every row below came
+    // from the wrong place, which reads as scrambled artwork rather than a mapping bug.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // 8bpp forces palette 0, so colour 1 is entry 257
+    scene.colour(258, RED); // and colour 2 is entry 258
+
+    let base = crate::objects::OBJ_TILE_BASE;
+    for byte in 0..8 {
+        scene.vram[base + byte] = 1; // the sprite's first row
+        scene.vram[base + 1024 + byte] = 2; // one sheet row on, not two
+    }
+
+    // 8x16 (shape 2, size 0), 256 colours, at the origin.
+    scene.set_sprite(0, (2 << 14) | (1 << 13), 0, 0);
+    // Objects on, and *two*-dimensional mapping: no OBJ_1D_MAPPING bit.
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::OBJ);
+
+    assert_eq!(scene.render(0).pixel(0, 0).g, 0xFF, "the first tile row");
+    assert_eq!(
+        scene.render(8).pixel(0, 8).r,
+        0xFF,
+        "and the second comes from 1024 bytes on"
     );
 }

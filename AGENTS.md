@@ -373,6 +373,26 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   forward, and that prompt 18 requires for any before/after claim, failed before a single benchmark
   ran. It now names the one criterion target, `-p harness --bench systems`. `--benches` is not
   enough: a lib target is benchmarked by default too.
+- **Two renderers for one layer must share their state, or they cannot compete.** The GBA drew
+  affine sprites itself (the shared crate has no notion of a matrix) and ordinary ones through
+  `ppu_tile2d::render_sprites`, which kept its claimed-pixel mask private. The two could not see
+  each other, and *three* symptoms followed from that one gap: affine sprites ignored background
+  priority entirely, every ordinary sprite overwrote every affine one whatever the OAM order, and
+  the affine pass ran back-to-front while the shared one ran front-to-back. `ppu_tile2d::SpritePass`
+  now holds the claim and the priority rule, and both renderers interleave in one ordered pass —
+  the same move as putting the window mask on `ScanlineBuffer`, for the same reason.
+- **A decoded field with no consumer is a silent gap, and `grep` is how you find it.**
+  `GraphicsMode::SemiTransparent` was decoded correctly and read nowhere outside its own unit test
+  for as long as it existed, so shadows, water, reflections and battle-move flashes rendered as
+  solid blocks. It is worth grepping any enum variant the decoder produces for a *use* rather than
+  a *match arm*. The rule it encodes: a semi-transparent OBJ is a blend first target whatever
+  `BLDCNT` selects, and forces an alpha blend even where `BLDCNT` asks for a brightness effect —
+  so `under` must be built for it too, not only when the blend mode is already alpha.
+- **The object sheet is 32-byte slots, and a slot does not scale with colour depth.** A 2D-mapping
+  row is 32 slots, so 1024 bytes for every sprite. Scaling by the sprite's own tile size gives 2048
+  at 256 colours — two rows on — and its top row decodes correctly while everything below comes
+  from the wrong place, which reads as scrambled artwork rather than a mapping bug. The same 32-byte
+  unit is what tile numbers count in, which is why a 256-colour sprite's numbers advance by two.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

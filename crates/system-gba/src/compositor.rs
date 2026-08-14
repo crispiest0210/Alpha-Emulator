@@ -16,8 +16,8 @@
 
 use core_common::{Framebuffer, Rgba8};
 use ppu_tile2d::{
-    render_sprites, render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource,
-    ScanlineBuffer, SpriteRule,
+    render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource, ScanlineBuffer,
+    SpritePass, SpriteRule,
 };
 
 use crate::affine::transform_object_pixel;
@@ -130,7 +130,7 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
             frame.video.bitmap_frame_offset(),
             row,
         );
-        draw_sprites(frame, line, &mut scanline);
+        draw_sprites(frame, line, SpriteSelection::Drawn, &mut scanline);
         let palette = GbaPalette {
             bytes: frame.palette,
         };
@@ -164,18 +164,24 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
             _ => {}
         }
     }
-    draw_sprites(frame, line, &mut scanline);
+    draw_sprites(frame, line, SpriteSelection::Drawn, &mut scanline);
 
     // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass with
     // the first-target layers left out, rather than by widening `ScanlineBuffer` to keep a
     // runner-up: that buffer is shared with the Game Boy, which has no colour effects at all and
-    // would carry the second slot on every line to no purpose. The pass only runs when an alpha
-    // blend is actually configured, which is a small minority of lines.
+    // would carry the second slot on every line to no purpose. The pass only runs when a blend
+    // could actually happen, which is a small minority of lines.
     //
     // Exact whenever the layer directly beneath the top pixel is not itself a first target. Where
     // two first-target layers stack, hardware blends the top with the second and this skips to the
     // third. Nothing in the corpus does that, and the alternative is keeping every layer's pixel.
-    let under = (frame.effects.blend_mode() == BlendMode::Alpha).then(|| {
+    //
+    // A semi-transparent sprite forces an alpha blend whatever `BLDCNT`'s mode says, so the buffer
+    // is needed whenever one is on this line too — not only when an alpha blend is configured.
+    // Without that, such a sprite would find nothing beneath it and render solid.
+    let needs_under =
+        frame.effects.blend_mode() == BlendMode::Alpha || has_semi_transparent_sprite(frame, line);
+    let under = needs_under.then(|| {
         let mut under = ScanlineBuffer::new(SCREEN_WIDTH as usize);
         under.clear();
         // The same windows apply to what is underneath: a layer a window excludes is not merely
@@ -193,8 +199,12 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
                 _ => {}
             }
         }
+        // Sprites can be the lower half of a blend, but a sprite that is itself the *source* of one
+        // cannot blend with itself. Two things make a sprite a source: the object layer being a
+        // declared first target, which excludes them all, and an individual sprite being
+        // semi-transparent, which `NotBlendSource` filters out per sprite.
         if !frame.effects.is_first_target(Layer::Object) {
-            draw_sprites(frame, line, &mut under);
+            draw_sprites(frame, line, SpriteSelection::NotBlendSource, &mut under);
         }
         under
     });
@@ -285,41 +295,16 @@ fn object_window_mask(frame: &Frame<'_>, line: u32) -> Option<Vec<bool>> {
         return None;
     }
     let oam = ObjectAttributeMemory::decode(frame.oam);
-    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
-    let shapes: Vec<_> = (0..crate::objects::OBJECT_COUNT)
-        .map(|i| oam.objects[i])
-        .filter(|object| {
-            object.graphics_mode == crate::objects::GraphicsMode::ObjectWindow
-                && object.mode != ObjectMode::Hidden
-                && object.covers_line(line as i32)
-        })
-        .collect();
-    if shapes.is_empty() {
-        return Some(vec![false; SCREEN_WIDTH as usize]);
-    }
-
     let mut scratch = ScanlineBuffer::new(SCREEN_WIDTH as usize);
     scratch.clear();
-    for object in shapes.iter().filter(|o| o.mode != ObjectMode::Normal) {
-        draw_affine_sprite(
-            frame,
-            &oam,
-            object,
-            line as i32,
-            one_dimensional,
-            &mut scratch,
-        );
-    }
-    let plain: Vec<_> = shapes
-        .iter()
-        .filter(|o| o.mode == ObjectMode::Normal)
-        .map(|object| object.to_sprite(one_dimensional))
-        .collect();
-    render_sprites(
-        &plain,
-        frame.vram,
+    // Deliberately unmasked: this scratch buffer is *computing* the window mask, so it cannot be
+    // subject to one. It also goes through the same merged pass as everything else, so an affine
+    // object-window sprite defines its region by exactly the rules an affine drawn sprite obeys.
+    compose_sprites(
+        frame,
+        &oam,
         line,
-        SpriteRule::ByPriority,
+        SpriteSelection::ObjectWindow,
         &mut scratch,
     );
 
@@ -363,9 +348,12 @@ fn apply_effects(
         visible,
     } = composed;
     let mode = frame.effects.blend_mode();
-    // Windows have already been applied to the buffer, so with no colour effect there is nothing
-    // left for this pass to do.
-    if mode == BlendMode::None {
+    // Windows have already been applied to the buffer, so with no colour effect there is normally
+    // nothing left for this pass to do. A semi-transparent sprite is the exception: it blends
+    // whatever `BLDCNT`'s mode says, including when that mode is "none", so its presence is what
+    // decides whether the pass can be skipped rather than the register alone. `under` is built
+    // exactly when a blend could happen, which makes it the cheap way to ask.
+    if mode == BlendMode::None && under.is_none() {
         return;
     }
 
@@ -373,7 +361,13 @@ fn apply_effects(
         let indexed = scanline.get(x);
         let layer = layer_of(indexed);
 
-        if !frame.effects.is_first_target(layer) {
+        // A semi-transparent sprite is a first target whatever `BLDCNT` selects, and forces an
+        // alpha blend even where `BLDCNT` asks for a brightness effect or for none at all. That is
+        // why it rides on the pixel: it varies per sprite, so no register consulted here could
+        // answer it. Games use it for shadows, water, reflections, and battle-move flashes, all of
+        // which rendered as solid blocks while the mode was decoded and never read.
+        let forced = indexed.forces_blend;
+        if !forced && !frame.effects.is_first_target(layer) {
             continue;
         }
         // Bit 5 is the one thing a window still says about the *winner*: whether colour effects
@@ -390,10 +384,14 @@ fn apply_effects(
             b: pixel[2],
             a: pixel[3],
         };
+        // A forced blend is an *alpha* blend whatever the register says, which is what stops a
+        // semi-transparent sprite being brightened or darkened along with everything else.
+        let effective = if forced { BlendMode::Alpha } else { mode };
+
         // An alpha blend needs what is underneath, and hardware only blends when that lower pixel's
         // layer is a *second* target — otherwise the top pixel is written through unchanged. The
         // brightness effects have no lower layer at all, so they pass the top pixel twice.
-        let lower = match mode {
+        let lower = match effective {
             BlendMode::Alpha => {
                 let beneath =
                     under.map_or_else(ppu_tile2d::IndexedPixel::default, |buffer| buffer.get(x));
@@ -408,7 +406,7 @@ fn apply_effects(
             }
             _ => top,
         };
-        write_pixel(pixel, frame.effects.blend(mode, top, lower));
+        write_pixel(pixel, frame.effects.blend(effective, top, lower));
     }
 }
 
@@ -508,56 +506,144 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
                 priority: layer.priority(),
                 layer: index as u8,
                 source: PixelSource::Background,
+                forces_blend: false,
             },
         );
     }
 }
 
-/// Draw the sprites covering this line, front-most first.
+/// Whether any semi-transparent sprite covers this line.
 ///
-/// Only non-affine sprites for now: an affine one needs its matrix applied per pixel, which the
-/// shared compositor does not describe. They are skipped rather than drawn untransformed,
-/// because an untransformed rotated sprite looks like a deliberate picture that is simply wrong.
-fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
+/// Asked so the under-buffer can be built for it. Cheap enough to answer by decoding OAM again:
+/// it only runs on a line whose blend mode is not already alpha, and it stops at the first hit.
+fn has_semi_transparent_sprite(frame: &Frame<'_>, line: u32) -> bool {
+    if frame.video.dispcnt & dispcnt::OBJ == 0 {
+        return false;
+    }
+    let oam = ObjectAttributeMemory::decode(frame.oam);
+    oam.visible_on_line(line as i32)
+        .into_iter()
+        .any(|i| oam.objects[i].graphics_mode == crate::objects::GraphicsMode::SemiTransparent)
+}
+
+/// Which sprites a pass should draw.
+///
+/// The three passes differ only in this, which is why they share one routine: drawing them by
+/// three different code paths is how the affine and ordinary sprites came to disagree about
+/// priority in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpriteSelection {
+    /// Every sprite that draws: the main compositing pass.
+    Drawn,
+    /// Only sprites that are *not* blend first targets, for the under-buffer.
+    ///
+    /// A first-target sprite is the thing being blended, so it cannot also be what it blends
+    /// *with*. Semi-transparent sprites are first targets whatever `BLDCNT` says, so they are
+    /// excluded here even when the object layer is not a declared target.
+    NotBlendSource,
+    /// Only sprites whose graphics mode makes them a window shape. These draw nothing; the
+    /// pixels they claim define a region.
+    ObjectWindow,
+}
+
+/// Draw the sprites covering this line into `scanline`, front-most first.
+///
+/// # One pass, both kinds of sprite
+///
+/// Ordinary and affine sprites are composited together in a single ordered pass over OAM, sharing
+/// one [`SpritePass`] and therefore one claimed-pixel mask and one priority rule. They were two
+/// passes, and the two could not see each other: the affine path wrote pixels unconditionally with
+/// no comparison against the background at all, and the ordinary path then overwrote every affine
+/// pixel because it treated only a *background* pixel as something it could lose to. So a rotating
+/// object punched through the text box in front of it, and a farther plain sprite erased a nearer
+/// rotated one — two symptoms of the same missing shared state.
+///
+/// Affine sprites are still drawn here rather than by the shared crate, which has no notion of a
+/// matrix; what moved into the shared crate is the *rule* they must obey. See [`SpritePass`].
+fn compose_sprites(
+    frame: &Frame<'_>,
+    oam: &ObjectAttributeMemory,
+    line: u32,
+    selection: SpriteSelection,
+    scanline: &mut ScanlineBuffer,
+) {
+    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
+    // Compare the sprite's priority against the background's, which is this machine's rule.
+    // `SpriteDecides` is the Game Boy's, and under it every GBA sprite won against every
+    // background — so a character walked over the text box in front of them.
+    let mut pass = SpritePass::new(SCREEN_WIDTH as usize, SpriteRule::ByPriority);
+
+    for index in sprite_order(oam, line, selection) {
+        let object = oam.objects[index];
+        if object.mode == ObjectMode::Normal {
+            // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite
+            // decodes differently from a 16-colour one — but a scanline can hold both, so the
+            // depth rides on each sprite rather than on this call.
+            ppu_tile2d::render_sprite(
+                &object.to_sprite(one_dimensional),
+                frame.vram,
+                line,
+                &mut pass,
+                scanline,
+            );
+        } else {
+            draw_affine_sprite(
+                frame,
+                oam,
+                &object,
+                line as i32,
+                one_dimensional,
+                &mut pass,
+                scanline,
+            );
+        }
+    }
+}
+
+/// Which OAM entries a pass draws, front-most first.
+///
+/// Front-most first is what the shared claim rule expects: the first sprite to claim a pixel keeps
+/// it. [`ObjectAttributeMemory::visible_on_line`] already sorts by priority then OAM index, which
+/// is the tie-break hardware uses.
+fn sprite_order(oam: &ObjectAttributeMemory, line: u32, selection: SpriteSelection) -> Vec<usize> {
+    use crate::objects::GraphicsMode;
+    match selection {
+        SpriteSelection::Drawn => oam.visible_on_line(line as i32),
+        SpriteSelection::NotBlendSource => oam
+            .visible_on_line(line as i32)
+            .into_iter()
+            .filter(|&i| oam.objects[i].graphics_mode != GraphicsMode::SemiTransparent)
+            .collect(),
+        // `visible_on_line` deliberately excludes object-window sprites, since they do not draw,
+        // so this selection does its own scan. The same priority and index order is kept, so an
+        // object window built from overlapping shapes resolves the way a drawn sprite would.
+        SpriteSelection::ObjectWindow => {
+            let mut found: Vec<usize> = (0..crate::objects::OBJECT_COUNT)
+                .filter(|&i| {
+                    let object = oam.objects[i];
+                    object.graphics_mode == GraphicsMode::ObjectWindow
+                        && object.mode != ObjectMode::Hidden
+                        && object.covers_line(line as i32)
+                })
+                .collect();
+            found.sort_by_key(|&i| (oam.objects[i].priority, i));
+            found
+        }
+    }
+}
+
+/// Draw the sprites covering this line, if the object layer is enabled at all.
+fn draw_sprites(
+    frame: &Frame<'_>,
+    line: u32,
+    selection: SpriteSelection,
+    scanline: &mut ScanlineBuffer,
+) {
     if frame.video.dispcnt & dispcnt::OBJ == 0 {
         return;
     }
     let oam = ObjectAttributeMemory::decode(frame.oam);
-    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
-
-    // Affine sprites are drawn here rather than handed to the shared compositor, which has no
-    // notion of a matrix. Back to front, so a nearer one overwrites a farther one — the shared
-    // path claims pixels front-first instead, and mixing the two orders would let a farther
-    // affine sprite cover a nearer ordinary one.
-    for index in oam.visible_on_line(line as i32).into_iter().rev() {
-        let object = oam.objects[index];
-        if object.mode == ObjectMode::Normal {
-            continue;
-        }
-        draw_affine_sprite(frame, &oam, &object, line as i32, one_dimensional, scanline);
-    }
-
-    let sprites: Vec<_> = oam
-        .visible_on_line(line as i32)
-        .into_iter()
-        .map(|index| oam.objects[index])
-        .filter(|object| object.mode == ObjectMode::Normal)
-        .map(|object| object.to_sprite(one_dimensional))
-        .collect();
-
-    // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite decodes
-    // differently from a 16-colour one — but a scanline can hold both, so the depth rides on each
-    // sprite rather than on this call.
-    render_sprites(
-        &sprites,
-        frame.vram,
-        line,
-        // Compare the sprite's priority against the background's, which is this machine's rule.
-        // `SpriteDecides` is the Game Boy's, and under it every GBA sprite won against every
-        // background — so a character walked over the text box in front of them.
-        SpriteRule::ByPriority,
-        scanline,
-    );
+    compose_sprites(frame, &oam, line, selection, scanline);
 }
 
 /// Draw one rotated or scaled sprite.
@@ -572,6 +658,7 @@ fn draw_affine_sprite(
     object: &Object,
     line: i32,
     one_dimensional: bool,
+    pass: &mut SpritePass,
     scanline: &mut ScanlineBuffer,
 ) {
     let matrix = &oam.matrices[object.matrix];
@@ -623,7 +710,11 @@ fn draw_affine_sprite(
             continue;
         }
 
-        scanline.set(
+        // Through the shared pass, not straight into the buffer. Writing directly is what let an
+        // affine sprite ignore the background's priority entirely and then be overwritten by any
+        // ordinary sprite regardless of which was in front.
+        pass.place(
+            scanline,
             x as usize,
             ppu_tile2d::IndexedPixel {
                 color: colour,
@@ -631,7 +722,10 @@ fn draw_affine_sprite(
                 priority: object.priority,
                 layer: 0,
                 source: PixelSource::Sprite,
+                forces_blend: object.graphics_mode == crate::objects::GraphicsMode::SemiTransparent,
             },
+            // The GBA compares priorities rather than consulting a "behind background" bit.
+            false,
         );
     }
 }

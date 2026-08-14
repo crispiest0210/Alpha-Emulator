@@ -72,6 +72,15 @@
 //!   battle HUDs, a cave's light radius — came out as hard-edged rectangles of flat backdrop. The
 //!   contract now lives in `ppu_tile2d::ScanlineBuffer::set`, the one point every renderer commits
 //!   a pixel through.
+//! - Affine sprites were composited by a second pass that could not see the first, so they ignored
+//!   background priority entirely *and* were overwritten by every ordinary sprite regardless of
+//!   which was in front — a rotating object punched through the text box before it, and a farther
+//!   plain sprite erased a nearer rotated one. Both now share one ordered pass and one
+//!   `ppu_tile2d::SpritePass`.
+//! - `GraphicsMode::SemiTransparent` was decoded and never read, so shadows, water, reflections
+//!   and battle-move flashes rendered as solid blocks. Such a sprite is a blend first target
+//!   whatever `BLDCNT` selects, and forces an alpha blend even where `BLDCNT` asks for a
+//!   brightness effect.
 //!
 //! # The bug worth knowing about before touching timing
 //!

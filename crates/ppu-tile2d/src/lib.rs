@@ -63,8 +63,8 @@ mod compositor;
 mod palette;
 
 pub use compositor::{
-    background_wins, decode_tile_row, render_sprites, render_text_background, BackgroundParams,
-    Sprite, SpriteRule, TilemapSource,
+    background_wins, decode_tile_row, render_sprite, render_sprites, render_text_background,
+    BackgroundParams, Sprite, SpritePass, SpriteRule, TilemapSource,
 };
 pub use palette::{bgr555_to_rgba, Bgr555Palette, MonochromePalette, PaletteSource, DMG_SHADES};
 
@@ -137,6 +137,17 @@ pub struct IndexedPixel {
     /// indistinguishable without it. Zero on systems that have only one background.
     pub layer: u8,
     pub source: PixelSource,
+    /// Whether this pixel blends with what is under it whatever the blend registers say.
+    ///
+    /// The Game Boy Advance's semi-transparent object mode is the only thing that sets it: such a
+    /// sprite is *always* a blend first target, no matter what `BLDCNT` selects, and it forces an
+    /// alpha blend even where `BLDCNT` asks for a brightness effect or for none at all. That is a
+    /// property of the individual pixel rather than of its layer — one sprite can be
+    /// semi-transparent while another on the same line is not — so no register the effects pass
+    /// could consult afterwards can answer it, and it has to travel on the pixel.
+    ///
+    /// False everywhere else. The Game Boy and Game Boy Color have no blending at all.
+    pub forces_blend: bool,
 }
 
 impl IndexedPixel {
@@ -362,6 +373,7 @@ mod tests {
                 priority: 0,
                 layer: 0,
                 source: PixelSource::Background,
+                forces_blend: false,
             },
         );
 
@@ -387,6 +399,7 @@ mod tests {
             priority: 0,
             layer,
             source: PixelSource::Background,
+            forces_blend: false,
         }
     }
 
