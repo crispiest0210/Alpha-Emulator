@@ -66,6 +66,12 @@
 //! - A text background wrapping at 32x32 whatever its real size, so a larger one never reached its
 //!   second screen block and half its content was simply absent.
 //! - The object window answered as never covering, so content revealed *through* one vanished.
+//! - Windows were applied *after* the line resolved: the winning layer was masked away and
+//!   overpainted with the backdrop, instead of being kept out of priority resolution so the next
+//!   layer down could win. Every window used to *filter* rather than to hide — text-box interiors,
+//!   battle HUDs, a cave's light radius — came out as hard-edged rectangles of flat backdrop. The
+//!   contract now lives in `ppu_tile2d::ScanlineBuffer::set`, the one point every renderer commits
+//!   a pixel through.
 //!
 //! # The bug worth knowing about before touching timing
 //!

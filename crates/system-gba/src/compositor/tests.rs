@@ -44,6 +44,12 @@ impl Scene {
     }
 
     /// Fill tile 1 with colour index 1 and point layer `index`'s map cell (0,0) at it.
+    ///
+    /// **One drawing layer, so this cannot test ordering.** With a single layer, "show the layer
+    /// beneath" and "show the backdrop" are the same pixel — which is exactly how a window test
+    /// passed for months while the compositor masked layers *after* resolving the line instead of
+    /// excluding them from resolution. Any test about priority, windows, or blending wants
+    /// [`Scene::two_layers`]; this one is for scenes where only one layer is the point.
     fn simple_layer(&mut self, index: usize, priority: u16, screen_block: usize) {
         for row in 0..8 {
             self.vram[0x20 + row * 4] = 0x11;
@@ -60,6 +66,36 @@ impl Scene {
         );
         self.video
             .write16(reg::DISPCNT, self.video.dispcnt | (1 << (8 + index)));
+    }
+
+    /// Two text layers covering the same eight pixels, in different palettes.
+    ///
+    /// `front` is given priority 0 and `behind` priority 1, so `front` wins wherever both draw.
+    /// They share one solid tile but their map cells name different palettes, so the rendered
+    /// colour says *which layer won* rather than merely that something drew — the distinction a
+    /// one-layer scene cannot make, and the reason the compositor's ordering bug went unseen.
+    ///
+    /// `front` renders as palette entry 1 and `behind` as entry 17; a caller sets those two
+    /// colours to tell them apart, and palette entry 0 to see the backdrop.
+    fn two_layers(&mut self, front: usize, behind: usize) {
+        // One solid tile of colour index 1, shared by both layers.
+        for row in 0..8 {
+            self.vram[0x20 + row * 4..0x20 + row * 4 + 4].copy_from_slice(&[0x11; 4]);
+        }
+        for (priority, (index, palette)) in [(front, 0u16), (behind, 1u16)].into_iter().enumerate()
+        {
+            // Distinct screen blocks so the two map cells cannot collide.
+            let block = 8 + priority;
+            let cell = block * SCREEN_BLOCK;
+            // Tile 1, with the palette number in bits 12-15 of the map entry.
+            self.vram[cell..cell + 2].copy_from_slice(&(1u16 | (palette << 12)).to_le_bytes());
+            self.backgrounds.write16(
+                crate::background::CONTROL_BASE + index as u32 * 2,
+                priority as u16 | ((block as u16) << 8),
+            );
+            self.video
+                .write16(reg::DISPCNT, self.video.dispcnt | (1 << (8 + index)));
+        }
     }
 
     fn frame(&self) -> Frame<'_> {
@@ -405,28 +441,171 @@ fn a_sprite_off_this_line_is_not_drawn() {
 // -- Windows and blending --------------------------------------------------
 
 #[test]
-fn a_window_masks_out_the_layers_it_excludes() {
-    // The layer that drew is masked away and the backdrop shows through, rather than the whole
-    // region being cleared.
+fn a_window_excludes_a_layer_from_resolution_rather_than_painting_over_the_winner() {
+    // The contract, and the bug this file's window tests could not previously see. Hardware keeps
+    // an excluded layer out of the priority contest, so the next enabled layer down wins the
+    // pixel. Masking after the fact — letting the front layer win and then overwriting it with the
+    // backdrop — is a different picture: hard-edged rectangles of flat backdrop wherever a window
+    // was used to *filter* rather than to hide, which is text-box interiors, battle HUDs, and a
+    // cave's light radius.
+    //
+    // The window edge runs through the middle of the drawn tile, so one assertion covers each side
+    // and both are pixels the layers actually cover.
     use crate::effects::{reg as ereg, Layer};
     let mut scene = Scene::new(0);
-    scene.colour(0, BLUE);
-    scene.colour(1, RED);
-    scene.simple_layer(0, 0, 8);
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // BG0, in front
+    scene.colour(17, GREEN); // BG1, behind
+    scene.two_layers(0, 1);
 
-    // The layer draws one 8-pixel tile, so the window edge goes through the middle of it:
-    // x in 0..4 is inside, 4..8 is outside, and both halves are drawn pixels.
-    scene.effects.write16(ereg::WIN0H, 4);
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4..8 outside
     scene.effects.write16(ereg::WIN0V, 160);
+    // Inside, only the layer behind may draw; outside, both may.
     scene.effects.write16(ereg::WININ, Layer::Bg1.bit());
-    scene.effects.write16(ereg::WINOUT, Layer::Bg0.bit());
+    scene
+        .effects
+        .write16(ereg::WINOUT, Layer::Bg0.bit() | Layer::Bg1.bit());
     scene
         .video
         .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
 
     let framebuffer = scene.render(0);
-    assert_eq!(framebuffer.pixel(2, 0).b, 0xFF, "masked inside the window");
-    assert_eq!(framebuffer.pixel(6, 0).r, 0xFF, "and drawn outside it");
+    let inside = framebuffer.pixel(2, 0);
+    assert_eq!(
+        inside.g, 0xFF,
+        "inside the window the excluded front layer steps aside and BG1 wins"
+    );
+    assert_eq!(
+        inside.b, 0x00,
+        "and it is BG1's colour, not the backdrop showing through a hole"
+    );
+    assert_eq!(
+        framebuffer.pixel(6, 0).r,
+        0xFF,
+        "outside it BG0 is permitted and still wins"
+    );
+}
+
+#[test]
+fn a_window_that_permits_no_layer_at_all_still_shows_the_backdrop() {
+    // The other half of the contract: excluding every layer is what *does* leave the backdrop, and
+    // the backdrop itself is never maskable — bit 5 is the colour-effect enable, not a
+    // backdrop-enable.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+
+    scene.effects.write16(ereg::WIN0H, 0x00F0);
+    scene.effects.write16(ereg::WIN0V, 0x00A0);
+    scene.effects.write16(ereg::WININ, 0); // nothing may draw
+    scene
+        .effects
+        .write16(ereg::WINOUT, Layer::Bg0.bit() | Layer::Bg1.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).b,
+        0xFF,
+        "with every layer excluded there is nothing left but the backdrop"
+    );
+}
+
+#[test]
+fn winout_excludes_a_layer_outside_the_window_and_reveals_the_one_beneath() {
+    // `WINOUT` is a separate register from `WININ` and takes the same path, so it needs its own
+    // check that it excludes rather than overpaints.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4..8 outside
+    scene.effects.write16(ereg::WIN0V, 160);
+    scene
+        .effects
+        .write16(ereg::WININ, Layer::Bg0.bit() | Layer::Bg1.bit());
+    scene.effects.write16(ereg::WINOUT, Layer::Bg1.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    let framebuffer = scene.render(0);
+    assert_eq!(framebuffer.pixel(2, 0).r, 0xFF, "inside, BG0 still wins");
+    let outside = framebuffer.pixel(6, 0);
+    assert_eq!(outside.g, 0xFF, "outside, BG1 wins in BG0's place");
+    assert_eq!(outside.b, 0x00, "rather than the backdrop");
+}
+
+#[test]
+fn an_object_window_excluding_a_layer_reveals_the_one_beneath() {
+    // The object window reaches the same masking path by a different route — its region comes from
+    // a sprite's shape rather than a rectangle — so it gets the same two-layer check. This is the
+    // case Pokémon Emerald's battle screen actually hits.
+    use crate::effects::{reg as ereg, Layer};
+    const OBJECT_WINDOW: u16 = 2 << 10;
+
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+    scene.simple_sprite(OBJECT_WINDOW, 0); // covers x 0..8 on line 0
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 15));
+
+    // Inside the sprite's shape only the layer behind may draw; outside it, both may.
+    scene.effects.write16(
+        ereg::WINOUT,
+        (Layer::Bg1.bit() << 8) | Layer::Bg0.bit() | Layer::Bg1.bit(),
+    );
+
+    let framebuffer = scene.render(0);
+    let inside = framebuffer.pixel(0, 0);
+    assert_eq!(inside.g, 0xFF, "inside the object window BG1 wins");
+    assert_eq!(inside.b, 0x00, "not the backdrop");
+    assert_eq!(
+        framebuffer.pixel(6, 0).g,
+        0xFF,
+        "the sprite is 8 wide, so this is still inside it"
+    );
+}
+
+#[test]
+fn a_window_can_exclude_the_sprite_layer_and_let_a_background_win() {
+    // Sprites are masked by their own bit, not by a background's, and excluding them must let the
+    // background underneath win rather than punching a backdrop hole through it.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0
+    scene.colour(257, GREEN); // sprite palette 0, colour 1
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "with no window the sprite is in front"
+    );
+
+    scene.effects.write16(ereg::WIN0H, 0x00F0);
+    scene.effects.write16(ereg::WIN0V, 0x00A0);
+    scene.effects.write16(ereg::WININ, Layer::Bg0.bit()); // sprites excluded
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    let masked = scene.render(0).pixel(0, 0);
+    assert_eq!(masked.r, 0xFF, "excluding the sprite lets BG0 win");
+    assert_eq!(masked.b, 0x00, "rather than showing the backdrop");
 }
 
 #[test]

@@ -351,6 +351,28 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   entry, and IRQ return — are each stamped with their literal documented constant
   (`system::BIOS_OPCODE_AFTER_STARTUP` and its three neighbours) by the HLE path standing in for
   that moment.
+- **A masked layer must be excluded from priority resolution, not painted over after it wins.**
+  The GBA compositor resolved the line first and then, for any pixel whose winning layer a window
+  excluded, wrote the backdrop over it. Hardware keeps the excluded layer out of the *contest*, so
+  the next enabled layer down wins — which is a different picture wherever a window is used to
+  filter rather than to hide: text-box interiors, battle HUDs, a cave's light radius, all rendered
+  as hard-edged rectangles of flat backdrop. The contract now lives in
+  `ppu_tile2d::ScanlineBuffer::set`, the single point every renderer commits a pixel through,
+  rather than in each renderer — deliberately, because the GBA composites through *four* paths and
+  the two system-specific ones (affine backgrounds, affine sprites) exist precisely because the
+  shared crate has no notion of a matrix, so a rule enforced per-renderer is a rule they cannot
+  see. That is how the after-the-fact masking got written in the first place.
+- **A compositor test with one drawing layer cannot test ordering.** "Show the layer beneath" and
+  "show the backdrop" are the same pixel when there is only one layer, so such a test passes under
+  either rule — which is why a window test sat green over the bug above. `Scene::two_layers` is the
+  helper; see CONTRIBUTING.md, which now makes two drawing layers a review rule for any test of
+  priority, windows, or blending.
+- **`cargo xtask bench` could not forward `--save-baseline` or `--baseline`.** It ran
+  `cargo bench --workspace`, which also benchmarks every crate's *lib* target, and an ordinary
+  libtest harness rejects criterion's flags outright — so the two flags the command exists to
+  forward, and that prompt 18 requires for any before/after claim, failed before a single benchmark
+  ran. It now names the one criterion target, `-p harness --bench systems`. `--benches` is not
+  enough: a lib target is benchmarked by default too.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

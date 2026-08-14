@@ -269,7 +269,20 @@ fn bench(
     baseline: Option<String>,
     quick: bool,
 ) -> Result<()> {
-    let mut args: Vec<String> = vec!["bench".into(), "--workspace".into(), "--".into()];
+    // Exactly the one criterion bench target, not `--workspace` and not `--benches`. Every
+    // benchmark lives in `testing/harness/benches/systems.rs`, which is declared `harness = false`
+    // so criterion parses its own arguments. Any wider selection also runs *lib* targets, whose
+    // ordinary libtest harness rejects criterion's flags outright — so `--save-baseline` and
+    // `--baseline`, the two flags this command exists to forward, failed before a single benchmark
+    // ran. `--benches` is not enough: a lib target is benchmarked by default too.
+    let mut args: Vec<String> = vec![
+        "bench".into(),
+        "-p".into(),
+        "harness".into(),
+        "--bench".into(),
+        "systems".into(),
+        "--".into(),
+    ];
     if quick {
         // Enough to see a change of a few percent, not enough to quote. The defaults take minutes.
         args.extend(["--warm-up-time".into(), "1".into()]);

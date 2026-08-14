@@ -147,6 +147,16 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     ];
     let present = std::array::from_fn(|i| enabled[i] && kinds[i].is_some());
 
+    // Both computed before anything composites, because a window decides which layers may *enter*
+    // priority resolution rather than what happens to the winner afterwards. The object window's
+    // own shape comes from a scratch render that is deliberately left unmasked — it is computing
+    // the mask, so it cannot be subject to it.
+    let object_window = object_window_mask(frame, line);
+    let visible = window_mask(frame, line, object_window.as_deref());
+    if let Some(visible) = &visible {
+        scanline.set_write_mask(layer_bits(visible));
+    }
+
     for index in frame.backgrounds.draw_order(present) {
         match kinds[index] {
             Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut scanline),
@@ -168,6 +178,11 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let under = (frame.effects.blend_mode() == BlendMode::Alpha).then(|| {
         let mut under = ScanlineBuffer::new(SCREEN_WIDTH as usize);
         under.clear();
+        // The same windows apply to what is underneath: a layer a window excludes is not merely
+        // hidden, it is not there, so it cannot be the lower half of a blend either.
+        if let Some(visible) = &visible {
+            under.set_write_mask(layer_bits(visible));
+        }
         for index in frame.backgrounds.draw_order(present) {
             if frame.effects.is_first_target(Layer::background(index)) {
                 continue;
@@ -190,25 +205,65 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let backdrop = palette.lookup_bg(0, 0);
     let row = framebuffer.row_mut(line);
     scanline.resolve_into(&palette, backdrop, row);
-    let object_window = object_window_mask(frame, line);
     let composed = Composed {
         scanline: &scanline,
         under: under.as_ref(),
-        object_window: object_window.as_deref(),
+        visible: visible.as_deref(),
     };
-    apply_effects(frame, line, composed, &palette, backdrop, row);
+    apply_effects(frame, composed, &palette, backdrop, row);
+}
+
+/// Which layers each pixel of this line may draw, or `None` when no window is enabled.
+///
+/// Computed once per line and consumed twice: [`layer_bits`] narrows it to the write mask the
+/// scanline buffers enforce, and [`apply_effects`] reads bit 5 of the same value for the
+/// colour-effect enable. Those are two different questions about one register read, and asking
+/// `Effects::visible_layers` twice per pixel to answer them separately would be the only cost of
+/// keeping them apart.
+fn window_mask(frame: &Frame<'_>, line: u32, object_window: Option<&[bool]>) -> Option<Vec<u16>> {
+    let windows = [
+        frame.video.dispcnt & (1 << 13) != 0,
+        frame.video.dispcnt & (1 << 14) != 0,
+        frame.video.dispcnt & (1 << 15) != 0,
+    ];
+    // With every window disabled the registers are not consulted at all, which is what a game
+    // that never uses them relies on — and it keeps the buffers unmasked, so the mask check in
+    // `ScanlineBuffer::set` costs a single not-taken branch.
+    if !windows[0] && !windows[1] && !windows[2] {
+        return None;
+    }
+    Some(
+        (0..SCREEN_WIDTH)
+            .map(|x| {
+                let inside = object_window.is_some_and(|mask| mask[x as usize]);
+                frame.effects.visible_layers(x, line, windows, inside)
+            })
+            .collect(),
+    )
+}
+
+/// Narrow a per-pixel window mask to just the layer bits a [`ScanlineBuffer`] enforces.
+///
+/// Drops bit 5, which is the colour-effect enable rather than a sixth layer — the same bit
+/// position the backdrop occupies in `BLDCNT`, meaning two different things in two register sets.
+/// Handing it through as if it were a layer would let it mask a layer that does not exist.
+fn layer_bits(visible: &[u16]) -> Vec<u8> {
+    visible
+        .iter()
+        .map(|&v| (v & ppu_tile2d::ALL_LAYERS as u16) as u8)
+        .collect()
 }
 
 /// One composited line, and the two extra views of it the colour effects need.
 ///
 /// Grouped because they are three answers about the same line and always travel together: what won
-/// each pixel, what was beneath the winner, and which pixels an object window covers.
+/// each pixel, what was beneath the winner, and which layers each pixel permits.
 struct Composed<'a> {
     scanline: &'a ScanlineBuffer,
     /// What lies under the winning pixel, composed only when an alpha blend is configured.
     under: Option<&'a ScanlineBuffer>,
-    /// Which pixels the object window covers, `None` when it is switched off.
-    object_window: Option<&'a [bool]>,
+    /// Per-pixel window mask, `None` when no window is enabled. See [`window_mask`].
+    visible: Option<&'a [u16]>,
 }
 
 /// Where the object window covers this line.
@@ -284,14 +339,19 @@ fn layer_of(indexed: ppu_tile2d::IndexedPixel) -> Layer {
     }
 }
 
-/// Mask out layers a window excludes, then blend what remains.
+/// Blend the resolved line, where a colour effect is configured and the window allows it.
 ///
-/// Runs after the line is resolved rather than during it, because both questions are about the
-/// *winning* pixel: which layer produced it, and what is behind it. Threading them through the
-/// per-layer draw would mean asking them once per layer per pixel instead of once per pixel.
+/// Runs after the line is resolved because both its questions are about the *winning* pixel: which
+/// layer produced it, and what is behind it.
+///
+/// It no longer decides which layers are visible. That is a question about who may enter priority
+/// resolution, not about the winner, and answering it here — by overpainting the winner with the
+/// backdrop — produced hard-edged rectangles of flat backdrop wherever a window was used to reveal
+/// a *lower* layer rather than to hide everything. Hardware excludes the masked layer from the
+/// contest so the next one down wins; that now happens during compositing, in
+/// `ScanlineBuffer::set`. See the `ppu-tile2d` crate docs.
 fn apply_effects(
     frame: &Frame<'_>,
-    line: u32,
     composed: Composed<'_>,
     palette: &GbaPalette<'_>,
     backdrop: Rgba8,
@@ -300,15 +360,12 @@ fn apply_effects(
     let Composed {
         scanline,
         under,
-        object_window,
+        visible,
     } = composed;
-    let windows = [
-        frame.video.dispcnt & (1 << 13) != 0,
-        frame.video.dispcnt & (1 << 14) != 0,
-        frame.video.dispcnt & (1 << 15) != 0,
-    ];
     let mode = frame.effects.blend_mode();
-    if !windows[0] && !windows[1] && !windows[2] && mode == BlendMode::None {
+    // Windows have already been applied to the buffer, so with no colour effect there is nothing
+    // left for this pass to do.
+    if mode == BlendMode::None {
         return;
     }
 
@@ -316,24 +373,15 @@ fn apply_effects(
         let indexed = scanline.get(x);
         let layer = layer_of(indexed);
 
-        let in_object_window = object_window.is_some_and(|mask| mask[x]);
-        let visible = frame
-            .effects
-            .visible_layers(x as u32, line, windows, in_object_window);
-        // The backdrop is not maskable: bit 5 of a window register is the colour-effect enable,
-        // not a backdrop-enable, so testing it as a layer bit asks the wrong question entirely.
-        if layer != Layer::Backdrop && visible & layer.bit() == 0 {
-            write_pixel(pixel, backdrop);
+        if !frame.effects.is_first_target(layer) {
             continue;
         }
-
-        if mode == BlendMode::None || !frame.effects.is_first_target(layer) {
-            continue;
-        }
-        // …and here it is asked the right one. A game darkening the world behind a menu switches
-        // the effect off inside the menu's window; honouring only the layer bits darkened the menu
-        // too, which is why its panels came out grey rather than white.
-        if visible & Layer::COLOUR_EFFECT == 0 {
+        // Bit 5 is the one thing a window still says about the *winner*: whether colour effects
+        // apply inside that region at all. It is not a sixth layer, which is why it survived the
+        // move of layer masking into compositing rather than going with it. A game darkening the
+        // world behind a menu switches the effect off inside the menu's window; honouring only the
+        // layer bits darkened the menu too, and its panels came out grey rather than white.
+        if visible.is_some_and(|mask| mask[x] & Layer::COLOUR_EFFECT == 0) {
             continue;
         }
         let top = Rgba8 {

@@ -94,6 +94,23 @@ this path, at this frame — and never waits on a lock, because it has a 16.7 ms
 - Adding a new accuracy test ROM: register it with the harness rather than adding a bespoke test
   binary, so it participates in the CI suite and per-system status reporting automatically.
 
+### Every compositor test needs at least two layers drawing
+
+**A compositor test with one drawing layer cannot test ordering, and will pass whatever the
+ordering rule is.** With a single layer, "show the layer beneath" and "show the backdrop" are the
+same pixel, so a test written that way asserts nothing about who won — only that *something* did.
+
+This is not hypothetical. The GBA compositor applied windows after resolving the line, masking the
+winning layer away and overpainting it with the backdrop rather than excluding it from resolution
+so the next layer down could win. A window test covered exactly that code and passed for months,
+because its scene had one layer and both rules produce the same pixel there. The visible cost was
+hard-edged rectangles of flat backdrop wherever a game used a window to filter rather than to hide.
+
+So: any new test about priority, windows, or blending uses a scene where **two layers both draw the
+pixel under test**, and asserts *which one* is visible by giving them different palettes. In
+`system-gba` that is `Scene::two_layers`; `Scene::simple_layer` is for scenes where a single layer
+is genuinely the point. A reviewer should push back on a one-layer test of any ordering rule.
+
 ### Known failures are tracked, not silenced
 
 A ROM that does not pass yet carries an `expected_failure` note in `testing/harness/src/corpus.rs`.
