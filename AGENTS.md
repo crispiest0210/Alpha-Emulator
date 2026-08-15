@@ -520,7 +520,10 @@ Then, in order:
   That is what real hardware with a dead battery does, so it is an accurate outcome rather than a
   bug, but time-of-day events never fire. The pins are at `0x080000C4`-`0x080000C8`, currently
   reading as ordinary ROM.
-- **EEPROM saves are reported absent rather than emulated**, and mosaic is not implemented.
+- **EEPROM saves are reported absent rather than emulated.** Mosaic is implemented for text
+  backgrounds and ordinary sprites, both axes; affine backgrounds, the modes 3-5 bitmap layer, and
+  affine sprites are not covered, because all three sample through per-scanline state that is
+  accumulated once and not kept for any line but the latest.
 
 ### The gaps behind it
 
@@ -648,10 +651,19 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   compare. Two traps, both paid for: dmg-acid2's reference is 2-bit greyscale, so a decoder must
   *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
   rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
-- Mosaic and EEPROM saves are not implemented. The GBA's object window now is: the mask is built by
-  rendering the `ObjectWindow`-mode sprites into a scratch scanline buffer rather than re-deriving
-  tile addressing, flips, depth and the affine transform a second time — each of which is a place
-  for two paths to drift apart.
+- **EEPROM saves are not implemented.**
+- **Mosaic is implemented for text backgrounds and ordinary sprites, both axes** — the
+  sample-and-hold hardware defines, holding a quantized source line by asking the renderer for it
+  directly (nothing survives between calls) and a quantized source column by resampling a
+  full-resolution scratch render. Affine backgrounds, the modes 3-5 bitmap layer, and affine
+  sprites are not covered: all three sample through per-scanline state accumulated once and kept
+  for no line but the latest, so holding several output lines to one source line would need
+  snapshotting that state at every mosaic block boundary. OBJ mosaic quantizes a sprite's own
+  *local* pixel coordinates rather than its screen position — anchoring the blockiness to the
+  sprite's own top-left corner is what keeps the pattern from visibly swimming as the sprite moves.
+- The GBA's object window is: the mask is built by rendering the `ObjectWindow`-mode sprites into a
+  scratch scanline buffer rather than re-deriving tile addressing, flips, depth and the affine
+  transform a second time — each of which is a place for two paths to drift apart.
 - **Sprite bit depth is per sprite, not per call.** It rides on `ppu_tile2d::Sprite` because bit 13
   of a GBA OAM entry selects 16 or 256 colours and one scanline can hold both. It used to be an
   argument to `render_sprites` and every GBA sprite was rendered as 16-colour; a 256-colour one came

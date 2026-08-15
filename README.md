@@ -28,7 +28,7 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
@@ -59,10 +59,18 @@ Two gaps are worth stating plainly because you will notice both:
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
 
-Mosaic and EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
+EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
 working by play on a commercial title. SRAM and Flash work and a real
 cartridge's chip and size are detected correctly, but no game has yet been played far enough to
 write a save file, so that last step is unverified.
+
+Mosaic is implemented for text backgrounds and ordinary sprites, both axes — the sample-and-hold
+effect hardware defines, holding a quantized source line by asking the renderer for it directly
+and a quantized source column by resampling a full-resolution scratch render. Affine backgrounds,
+the bitmap layer in modes 3-5, and affine (rotated or scaled) sprites are not covered: all three
+sample through per-scanline state that is accumulated once and kept for no line but the latest,
+so holding several output lines to one source line would need snapshotting that state at every
+mosaic block boundary.
 
 #### The bug worth reading about before touching timing anywhere
 
@@ -254,7 +262,7 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10; **PSG mixing still not wired** |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
-| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent; a bitmap mode is background 2 sampled through its affine transform like any other layer, subject to the same enable bit, windows, blend unit, and sprite-priority rule |
+| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent; a bitmap mode is background 2 sampled through its affine transform like any other layer, subject to the same enable bit, windows, blend unit, and sprite-priority rule; mosaic on text backgrounds and ordinary sprites, both axes — **not affine backgrounds, the bitmap layer, or affine sprites** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass, excluding at each pixel exactly the layer that pixel's own winner came from, and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **EEPROM reported absent rather than emulated** |

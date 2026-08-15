@@ -28,9 +28,16 @@
 //! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
 //!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
 //!   write a save file, so the path from a game's write to a file on disk is unverified.
-//! - **Mosaic is not implemented.** The object window now is: a sprite whose graphics mode is
-//!   `ObjectWindow` draws nothing and its shape is a region instead, with `WINOUT`'s high byte
-//!   saying what is visible inside it.
+//! - **Mosaic is implemented for text backgrounds and ordinary sprites**, both axes, as the
+//!   sample-and-hold hardware defines it — BG mosaic quantizes the *screen* position before
+//!   sampling; OBJ mosaic quantizes the sprite's own *local* position, so a mosaiced sprite looks
+//!   the same wherever it is on screen. **Not covered: affine backgrounds, the bitmap layer in
+//!   modes 3-5, and affine (rotated or scaled) sprites** — all three sample through per-scanline
+//!   state that is accumulated once and not kept for any line but the latest, so a vertical
+//!   mosaic block would need snapshotting that state at every block boundary, which nothing here
+//!   does yet.
+//! - The object window is: a sprite whose graphics mode is `ObjectWindow` draws nothing and its
+//!   shape is a region instead, with `WINOUT`'s high byte saying what is visible inside it.
 //! - **No cartridge GPIO**, so a game with a real-time clock finds none. That is a supported
 //!   hardware state rather than a failure — a cartridge with a dead battery behaves the same way
 //!   and games handle it — but the clock never advances.

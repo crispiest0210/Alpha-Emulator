@@ -419,28 +419,77 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         height,
         priority: layer.priority(),
     };
+
+    if !layer.mosaic() {
+        let params = BackgroundParams {
+            layer: index as u8,
+            // The layer's real size, not `full_line`'s 32x32 default. A background may be 64
+            // tiles wide, 64 tall, or both, and `render_text_background` wraps on *these*
+            // numbers — so leaving them at 32 made a larger map wrap at half its size and never
+            // reach its second screen block. Pokémon Emerald's battle menu lives in exactly that
+            // block, on a 32x64 background scrolled to 320: the whole bottom of the screen came
+            // out as backdrop.
+            map_width: width,
+            map_height: height,
+            // Index 0 is transparent on this machine: a background is one of four layers, and the
+            // one behind — or the backdrop — shows through. Writing it made the frontmost enabled
+            // text layer opaque across the whole screen, which covered the real picture with flat
+            // bands of one palette colour. The affine and sprite paths here have always skipped
+            // it.
+            transparent_index_zero: true,
+            ..BackgroundParams::full_line(
+                line,
+                layer.scroll_x as u32,
+                layer.scroll_y as u32,
+                layer.bit_depth(),
+            )
+        };
+        render_text_background(&map, frame.vram, &params, scanline);
+        return;
+    }
+
+    // Mosaic is a sample-and-hold: the screen is divided into `(h, v)`-pixel blocks and every
+    // pixel in a block shows the colour of the block's top-left one. Vertical is a held source
+    // *line*: quantizing `line` to the block boundary before rendering makes every screen line
+    // inside a block sample from the same source row, at no extra cost, because nothing about
+    // this renderer holds state across calls to begin with. Horizontal cannot be expressed the
+    // same way — a rendered row already commits to one colour per column by the time it reaches
+    // the shared buffer — so the row renders once at full resolution into a scratch buffer, and
+    // every real column re-samples its own block's leftmost column from it. Only text layers do
+    // this: an affine background's per-line state is accumulated externally across the whole
+    // frame rather than recomputed from `line`, so holding it across several output lines would
+    // need snapshotting that state at block boundaries, which nothing here does — affine
+    // background mosaic, and the bitmap layer's (modes 3-5 sample through the same accumulated
+    // affine state), are not implemented.
+    let (h_size, v_size) = frame.effects.bg_mosaic_size();
+    let effective_line = (line / v_size) * v_size;
     let params = BackgroundParams {
         layer: index as u8,
-        // The layer's real size, not `full_line`'s 32x32 default. A background may be 64 tiles
-        // wide, 64 tall, or both, and `render_text_background` wraps on *these* numbers — so
-        // leaving them at 32 made a larger map wrap at half its size and never reach its second
-        // screen block. Pokémon Emerald's battle menu lives in exactly that block, on a 32x64
-        // background scrolled to 320: the whole bottom of the screen came out as backdrop.
         map_width: width,
         map_height: height,
-        // Index 0 is transparent on this machine: a background is one of four layers, and the one
-        // behind — or the backdrop — shows through. Writing it made the frontmost enabled text
-        // layer opaque across the whole screen, which covered the real picture with flat bands of
-        // one palette colour. The affine and sprite paths here have always skipped it.
         transparent_index_zero: true,
         ..BackgroundParams::full_line(
-            line,
+            effective_line,
             layer.scroll_x as u32,
             layer.scroll_y as u32,
             layer.bit_depth(),
         )
     };
-    render_text_background(&map, frame.vram, &params, scanline);
+    let mut scratch = ScanlineBuffer::new(scanline.width());
+    scratch.clear();
+    render_text_background(&map, frame.vram, &params, &mut scratch);
+    for x in 0..scanline.width() {
+        let effective_x = (x as u32 / h_size) * h_size;
+        let pixel = scratch.get(effective_x as usize);
+        // A transparent source pixel must not be written at all: `set` treats a pixel with no
+        // layer bit as always committing, so writing the backdrop explicitly would paint over
+        // whatever a farther layer already drew here, rather than leaving it showing through as
+        // an untouched column would.
+        if pixel.source == PixelSource::Backdrop {
+            continue;
+        }
+        scanline.set(x, pixel);
+    }
 }
 
 /// Draw one affine background layer.
@@ -452,6 +501,13 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
 /// Affine layers are always 256-colour and have no per-tile attributes — the map is one byte per
 /// tile with no palette, flip, or priority bits, because the transform is doing the work those
 /// would have done.
+///
+/// Mosaic is not applied here even when `BGxCNT`'s bit is set. [`draw_text_layer`]'s vertical
+/// mosaic works by asking the renderer for an earlier line's state, which is free there because
+/// nothing survives between calls; this layer's `current_x`/`current_y` are instead accumulated
+/// once per real line by the system driver and never kept for any line but the latest, so holding
+/// several output lines to one source line would need snapshotting that state at every mosaic
+/// block boundary, which nothing here does.
 fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuffer) {
     let layer = frame.backgrounds.layers[index];
     let affine = &frame.affine[index - 2];
@@ -517,6 +573,10 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
 /// unchanged. Modes 3 and 5 have no palette indirection at all, a 15-bit colour directly in VRAM,
 /// which is what [`ppu_tile2d::IndexedPixel::direct_color`] exists to carry through the indexed
 /// pipeline; neither has a transparent index, so every in-bounds pixel is opaque.
+///
+/// Mosaic is not applied here for the same reason it is not applied to an affine tile
+/// background — see [`draw_affine_layer`] — this layer samples through the very same
+/// per-scanline accumulated affine state.
 fn draw_bitmap_layer(frame: &Frame<'_>, mode: u16, scanline: &mut ScanlineBuffer) {
     let layer = frame.backgrounds.layers[2];
     let affine = &frame.affine[0];
@@ -649,6 +709,10 @@ fn compose_sprites(
     for index in sprite_order(oam, line, selection) {
         let object = oam.objects[index];
         if object.mode == ObjectMode::Normal {
+            if object.mosaic {
+                draw_mosaic_sprite(frame, &object, line, one_dimensional, &mut pass, scanline);
+                continue;
+            }
             // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite
             // decodes differently from a 16-colour one — but a scanline can hold both, so the
             // depth rides on each sprite rather than on this call.
@@ -720,6 +784,11 @@ fn draw_sprites(
 /// matrix says which texture pixel it came from. A double-size sprite's box is twice its own
 /// size, which is what stops a rotation clipping against its own corners — the extra area is
 /// deliberately empty until the rotation moves something into it.
+///
+/// Mosaic is not applied even when the sprite's attribute bit is set. [`draw_mosaic_sprite`]
+/// quantizes the sprite's own local pixel coordinates directly, which only works because an
+/// ordinary sprite's local coordinate is a simple offset from its screen position; an affine
+/// sprite's local coordinate comes from the matrix instead, and mosaic there is not implemented.
 fn draw_affine_sprite(
     frame: &Frame<'_>,
     oam: &ObjectAttributeMemory,
@@ -795,6 +864,67 @@ fn draw_affine_sprite(
             // The GBA compares priorities rather than consulting a "behind background" bit.
             false,
         );
+    }
+}
+
+/// Draw one ordinary (non-affine) sprite with mosaic applied.
+///
+/// Mosaic quantizes the sprite's own *local* pixel coordinates, not the screen ones it happens to
+/// land on: a sprite's blockiness has to look the same wherever it is positioned, or moving it one
+/// pixel would shift which of its own pixels share a block and the pattern would visibly swim.
+/// Sprite-local coordinates start at the sprite's own top-left corner, not the screen's.
+///
+/// Vertical is a held source *row*: [`ppu_tile2d::render_sprite`] samples strictly from
+/// `line - sprite.y`, so asking it for a quantized line produces the same row for every screen
+/// line inside a block, at no extra cost. Horizontal cannot be expressed the same way — a rendered
+/// row already commits to one colour per column by the time it reaches the shared buffer — so the
+/// sprite renders once at full resolution into a scratch buffer, and every real column re-samples
+/// its own block's leftmost column from it, the same trick [`draw_text_layer`] uses.
+///
+/// Affine (rotated or scaled) sprites are not covered: their local coordinate comes from the
+/// matrix rather than directly from the screen position, and mosaic there is not implemented.
+fn draw_mosaic_sprite(
+    frame: &Frame<'_>,
+    object: &Object,
+    line: u32,
+    one_dimensional: bool,
+    pass: &mut SpritePass,
+    scanline: &mut ScanlineBuffer,
+) {
+    let row = line as i32 - object.y;
+    if row < 0 || row >= object.height as i32 {
+        return;
+    }
+    let (h_size, v_size) = frame.effects.obj_mosaic_size();
+    let effective_row = (row / v_size as i32) * v_size as i32;
+    let effective_line = (object.y + effective_row) as u32;
+
+    let mut scratch = ScanlineBuffer::new(scanline.width());
+    scratch.clear();
+    let mut scratch_pass = SpritePass::new(scanline.width(), SpriteRule::ByPriority);
+    ppu_tile2d::render_sprite(
+        &object.to_sprite(one_dimensional),
+        frame.vram,
+        effective_line,
+        &mut scratch_pass,
+        &mut scratch,
+    );
+
+    for local_x in 0..object.width as i32 {
+        let x = object.x + local_x;
+        if x < 0 || x as usize >= scanline.width() {
+            continue;
+        }
+        let effective_local_x = (local_x / h_size as i32) * h_size as i32;
+        let effective_x = object.x + effective_local_x;
+        if effective_x < 0 || effective_x as usize >= scanline.width() {
+            continue;
+        }
+        let pixel = scratch.get(effective_x as usize);
+        if pixel.source != PixelSource::Sprite {
+            continue;
+        }
+        pass.place(scanline, x as usize, pixel, false);
     }
 }
 

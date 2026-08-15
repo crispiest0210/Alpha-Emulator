@@ -1367,3 +1367,218 @@ fn an_eight_bit_sprite_in_two_dimensional_mapping_finds_its_second_row() {
         "and the second comes from 1024 bytes on"
     );
 }
+
+// -- Mosaic ---------------------------------------------------------------
+
+/// A 4bpp tile whose eight columns read 1, 2, 3, 1, 2, 3, 1, 2 in every row.
+///
+/// Backgrounds and sprites are both 4bpp or 8bpp on this machine — there is no 2bpp mode, unlike
+/// the Game Boy — so one striped tile shape serves both. Index 0 is deliberately absent: it is
+/// this machine's transparency, and a mosaic block that happened to land on it would be
+/// indistinguishable from a hole rather than a held colour.
+fn striped_tile_4bpp() -> [u8; 32] {
+    let mut tile = [0u8; 32];
+    for row in 0..8 {
+        tile[row * 4] = 0x21; // pixel0=1 (low nibble), pixel1=2 (high nibble)
+        tile[row * 4 + 1] = 0x13; // pixel2=3, pixel3=1
+        tile[row * 4 + 2] = 0x32; // pixel4=2, pixel5=3
+        tile[row * 4 + 3] = 0x21; // pixel6=1, pixel7=2
+    }
+    tile
+}
+
+const WHITE: u16 = 0x7FFF;
+
+#[test]
+fn horizontal_bg_mosaic_holds_each_source_column_across_its_block() {
+    // Hardware's sample-and-hold: with a horizontal block size of two, screen columns 0-1 must
+    // both show source column 0's colour and 2-3 must both show column 2's.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(2, GREEN);
+    scene.colour(3, WHITE);
+    scene.vram[0x20..0x40].copy_from_slice(&striped_tile_4bpp());
+    let cell = 8 * SCREEN_BLOCK;
+    scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+    scene.backgrounds.write16(
+        crate::background::CONTROL_BASE,
+        (8 << 8) | 1 << 6, /* BGxCNT mosaic bit */
+    );
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+    scene.effects.write16(ereg::MOSAIC, 1); // BG H-size field 1 -> block size 2
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "column 0, unmosaiced source colour"
+    );
+    assert_eq!(frame.pixel(1, 0).r, 0xFF, "held to column 0's colour");
+    assert_eq!(frame.pixel(2, 0), Rgba8::WHITE, "column 2, its own block");
+    assert_eq!(frame.pixel(3, 0), Rgba8::WHITE, "held to column 2's colour");
+}
+
+#[test]
+fn vertical_bg_mosaic_holds_each_source_row_across_its_block() {
+    // The same effect down the screen: with a vertical block size of two, line 1 must show line
+    // 0's row rather than its own, because a rendered line has no notion of "next" to hold from
+    // — the previous rendered line simply keeps being redrawn until the block ends.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(2, GREEN);
+    // Row 0 solid colour 1, row 1 solid colour 2 (4bpp: one byte holds two same-index pixels).
+    scene.vram[0x20..0x24].copy_from_slice(&[0x11; 4]);
+    scene.vram[0x24..0x28].copy_from_slice(&[0x22; 4]);
+    let cell = 8 * SCREEN_BLOCK;
+    scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+    scene.backgrounds.write16(
+        crate::background::CONTROL_BASE,
+        (8 << 8) | 1 << 6, /* BGxCNT mosaic bit */
+    );
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+    scene.effects.write16(ereg::MOSAIC, 1 << 4); // BG V-size field 1 -> block size 2
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "line 0 samples row 0");
+    assert_eq!(
+        scene.render(1).pixel(0, 1).r,
+        0xFF,
+        "line 1 is held to row 0's colour, not row 1's"
+    );
+}
+
+#[test]
+fn a_bg_mosaic_size_of_zero_is_exactly_the_unmosaiced_picture() {
+    // The regression that matters: the mosaic bit being *on* with every size field at zero must
+    // produce the identical picture to mosaic being off, since a one-pixel block changes nothing.
+    use crate::effects::reg as ereg;
+    let build = |mosaic_on: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(1, RED);
+        scene.colour(2, GREEN);
+        scene.colour(3, WHITE);
+        scene.vram[0x20..0x40].copy_from_slice(&striped_tile_4bpp());
+        let cell = 8 * SCREEN_BLOCK;
+        scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+        let control = (8u16 << 8)
+            | if mosaic_on {
+                1 << 6 /* BGxCNT mosaic bit */
+            } else {
+                0
+            };
+        scene
+            .backgrounds
+            .write16(crate::background::CONTROL_BASE, control);
+        scene
+            .video
+            .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+        scene.effects.write16(ereg::MOSAIC, 0);
+        scene
+    };
+
+    let plain = build(false).render(0);
+    let mosaiced = build(true).render(0);
+    for x in 0..8 {
+        assert_eq!(
+            plain.pixel(x, 0),
+            mosaiced.pixel(x, 0),
+            "column {x}: a zero-size block must not change anything"
+        );
+    }
+}
+
+#[test]
+fn horizontal_obj_mosaic_holds_each_local_column_across_its_block() {
+    // The sprite's own eight-column stripe, exactly as the background test uses, but anchored to
+    // the sprite's local origin rather than the screen's — see `draw_mosaic_sprite`.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, RED); // sprite palette 0, index 1
+    scene.colour(258, GREEN); // index 2
+    scene.colour(259, WHITE); // index 3
+    let base = crate::objects::OBJ_TILE_BASE;
+    scene.vram[base..base + 32].copy_from_slice(&striped_tile_4bpp());
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+    );
+    scene.set_sprite(0, 1 << 12, 0, 0); // mosaic bit, plain sprite, at the origin
+    scene.effects.write16(ereg::MOSAIC, 1 << 8); // OBJ H-size field 1 -> block size 2
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "column 0, unmosaiced source colour"
+    );
+    assert_eq!(frame.pixel(1, 0).r, 0xFF, "held to column 0's colour");
+    assert_eq!(frame.pixel(2, 0), Rgba8::WHITE, "column 2, its own block");
+    assert_eq!(frame.pixel(3, 0), Rgba8::WHITE, "held to column 2's colour");
+}
+
+#[test]
+fn vertical_obj_mosaic_holds_each_local_row_across_its_block() {
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, RED);
+    scene.colour(258, GREEN);
+    let base = crate::objects::OBJ_TILE_BASE;
+    // Row 0 solid colour 1, row 1 solid colour 2.
+    scene.vram[base..base + 4].copy_from_slice(&[0x11; 4]);
+    scene.vram[base + 4..base + 8].copy_from_slice(&[0x22; 4]);
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+    );
+    scene.set_sprite(0, 1 << 12, 0, 0);
+    scene.effects.write16(ereg::MOSAIC, 1 << 12); // OBJ V-size field 1 -> block size 2
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "line 0 samples row 0");
+    assert_eq!(
+        scene.render(1).pixel(0, 1).r,
+        0xFF,
+        "line 1 is held to row 0's colour, not row 1's"
+    );
+}
+
+#[test]
+fn an_obj_mosaic_size_of_zero_is_exactly_the_unmosaiced_picture() {
+    use crate::effects::reg as ereg;
+    let build = |mosaic_on: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(257, RED);
+        scene.colour(258, GREEN);
+        scene.colour(259, WHITE);
+        let base = crate::objects::OBJ_TILE_BASE;
+        scene.vram[base..base + 32].copy_from_slice(&striped_tile_4bpp());
+        scene.video.write16(
+            reg::DISPCNT,
+            scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+        );
+        let attr0 = if mosaic_on { 1 << 12 } else { 0 };
+        scene.set_sprite(0, attr0, 0, 0);
+        scene.effects.write16(ereg::MOSAIC, 0);
+        scene
+    };
+
+    let plain = build(false).render(0);
+    let mosaiced = build(true).render(0);
+    for x in 0..8 {
+        assert_eq!(
+            plain.pixel(x, 0),
+            mosaiced.pixel(x, 0),
+            "column {x}: a zero-size OBJ block must not change anything"
+        );
+    }
+}
