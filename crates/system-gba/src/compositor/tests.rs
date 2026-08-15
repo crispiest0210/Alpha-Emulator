@@ -98,6 +98,20 @@ impl Scene {
         }
     }
 
+    /// Enable background 2 — the bitmap's slot in modes 3-5 — and give it the identity transform,
+    /// which is what every game that does not mean to rotate its bitmap sets up before relying on
+    /// the picture landing where it was drawn.
+    ///
+    /// Mode and the background 2 enable bit are genuinely separate registers on hardware, so this
+    /// only sets the enable bit; a caller picks the mode through [`Scene::new`] as usual, and a
+    /// test that wants to check the enable bit's own effect writes `DISPCNT` directly instead of
+    /// calling this.
+    fn enable_bitmap(&mut self) {
+        self.video
+            .write16(reg::DISPCNT, self.video.dispcnt | (1 << 10));
+        self.affine[0].matrix = crate::affine::IDENTITY;
+    }
+
     fn frame(&self) -> Frame<'_> {
         Frame {
             video: &self.video,
@@ -245,8 +259,154 @@ fn forced_blank_shows_white_and_ignores_every_layer() {
 #[test]
 fn a_bitmap_mode_draws_the_bitmap_rather_than_a_tile_layer() {
     let mut scene = Scene::new(3);
+    scene.enable_bitmap();
     scene.vram[0..2].copy_from_slice(&GREEN.to_le_bytes());
     assert_eq!(scene.render(0).pixel(0, 0).g, 0xFF);
+}
+
+#[test]
+fn a_rotated_mode_three_bitmap_samples_a_different_texture_pixel_per_column() {
+    // A bitmap mode is background 2 wearing a direct-colour format; it is sampled through the
+    // very same affine transform an affine tile background is, so a matrix other than the
+    // identity must visibly rotate the picture. Writing the bitmap straight to the framebuffer —
+    // what this used to do — could never produce that: the matrix would simply never be
+    // consulted, whatever the registers held.
+    let mut scene = Scene::new(3);
+    scene.enable_bitmap();
+    // Swap the axes: screen column x samples texture row x of column 0, instead of column x of
+    // row 0 as the identity transform would.
+    scene.affine[0].matrix.pa = 0;
+    scene.affine[0].matrix.pc = 1 << crate::affine::FRACTIONAL_BITS;
+    // A marker at texture column 0, row 5 — screen column 5 finds it only through the rotation;
+    // under the identity transform screen column 5 would instead read texture column 5, row 0,
+    // which is untouched.
+    let offset = 5 * (SCREEN_WIDTH as usize * 2);
+    scene.vram[offset..offset + 2].copy_from_slice(&GREEN.to_le_bytes());
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(5, 0).g,
+        0xFF,
+        "screen column 5 sampled texture row 5 through the rotated transform"
+    );
+    assert_eq!(
+        frame.pixel(0, 0).g,
+        0,
+        "screen column 0 sampled texture row 0, where nothing was drawn"
+    );
+}
+
+#[test]
+fn a_priority_three_sprite_is_hidden_behind_a_mode_three_bitmap() {
+    // On hardware a bitmap mode is background 2 with an ordinary priority, so a sprite compares
+    // against it exactly as it would against any other background — including losing. The bitmap
+    // path used to write every sprite pixel over the bitmap unconditionally, with no comparison
+    // at all, so a farther sprite always won.
+    let mut scene = Scene::new(3);
+    scene.enable_bitmap();
+    // Background 2's own priority, lower numbers nearer: give it the frontmost priority so a
+    // priority-3 (furthest) sprite loses to it everywhere the bitmap actually drew.
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 2 * 2, 0);
+    for x in 0..SCREEN_WIDTH as usize {
+        scene.vram[x * 2..x * 2 + 2].copy_from_slice(&RED.to_le_bytes());
+    }
+    scene.colour(257, GREEN);
+    scene.sprite_tiles();
+    // Priority 3, attribute 2 bits 10-11.
+    scene.set_sprite(0, 0, 0, 3 << 10);
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "the bitmap, at background 2's priority 0, hid the priority-3 sprite"
+    );
+}
+
+#[test]
+fn a_window_excluding_background_two_reveals_the_backdrop_inside_it_in_mode_four() {
+    // A bitmap mode's picture is background 2, so a window that excludes it does exactly what it
+    // would to any other background: the pixel is kept out of priority resolution entirely and
+    // the backdrop shows, rather than the bitmap being drawn regardless and the window doing
+    // nothing at all — which is what writing it straight to the framebuffer, bypassing the
+    // compositor, used to mean.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(4);
+    scene.enable_bitmap();
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // mode 4 palette entry 1
+    for x in 0..SCREEN_WIDTH as usize {
+        scene.vram[x] = 1;
+    }
+
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4.. outside
+    scene.effects.write16(ereg::WIN0V, 160);
+    scene.effects.write16(ereg::WININ, 0); // background 2 excluded inside the window
+    scene.effects.write16(ereg::WINOUT, Layer::Bg2.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13)); // window 0 enabled
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(2, 0).b,
+        0xFF,
+        "the backdrop shows inside the window"
+    );
+    assert_eq!(
+        frame.pixel(6, 0).r,
+        0xFF,
+        "and the bitmap still shows outside it"
+    );
+}
+
+#[test]
+fn the_frame_select_bit_still_picks_the_hidden_buffer_through_the_compositor_in_mode_four() {
+    // Double buffering is the whole point of mode 4's page-flip bit, so routing the bitmap
+    // through the ordinary compositor path must not lose it.
+    use crate::video::dispcnt;
+    let mut scene = Scene::new(4);
+    scene.enable_bitmap();
+    scene.colour(1, RED); // frame 0's pixel
+    scene.colour(2, GREEN); // frame 1's pixel
+    scene.vram[0] = 1; // frame 0, at (0, 0)
+    scene.vram[0xA000] = 2; // frame 1, at (0, 0)
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "frame 0 shows first");
+
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::FRAME_SELECT);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the frame-select bit flips to the hidden buffer"
+    );
+}
+
+#[test]
+fn the_frame_select_bit_still_picks_the_hidden_buffer_through_the_compositor_in_mode_five() {
+    // Mode 5 buys its double buffering by shrinking the picture instead of dropping colour depth,
+    // but the page-flip bit is the same register and must still work once routed through the
+    // ordinary compositor path.
+    use crate::video::dispcnt;
+    let mut scene = Scene::new(5);
+    scene.enable_bitmap();
+    scene.vram[0..2].copy_from_slice(&RED.to_le_bytes()); // frame 0, at (0, 0)
+    scene.vram[0xA000..0xA002].copy_from_slice(&GREEN.to_le_bytes()); // frame 1, at (0, 0)
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "frame 0 shows first");
+
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::FRAME_SELECT);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the frame-select bit flips to the hidden buffer"
+    );
 }
 
 #[test]
@@ -417,6 +577,7 @@ fn a_sprite_draws_over_a_text_layer() {
 fn a_sprite_draws_over_a_bitmap_mode_too() {
     // Bitmap modes are not a separate world: sprites compose over them the same way.
     let mut scene = Scene::new(3);
+    scene.enable_bitmap();
     // The whole first line, so there is bitmap either side of the eight-pixel sprite.
     for x in 0..SCREEN_WIDTH as usize {
         scene.vram[x * 2..x * 2 + 2].copy_from_slice(&RED.to_le_bytes());
@@ -798,6 +959,33 @@ fn an_alpha_blend_is_skipped_when_the_layer_underneath_is_not_a_second_target() 
         0xFF,
         "with both weights at zero, a blend that happened would be black"
     );
+}
+
+#[test]
+fn an_alpha_blend_uses_the_layer_beneath_even_when_it_is_itself_a_first_target() {
+    // BLDCNT 1st{OBJ, BG0} 2nd{BG0}: the very common shape where a layer is declared both a blend
+    // source and a blend destination. A second pass that composed "what is underneath" by
+    // skipping every declared first-target layer treated that as "BG0 does not count" and found
+    // nothing beneath the sprite but the backdrop, so a translucent sprite over artwork mixed
+    // with black rather than with the artwork it was actually sitting on.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE); // backdrop; must not appear in the blend
+    scene.colour(1, GREEN); // BG0, directly beneath the sprite
+    scene.colour(257, RED); // the sprite: palette 0, colour index 1
+    scene.simple_layer(0, 1, 8); // BG0 at priority 1, behind the sprite
+    scene.sprite_tiles();
+    scene.set_sprite(0, 0, 0, 0); // an ordinary sprite at (0, 0), priority 0
+
+    scene.effects.write16(
+        ereg::BLDCNT,
+        Layer::Object.bit() | Layer::Bg0.bit() | (1 << 6) | (Layer::Bg0.bit() << 8),
+    );
+    scene.effects.write16(ereg::BLDALPHA, 8 | (8 << 8)); // half and half
+
+    let px = scene.render(0).pixel(0, 0);
+    assert!(px.g > 0, "the sprite should have blended with BG0: {px:?}");
+    assert_eq!(px.b, 0, "the backdrop took no part in the mix: {px:?}");
 }
 
 #[test]

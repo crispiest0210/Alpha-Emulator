@@ -284,8 +284,14 @@ impl SpritePass {
         self.claimed[x] = true;
 
         let background = out.get(x);
-        let covered = background.source == PixelSource::Background
-            && match self.rule {
+        // A direct-colour pixel — the Game Boy Advance's bitmap modes 3 and 5 — has no
+        // transparent index at all, unlike an ordinary indexed background where colour 0 is a
+        // hole nothing can cover through. `ByPriority` is the only rule a direct-colour pixel
+        // ever meets in practice, since only the GBA produces one and the GBA always compares
+        // priorities rather than consulting a "behind background" bit, but the comparison itself
+        // is written out either way rather than assumed.
+        let covered = match background.source {
+            PixelSource::Background => match self.rule {
                 // A transparent background pixel never covers anything, whatever the priorities
                 // say.
                 SpriteRule::ByPriority => {
@@ -299,7 +305,10 @@ impl SpritePass {
                     behind_background,
                     background.color,
                 ),
-            };
+            },
+            PixelSource::DirectColor => pixel.priority > background.priority,
+            PixelSource::Backdrop | PixelSource::Sprite => false,
+        };
         if !covered {
             out.set(x, pixel);
         }

@@ -116,8 +116,21 @@ one:
 
 - **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
   the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The
-  lower layer is now composed as a second pass with the first-target layers left out, and a blend
-  happens only where the pixel underneath belongs to a declared second target, as hardware requires.
+  lower layer is now composed as a second pass, and a blend happens only where the pixel underneath
+  belongs to a declared second target, as hardware requires. That second pass first excluded every
+  layer `BLDCNT` declared a first target — a different, narrower question than "what is beneath the
+  winner": wherever a layer was declared *both* a first and a second target, a common `BLDCNT`
+  shape, it excluded itself from being the answer under its own winning pixel, so a translucent
+  sprite over such a layer still mixed with the backdrop instead of the artwork it was sitting on.
+  It now excludes, at each pixel, exactly the layer *that pixel's own winner* came from, which
+  reproduces hardware's priority order for any stack.
+- **Bitmap modes 3, 4, and 5 were written straight to the framebuffer**, with the whole scanline
+  returned before anything else ran. A bitmap mode is background 2 wearing a direct-colour pixel
+  format, not a separate world: a rotated affine matrix never rotated the picture because it was
+  never consulted, a window over the bitmap did nothing, the blend unit never saw it, and every
+  sprite pixel overwrote it with no priority comparison at all, so a farther sprite always won. It
+  now draws into the same buffer as every other layer, subject to the same enable bit, windows,
+  blend unit, and sprite-priority rule.
 - **Sprite-versus-background priority was the Game Boy's rule, not this machine's.** A GBA sprite
   carries a priority in OAM and each background carries one in `BGxCNT`, and the sprite is in front
   where its own is less than or equal to the background's. Instead the Game Boy's single
@@ -241,9 +254,9 @@ Component status:
 | `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10; **PSG mixing still not wired** |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
-| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent |
+| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent; a bitmap mode is background 2 sampled through its affine transform like any other layer, subject to the same enable bit, windows, blend unit, and sprite-priority rule |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
-| `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
+| `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass, excluding at each pixel exactly the layer that pixel's own winner came from, and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
 | `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |

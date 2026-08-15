@@ -81,6 +81,19 @@
 //!   and battle-move flashes rendered as solid blocks. Such a sprite is a blend first target
 //!   whatever `BLDCNT` selects, and forces an alpha blend even where `BLDCNT` asks for a
 //!   brightness effect.
+//! - The alpha-blend second pass excluded every layer `BLDCNT` declared a first target, to find
+//!   what lies beneath the winner. That is a different, narrower question from hardware's: where a
+//!   layer was declared both a first *and* a second target — a common `BLDCNT` shape — it excluded
+//!   itself from being the answer under its own winning pixel, so a translucent sprite over
+//!   artwork mixed with the backdrop instead of the artwork it was actually sitting on. The pass
+//!   now excludes, per pixel, exactly the layer *that pixel's own winner* came from.
+//! - Bitmap modes 3, 4, and 5 were written straight to the framebuffer and the whole scanline
+//!   returned before anything else ran. A bitmap mode is background 2 wearing a direct-colour
+//!   pixel format, not a separate world: a rotated `BG2PA`-`BG2PD` never rotated the picture
+//!   because the matrix was never consulted, a window over it did nothing, the blend unit never
+//!   saw it, and every sprite pixel overwrote it with no priority comparison at all — a farther
+//!   sprite always won. It now draws into the same buffer as everything else, subject to the same
+//!   enable bit, windows, blend unit, and sprite-priority rule.
 //!
 //! # The bug worth knowing about before touching timing
 //!

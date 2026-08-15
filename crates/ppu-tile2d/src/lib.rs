@@ -118,6 +118,11 @@ pub enum PixelSource {
     Backdrop,
     Background,
     Sprite,
+    /// A fifteen-bit colour with no palette indirection at all, packed straight across `color`
+    /// and `palette` rather than indexing into one. The Game Boy Advance's bitmap modes 3 and 5
+    /// are the only source: VRAM holds the picture directly, so there is no index to look up.
+    /// See [`IndexedPixel::direct_color`].
+    DirectColor,
 }
 
 /// One composited pixel, still as a palette index.
@@ -172,8 +177,33 @@ impl IndexedPixel {
             PixelSource::Sprite => Some(SPRITE_LAYER_BIT),
             // Four backgrounds, so the layer number is two bits wide. Masking rather than
             // indexing keeps a malformed layer number from shifting out of range.
-            PixelSource::Background => Some(1 << (self.layer & 3)),
+            PixelSource::Background | PixelSource::DirectColor => Some(1 << (self.layer & 3)),
         }
+    }
+
+    /// A pixel carrying a direct fifteen-bit BGR colour rather than a palette index.
+    ///
+    /// `color` and `palette` exist to index a palette for every other source, which a direct
+    /// colour has no use for — so the pair carries the colour itself instead, `color` the low
+    /// byte and `palette` the high, with room to spare since fifteen bits fit in the sixteen the
+    /// two fields provide between them. [`Self::as_direct_color`] is the inverse.
+    #[inline]
+    pub const fn direct_color(colour: u16, priority: u8, layer: u8) -> Self {
+        Self {
+            color: colour as u8,
+            palette: (colour >> 8) as u8,
+            priority,
+            layer,
+            source: PixelSource::DirectColor,
+            forces_blend: false,
+        }
+    }
+
+    /// The fifteen-bit colour a [`PixelSource::DirectColor`] pixel carries, reassembled from
+    /// `color` and `palette`. Meaningless for any other source.
+    #[inline]
+    pub const fn as_direct_color(&self) -> u16 {
+        (self.color as u16) | ((self.palette as u16) << 8)
     }
 }
 
@@ -280,6 +310,7 @@ impl ScanlineBuffer {
                 PixelSource::Backdrop => backdrop,
                 PixelSource::Background => palettes.lookup_bg(pixel.palette, pixel.color),
                 PixelSource::Sprite => palettes.lookup_sprite(pixel.palette, pixel.color),
+                PixelSource::DirectColor => bgr555_to_rgba(pixel.as_direct_color()),
             };
             out[0] = color.r;
             out[1] = color.g;

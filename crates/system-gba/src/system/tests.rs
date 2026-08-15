@@ -155,7 +155,15 @@ fn the_display_renders_through_the_compositor() {
     let mut gba = system();
     {
         let bus = gba.bus_mut();
-        bus.write16(crate::video::reg::DISPCNT, 3); // bitmap mode
+        bus.write16(crate::video::reg::DISPCNT, 3 | (1 << 10)); // bitmap mode, background 2 enabled
+                                                                // A bitmap mode is background 2 sampled through its affine transform, so a real game
+                                                                // sets it to the identity before relying on the picture landing where it was drawn — the
+                                                                // same registers an affine tile background uses.
+        bus.write16(crate::affine::BG2_BASE, 1 << crate::affine::FRACTIONAL_BITS); // pa
+        bus.write16(
+            crate::affine::BG2_BASE + 6,
+            1 << crate::affine::FRACTIONAL_BITS,
+        ); // pd
         for x in 0..240u32 {
             bus.write16(0x0600_0000 + x * 2, 0x001F); // red
         }

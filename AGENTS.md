@@ -624,12 +624,21 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   was recorded that way here for a long time. See "The biggest gap" above for why the blocker
   dissolved on inspection: the channels are already shared, and only the address decode is
   per-system — which the GBA needs its own of regardless.
-- **Alpha blending on the GBA** now composes its real lower layer, as a second pass over the line
-  with the first-target layers left out. A second `ScanlineBuffer` slot was rejected: that type is
-  shared with the Game Boy, which has no colour effects and would carry the runner-up pixel on every
-  line to no purpose. The pass runs only when an alpha blend is configured. It is exact unless two
-  first-target layers stack, where hardware blends the top with the second and this skips to the
-  third; nothing in the corpus does that.
+- **Alpha blending on the GBA** composes its real lower layer as a second pass over the line, with a
+  write mask that excludes — at each pixel — exactly the layer *that pixel's own winner* came from,
+  not every layer `BLDCNT` declares a first target. Excluding declared first targets wholesale was
+  tried first and is a different, narrower question: where a layer is declared both a first and a
+  second target, a common `BLDCNT` shape, it excluded itself from being the answer under its own
+  winning pixel and the pass fell through to whatever was third, or the backdrop — mixing a
+  translucent sprite with the backdrop instead of the artwork it was sitting on. A per-pixel
+  runner-up field on `ScanlineBuffer` was also tried and reverted: `cargo xtask bench --filter gb/`
+  showed even one unconditional `is_empty` check added to `ScanlineBuffer::set` cost the Game Boy a
+  reproducible 1.5-3% on `gb/rendering/frame`, for a branch it never takes — that function runs once
+  per pixel of every layer, densely enough that "one more comparison" is not free. The write-mask
+  approach touches nothing in `ppu-tile2d`, so the Game Boy's compiled code is unchanged by the file,
+  not merely benchmarked as unaffected. The second pass runs only when an alpha blend could actually
+  happen — a configured alpha blend or a semi-transparent sprite on the line — a small minority of
+  lines either way.
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
 - **`OPRI` is not modelled.** A real CGB can be asked through it to order sprites by X coordinate —
   the DMG rule — while running in colour mode. Nothing reads it, so a game that sets it gets

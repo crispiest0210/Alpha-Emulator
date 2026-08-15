@@ -117,27 +117,6 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let mut scanline = ScanlineBuffer::new(SCREEN_WIDTH as usize);
     scanline.clear();
 
-    // Sprites draw over a bitmap just as they draw over a tile layer, so both paths go through
-    // the same buffer — the bitmap is written straight to the row first and the sprites are
-    // composited on top of it afterwards.
-    if (3..=5).contains(&mode) {
-        let row = framebuffer.row_mut(line);
-        bitmap::render_scanline(
-            mode,
-            line,
-            frame.vram,
-            frame.palette,
-            frame.video.bitmap_frame_offset(),
-            row,
-        );
-        draw_sprites(frame, line, SpriteSelection::Drawn, &mut scanline);
-        let palette = GbaPalette {
-            bytes: frame.palette,
-        };
-        overlay_sprites(&scanline, &palette, framebuffer.row_mut(line));
-        return;
-    }
-
     let kinds = layers_for_mode(mode);
     let enabled = [
         frame.video.dispcnt & (1 << 8) != 0,
@@ -161,22 +140,26 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
         match kinds[index] {
             Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut scanline),
             Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut scanline),
-            _ => {}
+            Some(LayerKind::Bitmap) => draw_bitmap_layer(frame, mode, &mut scanline),
+            None => {}
         }
     }
     draw_sprites(frame, line, SpriteSelection::Drawn, &mut scanline);
 
-    // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass with
-    // the first-target layers left out, rather than by widening `ScanlineBuffer` to keep a
-    // runner-up: that buffer is shared with the Game Boy, which has no colour effects at all and
-    // would carry the second slot on every line to no purpose. The pass only runs when a blend
-    // could actually happen, which is a small minority of lines.
+    // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass that
+    // excludes, at each pixel, exactly the layer *that pixel's own winner* came from — not every
+    // layer `BLDCNT` declares a first target, which is a different and narrower question.
+    // Hardware picks the top two priority slots among BG0-3 and OBJ and blends the top into the
+    // second one, if both are flagged as the right kind of target; which slots are flagged plays
+    // no part in finding *which slot is second*. Excluding every declared first-target layer used
+    // to answer that as if it did — so wherever a layer was declared both a first and a second
+    // target, a common `BLDCNT` shape, it excluded itself from being the answer under its own
+    // winning pixel, and the pass fell through to whatever was third, or the backdrop. Excluding
+    // only the actual winner's own slot reproduces hardware's priority order for any stack, at the
+    // cost of one more pass over the same layers — which only runs when a blend could actually
+    // happen, a small minority of lines.
     //
-    // Exact whenever the layer directly beneath the top pixel is not itself a first target. Where
-    // two first-target layers stack, hardware blends the top with the second and this skips to the
-    // third. Nothing in the corpus does that, and the alternative is keeping every layer's pixel.
-    //
-    // A semi-transparent sprite forces an alpha blend whatever `BLDCNT`'s mode says, so the buffer
+    // A semi-transparent sprite forces an alpha blend whatever `BLDCNT`'s mode says, so the pass
     // is needed whenever one is on this line too — not only when an alpha blend is configured.
     // Without that, such a sprite would find nothing beneath it and render solid.
     let needs_under =
@@ -184,28 +167,27 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let under = needs_under.then(|| {
         let mut under = ScanlineBuffer::new(SCREEN_WIDTH as usize);
         under.clear();
-        // The same windows apply to what is underneath: a layer a window excludes is not merely
-        // hidden, it is not there, so it cannot be the lower half of a blend either.
-        if let Some(visible) = &visible {
-            under.set_write_mask(layer_bits(visible));
-        }
+        // The same windows apply to what is underneath, and on top of them, each pixel's own
+        // winner is excluded: a layer a window excludes is not there at all, and a pixel's winner
+        // cannot also be what lies beneath itself.
+        let base = visible
+            .as_ref()
+            .map(|visible| layer_bits(visible))
+            .unwrap_or_else(|| vec![ppu_tile2d::ALL_LAYERS; SCREEN_WIDTH as usize]);
+        let mask: Vec<u8> = (0..SCREEN_WIDTH as usize)
+            .map(|x| base[x] & !scanline.get(x).layer_bit().unwrap_or(0))
+            .collect();
+        under.set_write_mask(mask);
+
         for index in frame.backgrounds.draw_order(present) {
-            if frame.effects.is_first_target(Layer::background(index)) {
-                continue;
-            }
             match kinds[index] {
                 Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut under),
                 Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut under),
-                _ => {}
+                Some(LayerKind::Bitmap) => draw_bitmap_layer(frame, mode, &mut under),
+                None => {}
             }
         }
-        // Sprites can be the lower half of a blend, but a sprite that is itself the *source* of one
-        // cannot blend with itself. Two things make a sprite a source: the object layer being a
-        // declared first target, which excludes them all, and an individual sprite being
-        // semi-transparent, which `NotBlendSource` filters out per sprite.
-        if !frame.effects.is_first_target(Layer::Object) {
-            draw_sprites(frame, line, SpriteSelection::NotBlendSource, &mut under);
-        }
+        draw_sprites(frame, line, SpriteSelection::Drawn, &mut under);
         under
     });
 
@@ -270,7 +252,7 @@ fn layer_bits(visible: &[u16]) -> Vec<u8> {
 /// each pixel, what was beneath the winner, and which layers each pixel permits.
 struct Composed<'a> {
     scanline: &'a ScanlineBuffer,
-    /// What lies under the winning pixel, composed only when an alpha blend is configured.
+    /// What lies under the winning pixel, composed only when an alpha blend could happen.
     under: Option<&'a ScanlineBuffer>,
     /// Per-pixel window mask, `None` when no window is enabled. See [`window_mask`].
     visible: Option<&'a [u16]>,
@@ -319,7 +301,11 @@ fn object_window_mask(frame: &Frame<'_>, line: u32) -> Option<Vec<bool>> {
 fn layer_of(indexed: ppu_tile2d::IndexedPixel) -> Layer {
     match indexed.source {
         PixelSource::Sprite => Layer::Object,
-        PixelSource::Background => Layer::background(indexed.layer as usize),
+        // A bitmap mode's picture is background 2 wearing a different pixel format; it is
+        // selected as a blend or window target exactly as an indexed background 2 would be.
+        PixelSource::Background | PixelSource::DirectColor => {
+            Layer::background(indexed.layer as usize)
+        }
         PixelSource::Backdrop => Layer::Backdrop,
     }
 }
@@ -402,6 +388,9 @@ fn apply_effects(
                     PixelSource::Backdrop => backdrop,
                     PixelSource::Background => palette.lookup_bg(beneath.palette, beneath.color),
                     PixelSource::Sprite => palette.lookup_sprite(beneath.palette, beneath.color),
+                    PixelSource::DirectColor => {
+                        ppu_tile2d::bgr555_to_rgba(beneath.as_direct_color())
+                    }
                 }
             }
             _ => top,
@@ -512,6 +501,96 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
     }
 }
 
+/// Draw the bitmap that occupies background 2's slot in modes 3, 4, and 5.
+///
+/// A bitmap mode has no tile layers: the bitmap *is* background 2, sampled through the very same
+/// affine matrix and reference point as an affine tile background — [`draw_affine_layer`], which
+/// this mirrors almost line for line — and so subject to the same wraparound rule. It used to be
+/// written straight to the framebuffer and the whole scanline returned before anything else ran,
+/// which meant a rotated picture never rotated (the matrix was simply never consulted), a window
+/// over it did nothing, the blend unit never saw it, and every sprite pixel overwrote it with no
+/// priority comparison at all. Drawing it into the shared buffer instead puts it through the same
+/// `draw_order`, window mask, blend pass, and sprite-priority rule as any other layer.
+///
+/// Mode 4 is addressed exactly like an ordinary 256-colour background — one byte per pixel,
+/// looked up in palette RAM, index 0 transparent — so it reuses [`PixelSource::Background`]
+/// unchanged. Modes 3 and 5 have no palette indirection at all, a 15-bit colour directly in VRAM,
+/// which is what [`ppu_tile2d::IndexedPixel::direct_color`] exists to carry through the indexed
+/// pipeline; neither has a transparent index, so every in-bounds pixel is opaque.
+fn draw_bitmap_layer(frame: &Frame<'_>, mode: u16, scanline: &mut ScanlineBuffer) {
+    let layer = frame.backgrounds.layers[2];
+    let affine = &frame.affine[0];
+    // The screen size bits of BG2CNT are not consulted here: a bitmap mode's picture size is
+    // fixed by the mode number, not by the affine background's usual size field.
+    let (width, height) = match mode {
+        5 => (bitmap::MODE5_WIDTH, bitmap::MODE5_HEIGHT),
+        _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
+    };
+
+    for x in 0..SCREEN_WIDTH {
+        let (tx, ty) = affine.texture_at(x);
+
+        let (tx, ty) = if layer.affine_wraps() {
+            (tx.rem_euclid(width as i32), ty.rem_euclid(height as i32))
+        } else {
+            if tx < 0 || ty < 0 || tx >= width as i32 || ty >= height as i32 {
+                continue;
+            }
+            (tx, ty)
+        };
+
+        match mode {
+            4 => {
+                let stride = SCREEN_WIDTH as usize;
+                let offset = frame.video.bitmap_frame_offset() + ty as usize * stride + tx as usize;
+                let Some(&index) = frame.vram.get(offset) else {
+                    continue;
+                };
+                // Index zero is transparent here exactly as it is in a tile mode, so it shows
+                // whatever is behind background 2 rather than palette entry zero drawn over it.
+                if index == 0 {
+                    continue;
+                }
+                scanline.set(
+                    x as usize,
+                    ppu_tile2d::IndexedPixel {
+                        color: index,
+                        palette: 0,
+                        priority: layer.priority(),
+                        layer: 2,
+                        source: PixelSource::Background,
+                        forces_blend: false,
+                    },
+                );
+            }
+            _ => {
+                // Modes 3 and 5: a direct 15-bit colour, two bytes per pixel, no palette and no
+                // transparent index. Mode 3 has room for only one buffer, so the frame-select bit
+                // is ignored there exactly as it was in the direct-to-framebuffer path; mode 5
+                // buys double buffering by shrinking the picture instead of dropping colour
+                // depth, so it still needs it.
+                let base = if mode == 5 {
+                    frame.video.bitmap_frame_offset()
+                } else {
+                    0
+                };
+                let stride = width as usize * 2;
+                let offset = base + ty as usize * stride + tx as usize * 2;
+                let (Some(&low), Some(&high)) =
+                    (frame.vram.get(offset), frame.vram.get(offset + 1))
+                else {
+                    continue;
+                };
+                let colour = u16::from_le_bytes([low, high]);
+                scanline.set(
+                    x as usize,
+                    ppu_tile2d::IndexedPixel::direct_color(colour, layer.priority(), 2),
+                );
+            }
+        }
+    }
+}
+
 /// Whether any semi-transparent sprite covers this line.
 ///
 /// Asked so the under-buffer can be built for it. Cheap enough to answer by decoding OAM again:
@@ -535,12 +614,6 @@ fn has_semi_transparent_sprite(frame: &Frame<'_>, line: u32) -> bool {
 enum SpriteSelection {
     /// Every sprite that draws: the main compositing pass.
     Drawn,
-    /// Only sprites that are *not* blend first targets, for the under-buffer.
-    ///
-    /// A first-target sprite is the thing being blended, so it cannot also be what it blends
-    /// *with*. Semi-transparent sprites are first targets whatever `BLDCNT` says, so they are
-    /// excluded here even when the object layer is not a declared target.
-    NotBlendSource,
     /// Only sprites whose graphics mode makes them a window shape. These draw nothing; the
     /// pixels they claim define a region.
     ObjectWindow,
@@ -609,11 +682,6 @@ fn sprite_order(oam: &ObjectAttributeMemory, line: u32, selection: SpriteSelecti
     use crate::objects::GraphicsMode;
     match selection {
         SpriteSelection::Drawn => oam.visible_on_line(line as i32),
-        SpriteSelection::NotBlendSource => oam
-            .visible_on_line(line as i32)
-            .into_iter()
-            .filter(|&i| oam.objects[i].graphics_mode != GraphicsMode::SemiTransparent)
-            .collect(),
         // `visible_on_line` deliberately excludes object-window sprites, since they do not draw,
         // so this selection does its own scan. The same priority and index order is kept, so an
         // object window built from overlapping shapes resolves the way a drawn sprite would.
@@ -727,21 +795,6 @@ fn draw_affine_sprite(
             // The GBA compares priorities rather than consulting a "behind background" bit.
             false,
         );
-    }
-}
-
-/// Write the sprite pixels of a resolved buffer over an already-drawn row.
-///
-/// Used by the bitmap path, where the background is already RGBA in the row and only the sprite
-/// pixels need resolving.
-fn overlay_sprites(scanline: &ScanlineBuffer, palette: &GbaPalette<'_>, row: &mut [u8]) {
-    for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
-        let indexed = scanline.get(x);
-        if indexed.source != PixelSource::Sprite {
-            continue;
-        }
-        let colour = palette.lookup_sprite(indexed.palette, indexed.color);
-        pixel.copy_from_slice(&[colour.r, colour.g, colour.b, colour.a]);
     }
 }
 
