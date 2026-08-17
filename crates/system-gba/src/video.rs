@@ -131,33 +131,35 @@ impl VideoTiming {
         self.dispcnt & dispcnt::FORCED_BLANK != 0
     }
 
-    /// Advance by some cycles, reporting every edge crossed.
+    /// Advance by up to `cycles`, but never past the next line boundary — so one call reports at
+    /// most one of each edge, which is the only way it can report every one of them: they carry
+    /// no count, only whether they happened.
     ///
-    /// Loops rather than assuming one edge per call: a long CPU instruction or a DMA burst can
-    /// cover more than a scanline, and collapsing that to a single edge loses scanlines.
-    pub fn tick(&mut self, cycles: u32) -> VideoEvents {
+    /// Returns how many cycles this step actually used alongside the events, which is at most
+    /// `cycles` and less than it whenever a line boundary was reached first. A long CPU
+    /// instruction or a DMA burst routinely covers more than one scanline, and the caller is the
+    /// one that loops — [`crate::system::GbaSystemBus::advance`] — feeding the leftover back in
+    /// until none remains, so a step spanning three lines renders three scanlines and advances
+    /// the affine layers three times rather than folding them into whichever line happened to be
+    /// current when the whole span had been consumed.
+    pub fn tick(&mut self, cycles: u32) -> (VideoEvents, u32) {
         let mut events = VideoEvents::default();
-        let mut remaining = cycles;
+        let was_hblank = self.in_hblank();
+        let step = cycles.min(CYCLES_PER_LINE - self.dot_cycle);
+        self.dot_cycle += step;
 
-        while remaining > 0 {
-            let was_hblank = self.in_hblank();
-            let step = remaining.min(CYCLES_PER_LINE - self.dot_cycle);
-            self.dot_cycle += step;
-            remaining -= step;
-
-            if !was_hblank && self.in_hblank() {
-                events.entered_hblank = true;
-                if (self.vcount as u32) < SCREEN_HEIGHT {
-                    events.scanline_ready = Some(self.vcount);
-                }
-            }
-
-            if self.dot_cycle >= CYCLES_PER_LINE {
-                self.dot_cycle -= CYCLES_PER_LINE;
-                self.advance_line(&mut events);
+        if !was_hblank && self.in_hblank() {
+            events.entered_hblank = true;
+            if (self.vcount as u32) < SCREEN_HEIGHT {
+                events.scanline_ready = Some(self.vcount);
             }
         }
-        events
+
+        if self.dot_cycle >= CYCLES_PER_LINE {
+            self.dot_cycle -= CYCLES_PER_LINE;
+            self.advance_line(&mut events);
+        }
+        (events, step)
     }
 
     fn advance_line(&mut self, events: &mut VideoEvents) {

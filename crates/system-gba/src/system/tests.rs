@@ -174,6 +174,42 @@ fn the_display_renders_through_the_compositor() {
 }
 
 #[test]
+fn a_multi_line_advance_renders_every_line_it_crosses_not_only_the_last() {
+    // `video::tests` checks this at the timing layer in isolation; this drives it through the
+    // real system, where a step spanning several lines used to render only the last of them —
+    // the same collapsed edge, but visible as stale or missing rows rather than a wrong count.
+    let mut gba = system();
+    {
+        let bus = gba.bus_mut();
+        bus.write16(crate::video::reg::DISPCNT, 3 | (1 << 10)); // bitmap mode 3, background 2 on
+        bus.write16(crate::affine::BG2_BASE, 1 << crate::affine::FRACTIONAL_BITS); // pa
+        bus.write16(
+            crate::affine::BG2_BASE + 6,
+            1 << crate::affine::FRACTIONAL_BITS,
+        ); // pd
+        for y in 0..3u32 {
+            for x in 0..240u32 {
+                bus.write16(0x0600_0000 + (y * 240 + x) * 2, 0x001F); // red
+            }
+        }
+        // Exactly three lines' worth of cycles, in one call.
+        bus.advance(crate::video::CYCLES_PER_LINE * 3);
+    }
+    for y in 0..3u32 {
+        assert_eq!(
+            gba.framebuffer().pixel(0, y).r,
+            0xFF,
+            "row {y} was rendered"
+        );
+    }
+    assert_eq!(
+        gba.framebuffer().pixel(0, 3).a,
+        0,
+        "row 3 was not reached by this step, so still untouched"
+    );
+}
+
+#[test]
 fn a_general_purpose_dma_moves_the_bytes_at_once() {
     let mut gba = system();
     let bus = gba.bus_mut();

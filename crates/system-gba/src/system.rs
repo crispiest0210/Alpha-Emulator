@@ -206,47 +206,66 @@ impl GbaSystemBus {
                 }
             }
             // A timer overflow is what advances a direct-sound channel, and draining one may
-            // leave it needing a refill — which is a DMA request, not an audio event.
+            // leave it needing a refill — which is a DMA request, not an audio event. Iterated
+            // directly rather than collected first: `refill_requests` borrows only `self.sound`,
+            // a different field from the `self.dma` the loop body needs mutably, so the borrow
+            // checker accepts the two side by side without a `Vec` to hold the gap open.
             self.sound.on_timer_overflow(overflowed);
-            let requests: Vec<u32> = self.sound.refill_requests().collect();
-            for address in requests {
+            for address in self.sound.refill_requests() {
                 self.dma.on_fifo_empty(address);
             }
         }
 
-        let events = self.video.tick(cycles);
-        self.irq.raise(self.video.interrupt_sources(&events));
+        // `video.tick` never advances past the next line boundary, so a step spanning several
+        // lines — a long CPU instruction or a DMA burst routinely covers more than one — is fed
+        // back in a loop here rather than asked to report every edge from one call. That used to
+        // be a single `VideoEvents` covering the whole span, which has no way to hold more than
+        // one scanline: a three-line step rendered only the last of them, advanced the affine
+        // layers once instead of three times, and armed HBlank DMA once instead of three times.
+        // Looping the small, fixed-size event instead costs nothing extra on the overwhelmingly
+        // common case of a step that does not cross a line at all — one call, one no-op check —
+        // and is exact on the rare one that does.
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let (events, consumed) = self.video.tick(remaining);
+            remaining -= consumed;
+            self.irq.raise(self.video.interrupt_sources(&events));
 
-        if events.frame_started {
-            // The reference point is reloaded from the registers at the top of a frame and
-            // accumulates from there; see the affine module for why that matters.
-            for layer in &mut self.affine {
-                layer.begin_frame();
+            if events.frame_started {
+                // The reference point is reloaded from the registers at the top of a frame and
+                // accumulates from there; see the affine module for why that matters.
+                for layer in &mut self.affine {
+                    layer.begin_frame();
+                }
             }
-        }
-        if let Some(line) = events.scanline_ready {
-            self.render_line(line as u32);
-            // Advance *after* drawing: the line just drawn used the position it started with.
-            for layer in &mut self.affine {
-                layer.advance_line();
+            if let Some(line) = events.scanline_ready {
+                self.render_line(line as u32);
+                // Advance *after* drawing: the line just drawn used the position it started with.
+                for layer in &mut self.affine {
+                    layer.advance_line();
+                }
             }
-        }
-        // Hardware does not run HBlank DMA during vertical blanking, only the interrupt fires
-        // there — and `entered_hblank` alone cannot tell the two apart, since it is set on all
-        // 228 lines. `scanline_ready` already carries the distinction: it is `Some` precisely
-        // when this hblank belongs to one of the 160 visible lines, computed by `video.tick` at
-        // the exact instant hblank was entered. Reusing it here is more robust than re-testing
-        // `vcount` after the fact, which by this point may already have been advanced onto the
-        // next line by `advance_line`.
-        if events.entered_hblank && events.scanline_ready.is_some() {
-            self.dma.on_hblank();
-        }
-        if events.entered_vblank {
-            self.dma.on_vblank();
-            self.frame_ready = true;
-        }
+            // Hardware does not run HBlank DMA during vertical blanking, only the interrupt fires
+            // there — and `entered_hblank` alone cannot tell the two apart, since it is set on
+            // all 228 lines. `scanline_ready` already carries the distinction: it is `Some`
+            // precisely when this hblank belongs to one of the 160 visible lines, computed by
+            // `video.tick` at the exact instant hblank was entered. Reusing it here is more
+            // robust than re-testing `vcount` after the fact, which by this point may already
+            // have been advanced onto the next line by `advance_line`.
+            if events.entered_hblank && events.scanline_ready.is_some() {
+                self.dma.on_hblank();
+            }
+            if events.entered_vblank {
+                self.dma.on_vblank();
+                self.frame_ready = true;
+            }
 
-        self.run_pending_dma();
+            // Run before the next line, not after the whole step: a scroll register an HBlank
+            // transfer just updated has to be in place before the line after it renders, and
+            // deferring every line's DMA to the end of a multi-line step would render all but the
+            // first from registers none of them had actually seen updated yet.
+            self.run_pending_dma();
+        }
         self.generate_samples(cycles as u64);
     }
 

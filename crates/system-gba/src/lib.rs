@@ -118,6 +118,16 @@
 //! failed and the speed reading stayed at 100%; only the emulated machine's sense of a frame was
 //! wrong, which makes every downstream symptom look like an unrelated bug. See `bios::intr_wait`.
 //!
+//! A third has the same shape from the opposite direction: `video::VideoTiming::tick` reported at
+//! most one of each edge no matter how many cycles it was given, so a single call spanning more
+//! than one scanline — a DMA burst or a long instruction, both routine — rendered only the *last*
+//! line crossed and silently dropped the others, advanced the affine layers once instead of once
+//! per line, and armed HBlank DMA once instead of once per line. There is a test whose name states
+//! the correct behaviour and whose body asserted the bug: `assert_eq!(events.scanline_ready,
+//! Some(3), "the most recent one")`. `tick` now advances at most one line per call and reports how
+//! many cycles that used; the caller loops, feeding the remainder back in until none is left. See
+//! `system::GbaSystemBus::advance`.
+//!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
 //! core never had". The second half of that is met; the first is unmeasured until the accuracy
