@@ -12,6 +12,19 @@ fn system() -> GbaSystem {
     GbaSystem::new(spin_rom(), None).expect("the synthetic ROM is valid")
 }
 
+/// A ROM holding `count` copies of `mov r0, r0` in a row from the entry point.
+///
+/// Cartridge ROM is read-only on real hardware — a bus write to it is a no-op — so a test that
+/// wants specific ROM-resident code has to bake it into the image at construction rather than
+/// writing it in afterward the way RAM tests do.
+fn nop_rom(count: usize) -> Vec<u8> {
+    let mut rom = vec![0u8; 0x1000];
+    for i in 0..count {
+        rom[i * 4..i * 4 + 4].copy_from_slice(&0xE1A0_0000u32.to_le_bytes()); // mov r0, r0
+    }
+    rom
+}
+
 #[test]
 fn a_machine_with_no_bios_starts_at_the_cartridge_entry_point() {
     // The documented post-boot state, so the emulator is usable without a BIOS to source.
@@ -470,6 +483,29 @@ fn an_instruction_costs_what_the_hardware_charges_for_it() {
     // The same instruction from external WRAM, which is a 16-bit bus with two wait states: two
     // accesses at three cycles each.
     assert_eq!(cost_at(0x0200_1000, 0xE080_0000), 6, "external WRAM");
+
+    // The prefetch case: a run of sequential fetches from ROM, with `WAITCNT`'s buffer bit set,
+    // costs full price once and then the minimum ever after — the same shape of bug as the rest
+    // of this test guards against, just the opposite direction. Overcharging every sequential ROM
+    // fetch is invisible the same way undercharging IWRAM was: no test fails and the speed reading
+    // stays at 100%, because a frame is still a fixed number of cycles. What a game loses is
+    // however much of its processor the buffer was supposed to give back.
+    let mut gba = GbaSystem::new(nop_rom(3), None).expect("the synthetic ROM is valid");
+    let base = 0x0800_0000u32;
+    gba.bus_mut().write16(crate::waitstates::WAITCNT, 1 << 14);
+    gba.cpu_mut().regs.set_pc(base);
+    gba.bus_mut().take_pending_waits();
+
+    let first = gba.step_instruction().get();
+    let second = gba.step_instruction().get();
+    let third = gba.step_instruction().get();
+    assert!(first > 1, "the first fetch of a run is never free: {first}");
+    // Exactly 1: the same free rate as the IWRAM case above, not merely "cheaper than the first" —
+    // a sequential ROM access is already cheaper than a jump even with no prefetch at all, so a
+    // weaker comparison here would not actually tell the buffer's discount from that baseline
+    // difference.
+    assert_eq!(second, 1, "primed by the first fetch, the second is free");
+    assert_eq!(third, 1, "and stays free as the run continues");
 }
 
 #[test]
@@ -917,6 +953,98 @@ mod intr_wait {
         assert!(
             completed > 1,
             "HBlank alone should wake a plain Halt many times a frame, not {completed}"
+        );
+    }
+
+    #[test]
+    fn the_fast_forward_halt_lands_at_the_same_state_as_the_one_cycle_slow_path() {
+        // Not just faster: this asserts the two paths agree, cycle for cycle and instruction
+        // count for instruction count, on where a halted machine ends up. A predictor that landed
+        // even one cycle short or long of the real wake edge would still pass every other test
+        // here, since they only check that a wait eventually completes, not exactly when.
+        let mut fast = machine(0x02, crate::irq::source::VBLANK, 0, 0);
+        let mut slow = machine(0x02, crate::irq::source::VBLANK, 0, 0);
+        slow.disable_halt_fast_forward = true;
+
+        let mut fast_calls = 0u32;
+        let mut fast_cycles = 0u64;
+        while fast.cpu().reg(COUNTER) < 3 {
+            fast_cycles += fast.step_instruction().get();
+            fast_calls += 1;
+            assert!(
+                fast_calls < 10_000,
+                "the fast path should reach three waits in far fewer calls than this"
+            );
+        }
+
+        let mut slow_calls = 0u32;
+        let mut slow_cycles = 0u64;
+        while slow.cpu().reg(COUNTER) < 3 {
+            slow_cycles += slow.step_instruction().get();
+            slow_calls += 1;
+        }
+
+        assert_eq!(
+            fast_cycles, slow_cycles,
+            "the two paths must land on the same total cycle count"
+        );
+        assert_eq!(
+            fast.cpu().regs,
+            slow.cpu().regs,
+            "and the same register state"
+        );
+        assert!(
+            fast_calls < slow_calls / 100,
+            "the whole point is skipping the one-cycle-at-a-time calls: {fast_calls} fast \
+             vs {slow_calls} slow"
+        );
+    }
+
+    #[test]
+    fn the_fast_forward_reaches_a_vblank_intr_wait_the_same_way_it_reaches_a_plain_halt() {
+        // `VBlankIntrWait` under an also-enabled `HBlank` is the case the fast path has to get
+        // right and a plain `Halt` cannot exercise: `intercept_bios_call` re-enters `bios::dispatch`
+        // on every step while the wait is in progress, so the fast path has to run *before* that
+        // interception or it never reaches this call shape at all — the bug this test would have
+        // caught, since `Halt` alone cannot see it (a `Halt` never calls `intercept_bios_call` a
+        // second time). And the machine still has to take the same repeated detours through the
+        // handler that HBlank forces on real hardware, landing on the same state either way.
+        let enabled = crate::irq::source::VBLANK | crate::irq::source::HBLANK;
+        let mut fast = machine(0x05, enabled, 0, 0);
+        let mut slow = machine(0x05, enabled, 0, 0);
+        slow.disable_halt_fast_forward = true;
+
+        let mut fast_calls = 0u32;
+        let mut fast_cycles = 0u64;
+        while fast.cpu().reg(COUNTER) < 2 {
+            fast_cycles += fast.step_instruction().get();
+            fast_calls += 1;
+            assert!(
+                fast_calls < 100_000,
+                "the fast path should reach two waits in far fewer calls than this"
+            );
+        }
+
+        let mut slow_calls = 0u32;
+        let mut slow_cycles = 0u64;
+        while slow.cpu().reg(COUNTER) < 2 {
+            slow_cycles += slow.step_instruction().get();
+            slow_calls += 1;
+        }
+
+        assert_eq!(
+            fast_cycles, slow_cycles,
+            "the two paths must land on the same total cycle count"
+        );
+        assert_eq!(
+            fast.cpu().regs,
+            slow.cpu().regs,
+            "and the same register state"
+        );
+        assert!(
+            fast_calls < slow_calls / 50,
+            "the whole point is skipping the one-cycle-at-a-time calls: {fast_calls} fast \
+             vs {slow_calls} slow"
         );
     }
 }

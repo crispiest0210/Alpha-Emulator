@@ -144,6 +144,14 @@ pub struct GbaSystemBus {
     dma_cycles: u32,
     /// Whether a transfer is running, so nothing re-enters `run_pending_dma` inside one.
     in_dma: bool,
+    /// Whether the next bus access is the CPU fetching its next instruction.
+    ///
+    /// Set just before [`Cpu::step`](core_common::Cpu) is called and consumed by the first
+    /// [`Self::charge`] that follows — an ARM or Thumb instruction is always exactly one fetch
+    /// before whatever data accesses it goes on to make, so "the first access this step" and "the
+    /// fetch" are the same thing. [`WaitControl::cost`] needs to tell fetches from data accesses
+    /// apart to answer whether the ROM prefetch buffer applies.
+    awaiting_fetch: bool,
 }
 
 impl GbaSystemBus {
@@ -171,6 +179,7 @@ impl GbaSystemBus {
             next_sequential: 0,
             dma_cycles: 0,
             in_dma: false,
+            awaiting_fetch: true,
         }
     }
 
@@ -205,7 +214,11 @@ impl GbaSystemBus {
         } else {
             Access::NonSequential
         };
-        self.pending_waits += self.waits.cost(addr, width, access).saturating_sub(1);
+        let is_fetch = std::mem::take(&mut self.awaiting_fetch);
+        self.pending_waits += self
+            .waits
+            .cost(addr, width, access, is_fetch)
+            .saturating_sub(1);
         self.next_sequential = addr.wrapping_add(width);
     }
 
@@ -414,8 +427,13 @@ impl GbaSystemBus {
         // where the last one left off, on both streams independently.
         let mut access = Access::NonSequential;
         for _ in 0..transfer.words {
-            let cost =
-                crate::dma::unit_cycles(&self.waits, source, destination, transfer.unit, access);
+            let cost = crate::dma::unit_cycles(
+                &mut self.waits,
+                source,
+                destination,
+                transfer.unit,
+                access,
+            );
             if transfer.unit == 4 {
                 let value = self.read32(source);
                 self.write32(destination, value);
@@ -748,6 +766,11 @@ pub struct GbaSystem {
     /// a game spends most of its time, so most quicksaves land here — restores into the wait
     /// rather than into a call that would discard the flags a second time.
     intr_wait: Option<u16>,
+    /// Forces the one-cycle-at-a-time halt path even when [`GbaSystem::halt_fast_forward_cycles`]
+    /// could predict the wake, so a test can run the same machine both ways and compare the
+    /// result instead of only trusting the fast path's own arithmetic.
+    #[cfg(test)]
+    disable_halt_fast_forward: bool,
 }
 
 impl GbaSystem {
@@ -759,6 +782,8 @@ impl GbaSystem {
             bus: GbaSystemBus::new(cartridge, bios),
             save_ram_dirty: false,
             intr_wait: None,
+            #[cfg(test)]
+            disable_halt_fast_forward: false,
         };
         // Computed rather than passed `has_bios` directly: the boot program counter is 0 (inside
         // the BIOS) exactly when a BIOS was supplied and the cartridge entry (outside it)
@@ -1012,6 +1037,72 @@ impl GbaSystem {
         self.bus.memory.set_bios_open_bus(BIOS_OPCODE_DURING_IRQ);
     }
 
+    /// How many cycles a halted CPU could fast-forward through in one step, or `None` if that
+    /// cannot be predicted and the ordinary one-cycle-at-a-time path has to run instead.
+    ///
+    /// Two things both have to hold. First, some enabled source needs a *computable* schedule:
+    /// the video edges (HBlank, VBlank, the VCOUNT match) and the four timers all do, because
+    /// their state is nothing but counters advancing at a known rate. The keypad, the serial
+    /// port, a cartridge GPIO line, and a completed DMA transfer do not — each depends on
+    /// something external to this prediction, or on code that only runs once the CPU is already
+    /// awake — so a halt that depends on only one of those still steps normally, and correctly:
+    /// it just gets no benefit from this.
+    ///
+    /// Second, and less obvious, no DMA channel may be armed to fire again on its own during the
+    /// interval — see [`DmaController::has_a_channel_that_could_fire_on_its_own`]. `run_clocks`
+    /// advances the video and timers by exactly the `cycles` it is given, unconditionally, and
+    /// does not stop early just because an interrupt became pending partway through — nothing
+    /// needs it to, since the ordinary path re-checks after every single cycle anyway. A DMA
+    /// transfer that fires during a *predicted* span is a different matter: its own cost is
+    /// *additional* video/timer advancement, spent through `run_clocks` a second time from
+    /// inside `run_pending_dma`, on top of whatever this predicted. A prediction blind to that
+    /// would send the outer call further than the interval it computed, and the acceptance test
+    /// for this exists specifically to catch that kind of drift. Modelling it exactly would mean
+    /// simulating the DMA controller too — simpler and still correct is to not predict at all
+    /// while any such channel is armed, and let DMA's own cost keep being accounted for the way
+    /// it already is.
+    fn halt_fast_forward_cycles(&self) -> Option<u32> {
+        if self.bus.dma.has_a_channel_that_could_fire_on_its_own() {
+            return None;
+        }
+        if !self.bus.irq.master_enabled() {
+            return None;
+        }
+        let ie = self.bus.irq.enabled_sources();
+        if ie == 0 {
+            return None;
+        }
+
+        // Probed on scratch copies of exactly the state that decides these two kinds of edge,
+        // reusing the real `VideoTiming::tick`/`interrupt_sources` and `Timers::tick`/
+        // `interrupts` rather than a second, hand-derived formula that could disagree with them.
+        let mut video = self.bus.video;
+        let mut timers = self.bus.timers;
+        let mut elapsed = 0u32;
+        // The same hang guard `step_frame` uses: if nothing wakes the CPU within two frames,
+        // there is nothing to predict, and stepping normally will discover that just as surely.
+        let bound = (FRAME_CYCLES * 2) as u32;
+        while elapsed < bound {
+            // Capped to `cycles_until_next_edge`, not just `bound - elapsed`: `tick` only stops at
+            // a line boundary, so an uncapped request here would sail straight past a mid-line
+            // `entered_hblank` to wherever the line ends, landing up to 272 cycles later than the
+            // real edge — see that method's doc comment.
+            let step = (bound - elapsed).min(video.cycles_until_next_edge());
+            let (events, consumed) = video.tick(step);
+            let overflowed = timers.tick(consumed);
+            elapsed += consumed;
+
+            if video.interrupt_sources(&events) & ie != 0 {
+                return Some(elapsed);
+            }
+            let asked = timers.interrupts(&overflowed);
+            if (0..4).any(|ch| asked & (1 << ch) != 0 && ie & irq::source::timer(ch) != 0) {
+                return Some(elapsed);
+            }
+        }
+        None
+    }
+
     /// The other half of the wrapper: unwind and leave the exception.
     ///
     /// Recognised by the program counter reaching [`HLE_IRQ_RETURN`], which is an address inside
@@ -1093,6 +1184,54 @@ impl System for GbaSystem {
         // run this step rather than the one interrupted.
         self.update_in_bios();
         self.update_open_bus();
+        // A CPU that is still halted at this point — `service_interrupt` above did not just wake
+        // it — is doing nothing until some event ends the halt. That covers two shapes on this
+        // machine, and both are pure overhead one cycle at a time: a plain `Halt`, and an
+        // `IntrWait`/`VBlankIntrWait` retry loop, which re-enters `intercept_bios_call` below on
+        // *every* step to re-read a flag word that nothing changes until some source fires. Real
+        // software spends most of a frame in the second shape — `VBlankIntrWait` once per frame is
+        // the standard idiom — so this has to run before `intercept_bios_call`, not only for a
+        // plain `Halt`, or the common case would never reach it at all. Either way `Cpu::step`
+        // returns `Cycles(1)` without touching the bus, so stepping through it was running up to a
+        // whole frame's worth of iterations, ~280,000 of them, that changed nothing. Skip straight
+        // to whichever wakes it first, when that is something this can predict, and return with
+        // exactly that many cycles reported — *without* also running `cpu.step` or
+        // `intercept_bios_call` on the same call.
+        //
+        // The predicted edge is the earliest source `IE` enables, not only the source a wait
+        // named: on real hardware a `VBlankIntrWait` sitting under an `HBlank`-enabled raster
+        // effect still takes the full detour through the game's handler on every `HBlank`, and
+        // only the wait's own mask actually ends it — see `bios::intr_wait`'s doc comment. Landing
+        // on any enabled edge and handing off to the ordinary `service_interrupt` /
+        // `intercept_bios_call` sequence reproduces exactly that: a wait not yet satisfied re-halts
+        // and this runs again for the next edge, just as the slow path would have found on its own.
+        //
+        // That hand-off deliberately does *not* try to also finish the wake-up here by poking
+        // `irq_line`, re-running `service_interrupt`, or calling `intercept_bios_call` after the
+        // jump: the HLE handshake is a multi-call sequence (one call masks `CPSR` and points `pc`
+        // at the game's handler; only the *next* call's `service_interrupt`, seeing the mask now
+        // set, lets `Cpu::step`'s own halt check clear `halted` and fall into running the handler,
+        // which itself takes several more calls before acknowledging `IF` and returning) and
+        // short-circuiting any of it here duplicates logic that already exists once, correctly, in
+        // `service_interrupt` and `intercept_bios_call`. Landing exactly on the wake edge and
+        // leaving the rest to those functions, one or more `step_instruction` calls away, costs a
+        // little more than the theoretical minimum but reuses their sequencing instead of
+        // re-deriving it.
+        //
+        // Re-triggering forever on that next call cannot happen: the jump above raised the very
+        // interrupt this predicted, so `self.bus.irq.pending()` is true by the time this next runs,
+        // and the guard below only fires while nothing is pending yet.
+        #[cfg(test)]
+        let fast_forward_allowed = !self.disable_halt_fast_forward;
+        #[cfg(not(test))]
+        let fast_forward_allowed = true;
+        if fast_forward_allowed && self.cpu.is_halted() && !self.bus.irq.pending() {
+            if let Some(distance) = self.halt_fast_forward_cycles() {
+                self.bus.advance(distance);
+                self.bus.take_pending_waits();
+                return Cycles((distance + self.bus.take_dma_cycles()) as u64);
+            }
+        }
         if self.intercept_bios_call() {
             // The call is answered without running the instruction, so it costs nothing beyond
             // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
@@ -1101,6 +1240,11 @@ impl System for GbaSystem {
             self.bus.take_pending_waits();
             return Cycles(1 + self.bus.take_dma_cycles() as u64);
         }
+        // Armed immediately before the step that will consume it: an ARM or Thumb instruction
+        // makes exactly one fetch, always its first bus access, so this is reliably true for that
+        // access and false for every data access the instruction goes on to make. See
+        // `GbaSystemBus::awaiting_fetch`.
+        self.bus.awaiting_fetch = true;
         let cycles = self.cpu.step(&mut self.bus).get().max(1);
         // The instruction's own cost plus whatever its memory accesses waited for. Charged
         // together so a scheduled event cannot fire between two halves of one access.

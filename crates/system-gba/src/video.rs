@@ -115,6 +115,25 @@ impl VideoTiming {
         self.dot_cycle >= HBLANK_START_CYCLE
     }
 
+    /// Cycles until the next point [`Self::tick`] could report an edge: either horizontal
+    /// blanking beginning on the current line, or the line itself ending, whichever comes first.
+    ///
+    /// `tick`'s own cap only stops at a line boundary, which is correct for its callers — a real
+    /// instruction or DMA burst is always far shorter than a line, so the cap is never reached
+    /// before the access it is charging for finishes. A predictor that wants to know exactly when
+    /// `entered_hblank` will next be true, without stepping one cycle at a time to find out, has
+    /// no such guarantee: asking `tick` for a whole frame in one call skips straight past the
+    /// mid-line point where hblank actually starts to wherever the line ends, up to 272 cycles
+    /// later. Capping each request to this instead keeps `tick` from ever overshooting a mid-line
+    /// edge while still covering a whole line in at most two calls.
+    pub fn cycles_until_next_edge(&self) -> u32 {
+        if self.in_hblank() {
+            CYCLES_PER_LINE - self.dot_cycle
+        } else {
+            HBLANK_START_CYCLE - self.dot_cycle
+        }
+    }
+
     /// Which bitmap frame modes 4 and 5 display, as a VRAM byte offset.
     ///
     /// Double buffering is the whole reason those modes have two frames: a game draws into the

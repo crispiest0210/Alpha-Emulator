@@ -155,14 +155,19 @@ pub fn startup_cycles(source: u32, destination: u32) -> u32 {
 /// which is what happens when a transfer is charged through [`crate::system::GbaSystemBus`]'s
 /// ordinary path — makes every access look like a jump, since the read and the write alternate
 /// between two unrelated addresses.
+///
+/// Neither access is a code fetch — a transfer moves data, never instructions — so neither can
+/// hit the CPU's prefetch buffer, and both invalidate it if either address happens to land in ROM.
+/// That is correct: a real transfer holds the one cartridge bus the buffer also needs, so a code
+/// fetch that follows it starts the run over exactly as a jump would.
 pub fn unit_cycles(
-    waits: &WaitControl,
+    waits: &mut WaitControl,
     source: u32,
     destination: u32,
     unit: u32,
     access: Access,
 ) -> u32 {
-    waits.cost(source, unit, access) + waits.cost(destination, unit, access)
+    waits.cost(source, unit, access, false) + waits.cost(destination, unit, access, false)
 }
 
 mod control {
@@ -284,6 +289,21 @@ impl DmaController {
 
     pub fn owns(addr: u32) -> bool {
         (BASE..BASE + (CHANNELS as u32 * 12)).contains(&addr)
+    }
+
+    /// Whether any channel could fire again purely from a video edge or a FIFO request, with no
+    /// CPU instruction involved.
+    ///
+    /// `Immediate` timing only ever fires once, synchronously, when the game's own store sets the
+    /// enable bit — which cannot happen with nothing executing. `VBlank`, `HBlank`, and `Special`
+    /// all re-arm themselves from [`Self::on_vblank`], [`Self::on_hblank`], and
+    /// [`Self::on_fifo_empty`] every time their trigger recurs, whether or not the CPU is awake to
+    /// see it — which is exactly what a halted CPU's fast-forward prediction cannot account for
+    /// without simulating this controller too. See `system::GbaSystem::halt_fast_forward_cycles`.
+    pub fn has_a_channel_that_could_fire_on_its_own(&self) -> bool {
+        self.channels
+            .iter()
+            .any(|c| c.enabled() && c.timing() != StartTiming::Immediate)
     }
 
     /// Note that vertical blanking began, arming any channel waiting for it.

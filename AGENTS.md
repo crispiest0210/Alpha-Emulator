@@ -410,6 +410,30 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   at 256 colours — two rows on — and its top row decodes correctly while everything below comes
   from the wrong place, which reads as scrambled artwork rather than a mapping bug. The same 32-byte
   unit is what tile numbers count in, which is why a 256-colour sprite's numbers advance by two.
+- **A halted CPU stepping one cycle at a time is correct and up to 280,896 wasted calls a frame.**
+  Real software spends most of a frame in `VBlankIntrWait`, not a plain `Halt`, and the two look
+  identical from `Cpu::step`'s side: both return `Cycles(1)` without touching the bus until
+  something wakes them. `GbaSystem::halt_fast_forward_cycles` predicts the next cycle some enabled
+  source fires — from a scratch copy of the video and timer state, reusing their real `tick`
+  methods rather than a second formula that could disagree — and jumps the bus straight there,
+  then hands off to the same `service_interrupt`/`intercept_bios_call` sequencing the slow path
+  already used to actually dispatch. The one place that sequencing cannot be shortcut further: it
+  is a multi-call handshake (one call masks `CPSR` and points `pc` at the handler; only the *next*
+  call's `service_interrupt` lets `Cpu::step`'s own halt check clear `halted` and run it), so the
+  fast path returns immediately after the jump rather than also calling `cpu.step` on the same
+  call — doing so was tried, and cost an extra cycle relative to the slow path by attempting
+  dispatch a call early, before the jump had raised anything for `service_interrupt` to see.
+  **The predictor itself had the same shape of bug the DMA and video-collapse ones did: it asked
+  a coarser primitive for more than that primitive actually promises.**
+  `video::VideoTiming::tick` only ever stops at a line boundary, by design, because a real
+  instruction never asks it for more than a handful of cycles — but the predictor asks for a whole
+  frame at once, and an uncapped request sailed straight past a mid-line `HBlank` edge to wherever
+  the line ended, up to 272 cycles late. `video::VideoTiming::cycles_until_next_edge` caps each
+  request to the edge instead. An equivalence test running the fast and slow paths side by side and
+  asserting the identical cycle count *and* register state, not merely that both complete, is what
+  caught it — a weaker "does it eventually return" test passes with the overshoot still in it.
+  Measured on the workload this exists for, a `VBlankIntrWait` loop with `HBlank` also enabled:
+  4.74 ms to 33 µs, a 145x reduction; `gba/spin`, which never halts, is unaffected.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

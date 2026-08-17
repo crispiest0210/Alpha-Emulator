@@ -536,6 +536,7 @@ that produced them rather than in prose that can drift from them.
 | Game Boy, rendering | 246 µs | 68x |
 | Game Boy, rendering + four APU channels | 361 µs | 46x |
 | Game Boy Advance, ARM instructions straight from ROM | 1 372 µs | 12.2x |
+| Game Boy Advance, halted in `VBlankIntrWait` with `HBlank` also enabled | 33 µs | 507x |
 | Game Boy Advance, **a commercial game** (measured outside the bench suite) | ≈3 050 µs | ≈5x |
 | dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
 | Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
@@ -575,12 +576,17 @@ Three findings worth surfacing:
   leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
   deliberate deviation with the number, not as compliance.
 
-Two things have been optimised, each with a profiled problem behind it and a before/after to show
-for it — the DS bus composing wide accesses out of byte accesses (−65% of a frame), and the GBA's
-per-instruction scheduler poll, which a `sample` profile of a real game put at **39% of a frame**
-against 7% for all of rendering (−8.2% of `gba/spin`, hash unchanged). Nothing else has been:
-every system meets its target with 5x to 80x of margin, and an optimisation with no problem behind
-it is not worth its own risk.
+Three things have been optimised, each with a profiled or measured problem behind it and a
+before/after to show for it — the DS bus composing wide accesses out of byte accesses (−65% of a
+frame), the GBA's per-instruction scheduler poll, which a `sample` profile of a real game put at
+**39% of a frame** against 7% for all of rendering (−8.2% of `gba/spin`, hash unchanged), and the
+GBA's halted-CPU loop, which ran `step_instruction` once per cycle — up to 280,896 calls a frame —
+until something woke it. Predicting the next enabled edge and jumping the bus straight there,
+before handing off to the same interrupt-dispatch sequencing the slow path already used, cut a
+`VBlankIntrWait` loop with `HBlank` also enabled (the idiom real software actually spends most of a
+frame in, not the never-halting `gba/spin` case above) from 4.74 ms to 33 µs, a **145x reduction**.
+Nothing else has been: every system meets its target with 5x to 507x of margin, and an optimisation
+with no problem behind it is not worth its own risk.
 
 **Benchmark figures here move by up to 2x with the machine's thermal state.** `gba/spin` measured
 2 665 µs during a long working session and 1 372 µs on identical code cooled down. Make a

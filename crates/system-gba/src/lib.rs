@@ -111,6 +111,13 @@
 //! like was a frozen picture with the CPU visibly running. See `system::GbaSystemBus::charge`:
 //! charge once, at the width the CPU asked for, and charge only the waiting.
 //!
+//! Fixing that made the wait-state table matter for the first time, which is what exposed the gap
+//! next to it: `WAITCNT`'s prefetch bit was read and otherwise ignored, so a game that linked its
+//! hot code into a slow ROM window specifically to turn this on and get sequential fetches for one
+//! cycle instead of the window's configured cost paid the full price anyway. `waitstates::cost` now
+//! tracks whether the previous access was a sequential code fetch with the bit set — see the
+//! module's own doc comment for why that single bit, not a queue with a depth, is enough.
+//!
 //! The second one has the same shape and is worth the same suspicion: `IntrWait` and
 //! `VBlankIntrWait` were implemented as a plain halt, so they returned on *any* interrupt rather
 //! than the ones named in `r1`. A game that also enables HBlank or a timer — which is most of them
@@ -148,6 +155,21 @@
 //! per burst instead of twenty, and the queue never drains far enough to ask for a refill.
 //! `dma::unit_cycles` and `system::GbaSystemBus::run_transfer` are the fix, and
 //! `system::tests::dma_timing` pins all five behaviours.
+//!
+//! A fifth is the reverse of the fourth: not a stall going missing, but a fast path landing on the
+//! wrong cycle while trying to skip one. A halted CPU — a plain `Halt`, or the far more common
+//! `IntrWait`/`VBlankIntrWait` retry loop real software spends most of a frame in — used to run
+//! `step_instruction` once per cycle until something woke it, which is correct and also up to
+//! 280,896 calls a frame that touch nothing. `GbaSystem::halt_fast_forward_cycles` predicts the
+//! next enabled edge instead and jumps the bus straight there. The bug was in what "the edge"
+//! meant: `video::VideoTiming::tick` only stops at a line boundary, so asking it for the rest of a
+//! whole frame in one call sailed straight past a mid-line `HBlank` edge to wherever the line
+//! ended, up to 272 cycles late — a game pacing a raster effect off `HBlank` would have woken it a
+//! partial scanline after hardware does. `video::VideoTiming::cycles_until_next_edge` caps each
+//! request to the edge instead. Found by an equivalence test that runs the fast and slow paths
+//! side by side and asserts they land on the identical cycle count and register state, not merely
+//! that both eventually complete — the weaker check would have passed with the overshoot still in
+//! it, since both paths still terminate.
 //!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that

@@ -53,6 +53,44 @@ fn horizontal_blanking_begins_after_the_visible_dots() {
 }
 
 #[test]
+fn cycles_until_next_edge_stops_at_hblank_start_not_the_line_end() {
+    // The gap `tick`'s own cap cannot see: asked for a whole line in one call, it would report
+    // this many cycles late, landing at the line's end rather than where hblank actually starts.
+    let video = VideoTiming::new();
+    assert_eq!(video.cycles_until_next_edge(), HBLANK_START_CYCLE);
+}
+
+#[test]
+fn cycles_until_next_edge_stops_at_the_line_end_once_already_in_hblank() {
+    let mut video = VideoTiming::new();
+    tick_all(&mut video, HBLANK_START_CYCLE);
+    assert!(video.in_hblank());
+    assert_eq!(
+        video.cycles_until_next_edge(),
+        CYCLES_PER_LINE - HBLANK_START_CYCLE
+    );
+}
+
+#[test]
+fn a_tick_capped_to_cycles_until_next_edge_never_overshoots_into_hblank() {
+    // The property `halt_fast_forward_cycles` in `system.rs` relies on: a request capped to
+    // `cycles_until_next_edge`, even when what the caller actually wanted was far larger, lands
+    // exactly on the edge instead of sailing past it into the next line the way an uncapped
+    // request for the same huge span would (`tick`'s own cap only stops at a line boundary).
+    let mut video = VideoTiming::new();
+    let huge_request = CYCLES_PER_LINE * 10;
+    let cap = video.cycles_until_next_edge();
+    let (events, consumed) = video.tick(huge_request.min(cap));
+    assert_eq!(consumed, cap);
+    assert!(events.entered_hblank);
+    assert_eq!(
+        video.cycles_until_next_edge(),
+        CYCLES_PER_LINE - HBLANK_START_CYCLE,
+        "stopped exactly at the edge, not somewhere inside the next line"
+    );
+}
+
+#[test]
 fn entering_horizontal_blanking_is_reported_once_per_line() {
     let mut video = VideoTiming::new();
     let events = tick_all(&mut video, HBLANK_START_CYCLE);
