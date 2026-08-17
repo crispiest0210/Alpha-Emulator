@@ -317,6 +317,23 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   `advance_line` may already have moved it onto the next line in the same call. A per-scanline
   scroll, gradient, or window effect corrupts progressively when this is missed, as its HDMA source
   pointer advances 68 times too many per frame.
+- **GBA DMA used to be instantaneous and free, and three separate bugs were hiding behind that.**
+  A transfer copied its whole block in one `while` loop costing zero emulated cycles, so the wait
+  states its own accesses incurred sat in `pending_waits` until *the next instruction* paid them,
+  the bus latch it left behind made that instruction's fetch count as a jump, and `Timers::tick`
+  could return a bitmask because no caller ever passed enough cycles to overflow a timer twice.
+  That last one is the shape worth remembering: **a correctness shortcut that is safe only because
+  of how small its input happens to be**, with nothing anywhere saying so. Giving DMA a duration
+  made every one of them reachable in the same change. A transfer now costs 2 cycles of startup
+  (4 when both ends are in cartridge space) plus an N/S read and write per unit from
+  `waitstates.rs`, and it spends them by calling `run_clocks` *between* units so an HBlank or a
+  timer overflow inside a long copy lands where it belongs. Two things to know before touching it:
+  `run_pending_dma` has a re-entrancy guard because three paths lead into it and two of them can
+  fire mid-transfer — without it, a channel whose destination is its own control register
+  stack-overflows the process rather than failing an assertion — and **the full
+  `core_common::Scheduler` migration is still open**, deferred deliberately because it is a
+  `cpu-arm7tdmi` change (cycles reported as they are spent rather than at the end of an
+  instruction) rather than a DMA one. `system::GbaSystemBus`'s module docs argue that.
 - **DMA source and destination addresses are not full 32-bit values on this hardware.** Channel 0
   drives 27 address lines and channels 1-3 drive 28; a stray high bit above that window does not
   address a different region the way it would in ordinary 32-bit arithmetic, it wraps back inside

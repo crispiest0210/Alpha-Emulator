@@ -26,6 +26,27 @@
 //! wrong does not fail a test: the emulator still produces frames at 100% speed, because a frame is
 //! a fixed number of cycles however few instructions fit inside it. What a game loses is processor
 //! time, and what that looks like is a title screen that never arrives.
+//!
+//! # There is no event scheduler here, and that is a decision rather than an omission
+//!
+//! `core_common::Scheduler` exists and `system-gb` uses it. This machine does not: the ARM core
+//! reports an instruction's cost by *returning* it, so an instruction runs to completion and
+//! [`GbaSystemBus::advance`] is called afterwards with the total. Nothing can therefore be
+//! scheduled *inside* an instruction, and everything that wants to happen mid-instruction has to
+//! be driven by hand from wherever the cycles are known.
+//!
+//! `GbaSystemBus::run_transfer` is that, done deliberately: DMA spends its cycles by calling
+//! `run_clocks` between units, so the display and the timers advance through a transfer instead of
+//! jumping over it. It is the shape a scheduler would give for free, written out once for the one
+//! caller that needed it.
+//!
+//! **Moving this machine onto the scheduler remains open**, and it is the right long-term
+//! direction — it would put DMA, the video edges, and the timers on one ordered queue rather than
+//! on a hand-written recursion whose ordering is a property of the call graph. It was deferred
+//! here because it is not a change to DMA: it means the CPU core reporting cycles as it spends
+//! them rather than at the end, which is a `cpu-arm7tdmi` change that `system-nds` also depends
+//! on. Doing it as part of giving DMA a duration would have made a bounded correctness fix into a
+//! rewrite of how the machine is clocked.
 
 use cart_common::GbaHeader;
 use core_common::{
@@ -119,6 +140,10 @@ pub struct GbaSystemBus {
     pending_waits: u32,
     /// The address after the last access, for deciding whether the next one is sequential.
     next_sequential: u32,
+    /// Cycles DMA has stalled the CPU for, not yet reported to the caller.
+    dma_cycles: u32,
+    /// Whether a transfer is running, so nothing re-enters `run_pending_dma` inside one.
+    in_dma: bool,
 }
 
 impl GbaSystemBus {
@@ -144,6 +169,8 @@ impl GbaSystemBus {
             frame_ready: false,
             pending_waits: 0,
             next_sequential: 0,
+            dma_cycles: 0,
+            in_dma: false,
         }
     }
 
@@ -196,39 +223,48 @@ impl GbaSystemBus {
     }
 
     /// Advance every clocked subsystem and act on what they report.
+    ///
+    /// A transfer started along the way spends cycles of its own on top of `cycles`; those are
+    /// reported separately through [`Self::take_dma_cycles`], because the CPU was stalled for them
+    /// and its own instruction cost cannot absorb them.
     pub fn advance(&mut self, cycles: u32) {
-        let overflowed = self.timers.tick(cycles);
-        if overflowed != 0 {
-            let asked = self.timers.interrupts(overflowed);
-            for channel in 0..4 {
-                if asked & (1 << channel) != 0 {
-                    self.irq.raise(irq::source::timer(channel));
-                }
-            }
-            // A timer overflow is what advances a direct-sound channel, and draining one may
-            // leave it needing a refill — which is a DMA request, not an audio event. Iterated
-            // directly rather than collected first: `refill_requests` borrows only `self.sound`,
-            // a different field from the `self.dma` the loop body needs mutably, so the borrow
-            // checker accepts the two side by side without a `Vec` to hold the gap open.
-            self.sound.on_timer_overflow(overflowed);
-            for address in self.sound.refill_requests() {
-                self.dma.on_fifo_empty(address);
-            }
-        }
+        self.run_clocks(cycles);
+    }
 
-        // `video.tick` never advances past the next line boundary, so a step spanning several
-        // lines — a long CPU instruction or a DMA burst routinely covers more than one — is fed
-        // back in a loop here rather than asked to report every edge from one call. That used to
-        // be a single `VideoEvents` covering the whole span, which has no way to hold more than
-        // one scanline: a three-line step rendered only the last of them, advanced the affine
-        // layers once instead of three times, and armed HBlank DMA once instead of three times.
-        // Looping the small, fixed-size event instead costs nothing extra on the overwhelmingly
-        // common case of a step that does not cross a line at all — one call, one no-op check —
-        // and is exact on the rare one that does.
+    /// Cycles DMA has stalled the CPU for since the last call.
+    ///
+    /// Taken rather than read, and separate from the argument to [`Self::advance`], because a
+    /// transfer can begin in either of two places: inside `advance`, from an HBlank or a FIFO
+    /// request, or inside the CPU's own instruction, from the store that set an enable bit. Both
+    /// are time the machine spent with the CPU held off the bus.
+    pub fn take_dma_cycles(&mut self) -> u32 {
+        std::mem::take(&mut self.dma_cycles)
+    }
+
+    /// Advance timers and video by `cycles`, acting on every edge they report.
+    ///
+    /// Called re-entrantly by design: [`Self::run_transfer`] drives this once per unit it moves,
+    /// so a DMA burst worth several scanlines advances the display *through* the copy instead of
+    /// after it. `run_pending_dma`'s guard bounds the recursion at one level.
+    ///
+    /// `video.tick` never advances past the next line boundary, so a step spanning several lines
+    /// — a long CPU instruction or a DMA burst routinely covers more than one — is fed back in a
+    /// loop here rather than asked to report every edge from one call. That used to be a single
+    /// `VideoEvents` covering the whole span, which has no way to hold more than one scanline: a
+    /// three-line step rendered only the last of them, advanced the affine layers once instead of
+    /// three times, and armed HBlank DMA once instead of three times. Looping the small,
+    /// fixed-size event instead costs nothing extra on the overwhelmingly common case of a step
+    /// that does not cross a line at all — one call, one no-op check — and is exact on the rare
+    /// one that does.
+    fn run_clocks(&mut self, cycles: u32) {
         let mut remaining = cycles;
         while remaining > 0 {
             let (events, consumed) = self.video.tick(remaining);
             remaining -= consumed;
+            // Ticked by the same chunk the display just took rather than by the whole span up
+            // front: a timer overflow three scanlines into a burst has to raise its interrupt
+            // three scanlines in, not before the first line was drawn.
+            self.tick_timers(consumed);
             self.irq.raise(self.video.interrupt_sources(&events));
 
             if events.frame_started {
@@ -269,6 +305,29 @@ impl GbaSystemBus {
         self.generate_samples(cycles as u64);
     }
 
+    /// Advance the four timers and act on whatever overflowed.
+    fn tick_timers(&mut self, cycles: u32) {
+        let overflowed = self.timers.tick(cycles);
+        if !overflowed.any() {
+            return;
+        }
+        let asked = self.timers.interrupts(&overflowed);
+        for channel in 0..4 {
+            if asked & (1 << channel) != 0 {
+                self.irq.raise(irq::source::timer(channel));
+            }
+        }
+        // A timer overflow is what advances a direct-sound channel, and draining one may
+        // leave it needing a refill — which is a DMA request, not an audio event. Iterated
+        // directly rather than collected first: `refill_requests` borrows only `self.sound`,
+        // a different field from the `self.dma` the loop body needs mutably, so the borrow
+        // checker accepts the two side by side without a `Vec` to hold the gap open.
+        self.sound.on_timer_overflow(&overflowed);
+        for address in self.sound.refill_requests() {
+            self.dma.on_fifo_empty(address);
+        }
+    }
+
     fn render_line(&mut self, line: u32) {
         // The framebuffer is taken out so the rest of the bus can be borrowed immutably by the
         // renderer, then put back. Cheaper than threading a lifetime through the compositor for
@@ -288,29 +347,93 @@ impl GbaSystemBus {
     }
 
     /// Perform every transfer that is ready, highest priority first.
+    ///
+    /// # Why this cannot re-enter itself
+    ///
+    /// Three separate paths lead here, and two of them can fire while a transfer is already
+    /// running: the write hook that starts an immediate transfer the instant an enable bit is set
+    /// — which a transfer whose destination lands in the DMA register block triggers on itself —
+    /// and [`Self::run_clocks`], which this now calls once per unit moved and which ends every
+    /// iteration by asking for pending DMA. Both used to recurse. The guard turns that into what
+    /// hardware does instead: the running transfer finishes, and the loop below picks up whatever
+    /// became ready in the meantime, still in channel-priority order because
+    /// [`DmaController::take_transfer`] rescans from channel 0 every call.
+    ///
+    /// What that does *not* model is preemption. A higher-priority channel arming mid-copy waits
+    /// for the block to finish rather than interrupting it; see the [`crate::dma`] module docs.
     fn run_pending_dma(&mut self) {
         // Asked after every instruction, and the answer is almost always no.
-        if !self.dma.any_armed() {
+        if !self.dma.any_armed() || self.in_dma {
             return;
         }
+        self.in_dma = true;
+
+        // A transfer's accesses are charged to the transfer, not to whatever the CPU does next.
+        // Every `read32`/`write32` below goes through `charge`, which accumulates wait states into
+        // `pending_waits` and moves `next_sequential`; leaving either alone handed the instruction
+        // *after* a copy the whole burst's wait states, and a spurious non-sequential fetch on top
+        // — the CPU's own access stream is continuous across a bus cycle it never made. The cost
+        // of the handover is charged where it belongs, in the transfer's startup latency.
+        let waits = self.pending_waits;
+        let sequential = self.next_sequential;
+
+        let mut spent = 0u32;
         while let Some(transfer) = self.dma.take_transfer() {
-            let mut source = transfer.source;
-            let mut destination = transfer.destination;
-            for _ in 0..transfer.words {
-                if transfer.unit == 4 {
-                    let value = self.read32(source);
-                    self.write32(destination, value);
-                } else {
-                    let value = self.read16(source);
-                    self.write16(destination, value);
-                }
-                source = step(source, transfer.source_step, transfer.unit);
-                destination = step(destination, transfer.destination_step, transfer.unit);
-            }
-            if transfer.raise_irq {
-                self.irq.raise(irq::source::dma(transfer.channel));
+            spent += self.run_transfer(&transfer);
+            // A repeating HBlank channel whose block is longer than a scanline re-arms itself
+            // faster than it drains, which on hardware is a machine that never gives the bus back.
+            // Bounded here so the emulator makes progress and can be traced instead of hanging:
+            // the channel stays armed and runs again at the next call.
+            if spent >= FRAME_CYCLES as u32 {
+                break;
             }
         }
+        self.dma_cycles += spent;
+
+        self.pending_waits = waits;
+        self.next_sequential = sequential;
+        self.in_dma = false;
+    }
+
+    /// Move one block, advancing the machine through it. Returns the cycles it took.
+    ///
+    /// The clock runs between units rather than after the whole block, which is the entire point:
+    /// a 240-word copy is most of a scanline, and a display that stood still through it would put
+    /// every HBlank the copy spans at the wrong cycle — and with it every HDMA the game hangs off
+    /// one. Time is spent *after* each unit moves, so a scanline rendered inside the copy sees the
+    /// bytes that had actually arrived by then.
+    fn run_transfer(&mut self, transfer: &crate::dma::Transfer) -> u32 {
+        let mut source = transfer.source;
+        let mut destination = transfer.destination;
+
+        let startup = crate::dma::startup_cycles(source, destination);
+        self.run_clocks(startup);
+        let mut spent = startup;
+
+        // The first unit reads and writes non-sequentially; every unit after it walks on from
+        // where the last one left off, on both streams independently.
+        let mut access = Access::NonSequential;
+        for _ in 0..transfer.words {
+            let cost =
+                crate::dma::unit_cycles(&self.waits, source, destination, transfer.unit, access);
+            if transfer.unit == 4 {
+                let value = self.read32(source);
+                self.write32(destination, value);
+            } else {
+                let value = self.read16(source);
+                self.write16(destination, value);
+            }
+            self.run_clocks(cost);
+            spent += cost;
+            source = step(source, transfer.source_step, transfer.unit);
+            destination = step(destination, transfer.destination_step, transfer.unit);
+            access = Access::Sequential;
+        }
+
+        if transfer.raise_irq {
+            self.irq.raise(irq::source::dma(transfer.channel));
+        }
+        spent
     }
 
     fn generate_samples(&mut self, cycles: u64) {
@@ -976,14 +1099,18 @@ impl System for GbaSystem {
             // against it, but a wrong non-zero figure is no better than this one.
             self.bus.advance(1);
             self.bus.take_pending_waits();
-            return Cycles(1);
+            return Cycles(1 + self.bus.take_dma_cycles() as u64);
         }
         let cycles = self.cpu.step(&mut self.bus).get().max(1);
         // The instruction's own cost plus whatever its memory accesses waited for. Charged
         // together so a scheduled event cannot fire between two halves of one access.
         let total = cycles as u32 + self.bus.take_pending_waits();
         self.bus.advance(total);
-        Cycles(total as u64)
+        // Plus however long DMA held the bus. The transfer has already advanced the machine
+        // itself, so this only reports the time — but reporting it is what makes a game that
+        // copies a megabyte a frame get through proportionally less code, which is the whole
+        // observable effect of DMA having a duration.
+        Cycles((total + self.bus.take_dma_cycles()) as u64)
     }
 
     fn id(&self) -> &'static str {

@@ -128,6 +128,27 @@
 //! many cycles that used; the caller loops, feeding the remainder back in until none is left. See
 //! `system::GbaSystemBus::advance`.
 //!
+//! A fourth is the largest of the four and the same shape again: **DMA was instantaneous and
+//! free.** A transfer copied its whole block inside one `while` loop in zero emulated cycles —
+//! no 2-cycle startup latency, no per-unit read and write cost, no CPU stall, and neither the
+//! display nor the timers moved while it ran. Three further things followed from that, and every
+//! one of them was invisible for the same reason the first three were: the machine still produced
+//! 228 scanlines of 1232 cycles each, so nothing about a frame looked wrong. The wait states a
+//! transfer's own accesses incurred landed in `pending_waits` and were charged to *the next
+//! instruction*, which also had its fetch counted as non-sequential because the copy had moved the
+//! bus's latch; and `Timers::tick` returned a bitmask, so N overflows inside one call collapsed to
+//! one — one FIFO sample popped where hardware popped N. That last one was safe only because
+//! `advance` was never called with more than an instruction's handful of cycles, which is exactly
+//! what stopped being true.
+//!
+//! What a game loses is the opposite of the wait-state bug: not processor time but the *absence*
+//! of a stall it was counting on. A game that fires a 240-word HDMA on every scanline gets those
+//! copies for nothing, so its CPU runs further into each line than hardware allows and every raster
+//! effect lands a few cycles early; a game pacing direct sound off a short timer gets one sample
+//! per burst instead of twenty, and the queue never drains far enough to ask for a refill.
+//! `dma::unit_cycles` and `system::GbaSystemBus::run_transfer` are the fix, and
+//! `system::tests::dma_timing` pins all five behaviours.
+//!
 //! The GBA is the system the *predecessor* project targeted, so prompt 12 sets the bar at "at
 //! least as correct and complete as the vendored core it replaces, with the test coverage that
 //! core never had". The second half of that is met; the first is unmeasured until the accuracy

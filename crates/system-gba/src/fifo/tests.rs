@@ -10,6 +10,13 @@ const BOTH_CHANNELS_FULL: u16 = (1 << 2) // A at full volume
     | (1 << 8) | (1 << 9) // A right and left
     | (1 << 12) | (1 << 13); // B right and left
 
+/// One overflow of a single timer, which is what an ordinary `Timers::tick` reports.
+fn once(channel: usize) -> Overflows {
+    let mut counts = [0; crate::timers::CHANNELS];
+    counts[channel] = 1;
+    Overflows::from_counts(counts)
+}
+
 fn enabled_sound() -> DirectSound {
     let mut sound = DirectSound::new();
     sound.write16(reg::SOUNDCNT_X, 1 << 7);
@@ -133,11 +140,11 @@ fn each_channel_selects_its_own_timer() {
     sound.write32(reg::FIFO_A, 0x0000_0011);
     sound.write32(reg::FIFO_B, 0x0000_0022);
 
-    sound.on_timer_overflow(1 << 0);
+    sound.on_timer_overflow(&once(0));
     assert_eq!(sound.a.current_sample(), 0x11);
     assert_eq!(sound.b.current_sample(), 0, "timer 1 has not fired");
 
-    sound.on_timer_overflow(1 << 1);
+    sound.on_timer_overflow(&once(1));
     assert_eq!(sound.b.current_sample(), 0x22);
 }
 
@@ -146,7 +153,7 @@ fn both_channels_can_share_one_timer() {
     let mut sound = enabled_sound();
     sound.write32(reg::FIFO_A, 0x0000_0011);
     sound.write32(reg::FIFO_B, 0x0000_0022);
-    sound.on_timer_overflow(1 << 0);
+    sound.on_timer_overflow(&once(0));
     assert_eq!(sound.a.current_sample(), 0x11);
     assert_eq!(sound.b.current_sample(), 0x22);
 }
@@ -171,7 +178,7 @@ fn a_refill_request_names_the_fifo_address_the_dma_channel_matches_on() {
 fn the_master_switch_silences_everything() {
     let mut sound = enabled_sound();
     sound.write32(reg::FIFO_A, 0x7F7F_7F7F);
-    sound.on_timer_overflow(1);
+    sound.on_timer_overflow(&once(0));
     assert_ne!(sound.output().0, 0.0);
 
     sound.write16(reg::SOUNDCNT_X, 0);
@@ -186,7 +193,7 @@ fn a_channel_not_enabled_on_a_side_contributes_nothing_there() {
     // Channel A: full volume, left only.
     sound.write16(reg::SOUNDCNT_H, (1 << 2) | (1 << 9));
     sound.write32(reg::FIFO_A, 0x0000_007F);
-    sound.on_timer_overflow(1);
+    sound.on_timer_overflow(&once(0));
 
     let (left, right) = sound.output();
     assert!(left > 0.9, "left got the sample");
@@ -199,13 +206,13 @@ fn the_half_volume_setting_halves_the_output() {
     quiet.write16(reg::SOUNDCNT_X, 1 << 7);
     quiet.write16(reg::SOUNDCNT_H, 1 << 9); // left, half volume
     quiet.write32(reg::FIFO_A, 0x0000_007F);
-    quiet.on_timer_overflow(1);
+    quiet.on_timer_overflow(&once(0));
 
     let mut loud = DirectSound::new();
     loud.write16(reg::SOUNDCNT_X, 1 << 7);
     loud.write16(reg::SOUNDCNT_H, (1 << 2) | (1 << 9));
     loud.write32(reg::FIFO_A, 0x0000_007F);
-    loud.on_timer_overflow(1);
+    loud.on_timer_overflow(&once(0));
 
     assert!((loud.output().0 - quiet.output().0 * 2.0).abs() < 1e-6);
 }
@@ -247,7 +254,7 @@ fn direct_sound_state_round_trips_mid_playback() {
     let mut sound = enabled_sound();
     sound.write32(reg::FIFO_A, 0x0403_0201);
     sound.write32(reg::FIFO_B, 0x0807_0605);
-    sound.on_timer_overflow(1);
+    sound.on_timer_overflow(&once(0));
 
     let bytes = encode_state("gba-fifo", 1, &sound);
     let mut restored = DirectSound::new();
@@ -255,8 +262,8 @@ fn direct_sound_state_round_trips_mid_playback() {
     assert_eq!(restored, sound);
 
     // And the next sample is the one that was actually next, not the start of the queue.
-    restored.on_timer_overflow(1);
-    sound.on_timer_overflow(1);
+    restored.on_timer_overflow(&once(0));
+    sound.on_timer_overflow(&once(0));
     assert_eq!(restored.a.current_sample(), sound.a.current_sample());
     assert_eq!(restored.a.current_sample(), 2);
 }

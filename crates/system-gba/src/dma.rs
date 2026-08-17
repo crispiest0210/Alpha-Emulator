@@ -23,8 +23,34 @@
 //!
 //! Same split as the Game Boy's OAM and VRAM DMA in prompt 11: the copy crosses every region of
 //! the memory map, so the controller yields a [`Transfer`] and the bus performs it.
+//!
+//! # A transfer takes time, and the CPU does not run during it
+//!
+//! GBATEK gives the whole cost as `2N+2(n-1)S+xI`: a non-sequential read and a non-sequential
+//! write for the first unit, a sequential pair for each unit after it, and `x` internal cycles of
+//! startup — 2 normally, 4 when both ends are in cartridge space, because the bus has to be handed
+//! over twice. [`startup_cycles`] and [`unit_cycles`] are those two halves; the bus spends them by
+//! advancing the machine between units, so an HBlank or a timer overflow that falls inside a long
+//! transfer lands where it belongs rather than after the copy.
+//!
+//! This module used to say nothing at all about cycles, and the transfer ran in zero emulated
+//! time. See the crate docs for what that hid.
+//!
+//! # What is still not modelled
+//!
+//! **A running transfer is not preempted.** A higher-priority channel that becomes ready mid-copy
+//! waits for the current one to finish, and then runs before any lower-priority channel that also
+//! became ready — which is what [`DmaController::take_transfer`] scanning from 0 already gives.
+//! Hardware does arbitrate at a finer grain than that, and modelling it means suspending a
+//! transfer mid-block and resuming it, which needs the running unit index to become saved state.
+//!
+//! **A transfer does not observe `DISPCNT`'s HBlank-interval-free bit**, and video capture on
+//! channel 3 (`Special` timing) is not distinguished from an ordinary block copy.
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
+
+use crate::memory::Region;
+use crate::waitstates::{Access, WaitControl};
 
 pub const CHANNELS: usize = 4;
 
@@ -97,6 +123,46 @@ pub struct Transfer {
     pub destination_step: AddressStep,
     /// Whether finishing this transfer should raise the channel's interrupt.
     pub raise_irq: bool,
+}
+
+/// Internal cycles before the first unit of a transfer moves.
+///
+/// GBATEK's `xI`. Two is the ordinary figure; it is doubled when both ends live in cartridge
+/// space, because the controller has to hand the one cartridge bus back and forth.
+pub const STARTUP_CYCLES: u32 = 2;
+/// The same, when both the source and the destination are in cartridge space.
+pub const STARTUP_CYCLES_BOTH_GAMEPAK: u32 = 4;
+
+/// Whether an address is served by the cartridge bus.
+fn is_gamepak(addr: u32) -> bool {
+    matches!(Region::of(addr), Region::Rom { .. } | Region::Sram)
+}
+
+/// What a transfer spends before moving anything.
+pub fn startup_cycles(source: u32, destination: u32) -> u32 {
+    if is_gamepak(source) && is_gamepak(destination) {
+        STARTUP_CYCLES_BOTH_GAMEPAK
+    } else {
+        STARTUP_CYCLES
+    }
+}
+
+/// What one unit of a transfer costs: a read and a write, each at the width being moved.
+///
+/// `access` is the *stream's* kind, not the bus's: the first unit reads and writes
+/// non-sequentially and every unit after it does both sequentially, because the two addresses walk
+/// forward independently of each other. Deriving it from the bus's `next_sequential` instead —
+/// which is what happens when a transfer is charged through [`crate::system::GbaSystemBus`]'s
+/// ordinary path — makes every access look like a jump, since the read and the write alternate
+/// between two unrelated addresses.
+pub fn unit_cycles(
+    waits: &WaitControl,
+    source: u32,
+    destination: u32,
+    unit: u32,
+    access: Access,
+) -> u32 {
+    waits.cost(source, unit, access) + waits.cost(destination, unit, access)
 }
 
 mod control {

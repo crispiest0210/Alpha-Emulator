@@ -255,7 +255,7 @@ Component status:
 | `frontend-core` settings — TOML config, keybinds, presentation, rewind depth | done; a malformed file falls back to defaults and is left on disk |
 | `frontend-native` — window, `wgpu` presentation, `egui` chrome, library browser, HUD, keybind editor | done; **no native file dialog — drag-and-drop or a pasted path** |
 | `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
-| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; a sound-FIFO transfer's shape is fixed by hardware rather than read from the channel |
+| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; a sound-FIFO transfer's shape is fixed by hardware rather than read from the channel, and a transfer has a real duration — 2 cycles of startup plus an N/S read and write per unit, with the display and the timers advanced through it. **A running transfer is not preempted** by a higher-priority channel; it finishes and the next one runs after it |
 | `system-gba` video timing and bitmap modes 3/4/5 | done and tested, and driven by real games |
 | `system-gba` text backgrounds — four layers, map decode, draw order | done and tested, and driven by real games |
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |

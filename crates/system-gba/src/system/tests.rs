@@ -972,8 +972,17 @@ mod hblank_dma {
         let mut gba = system();
         arm_marking_channel(&mut gba);
 
-        for _ in 0..crate::video::LINES_PER_FRAME {
-            gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        // Driven a dot at a time and counted by `VCOUNT` rather than as a fixed number of
+        // line-sized advances. Each transfer now costs cycles of its own, so 228 calls of one
+        // line each land eight cycles per visible line past the frame boundary — well into line 0
+        // of the next frame, whose HBlank then writes a hundred and sixty-first mark.
+        let mut lines = 0;
+        while lines < crate::video::LINES_PER_FRAME {
+            let before = gba.bus().video.vcount();
+            gba.bus_mut().advance(crate::video::CYCLES_PER_DOT);
+            if gba.bus().video.vcount() != before {
+                lines += 1;
+            }
         }
 
         assert_eq!(
@@ -1015,6 +1024,188 @@ mod hblank_dma {
             gba.bus_mut().irq.read16(crate::irq::reg::IF).unwrap() & crate::irq::source::HBLANK,
             crate::irq::source::HBLANK,
             "HBlank still interrupts in VBlank even though its DMA no longer arms there"
+        );
+    }
+}
+
+/// A transfer takes time, and the machine runs *through* it rather than around it.
+///
+/// DMA used to copy its whole block inside one `while` loop in zero emulated cycles: the display
+/// stood still, no timer ticked, and the CPU paid nothing for a burst that on hardware holds the
+/// bus for most of a scanline. The tests here pin the cost and the three things that were wrong
+/// downstream of it.
+mod dma_timing {
+    use super::*;
+
+    /// Channel 0's registers. `dma::control` is private to that module, so the bits in use are
+    /// named here rather than imported.
+    const SOURCE: u32 = crate::dma::BASE;
+    const DESTINATION: u32 = crate::dma::BASE + 4;
+    const WORD_COUNT: u32 = crate::dma::BASE + 8;
+    const CONTROL: u32 = crate::dma::BASE + 10;
+    /// Enable (bit 15) and 32-bit units (bit 10). Timing bits clear, so it starts immediately.
+    const START_NOW_IN_WORDS: u16 = 0x8000 | 0x0400;
+
+    /// Timer 0's two registers, and the two control bits these tests need.
+    const TIMER_RELOAD: u32 = crate::timers::BASE;
+    const TIMER_CONTROL: u32 = crate::timers::BASE + 2;
+    const TIMER_ENABLE: u16 = 1 << 7;
+    const TIMER_IRQ: u16 = 1 << 6;
+
+    const IWRAM: u32 = 0x0300_0000;
+    const VRAM: u32 = 0x0600_0000;
+
+    /// The transfer under test: 240 32-bit units from internal WRAM to video RAM, which is one
+    /// scanline of a mode 3 bitmap and the shape a game's per-frame blit actually has.
+    ///
+    /// Two cycles of startup, then a 1-cycle IWRAM read and a 2-cycle VRAM write for each unit —
+    /// VRAM being on a 16-bit bus, so a word is two accesses there and one here.
+    const WORDS: u16 = 240;
+    const EXPECTED_CYCLES: u32 = 2 + WORDS as u32 * (1 + 2);
+
+    /// Arm channel 0 for that transfer. The final store is what runs it, immediately.
+    fn run_the_transfer(bus: &mut GbaSystemBus) {
+        bus.write32(SOURCE, IWRAM);
+        bus.write32(DESTINATION, VRAM);
+        bus.write16(WORD_COUNT, WORDS);
+        bus.write16(CONTROL, START_NOW_IN_WORDS);
+    }
+
+    #[test]
+    fn a_transfer_costs_startup_plus_a_read_and_a_write_for_every_unit() {
+        // Measured with timer 0 at prescaler 1, which is a cycle counter with hardware's name on
+        // it: if the machine did not advance, neither did the count.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(TIMER_RELOAD, 0);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+
+        run_the_transfer(bus);
+        assert_eq!(
+            bus.timers.counter(0) as u32,
+            EXPECTED_CYCLES,
+            "722 cycles: two of startup and three for each of the 240 units"
+        );
+    }
+
+    #[test]
+    fn a_transfer_advances_the_display_through_itself() {
+        // The acceptance question in its plainest form: does `VCOUNT` move? Parked 600 cycles
+        // into line 0 first, so the 722 the transfer takes have to carry the beam over the
+        // 1232-cycle line boundary rather than merely along it.
+        let mut gba = system();
+        gba.bus_mut().advance(600);
+        assert_eq!(gba.bus().video.vcount(), 0, "still on the first line");
+
+        run_the_transfer(gba.bus_mut());
+        assert_eq!(
+            gba.bus().video.vcount(),
+            1,
+            "600 + 722 cycles is past the end of line 0"
+        );
+    }
+
+    #[test]
+    fn a_timer_overflow_inside_a_transfer_lands_where_it_falls_rather_than_after_it() {
+        // Sixteen cycles from overflowing, reloading to zero, asking for an interrupt. The
+        // interrupt is the visible half; the counter afterwards is what says *when*.
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(crate::irq::reg::IE, crate::irq::source::timer(0));
+            bus.write16(crate::irq::reg::IME, 1);
+            bus.write16(TIMER_RELOAD, 0xFFF0);
+            bus.write16(TIMER_CONTROL, TIMER_ENABLE | TIMER_IRQ);
+            bus.write16(TIMER_RELOAD, 0);
+        }
+
+        run_the_transfer(gba.bus_mut());
+        let bus = gba.bus_mut();
+        assert_ne!(
+            bus.irq.read16(crate::irq::reg::IF).unwrap() & crate::irq::source::timer(0),
+            0,
+            "the overflow raised its interrupt"
+        );
+        assert_eq!(
+            bus.timers.counter(0) as u32,
+            EXPECTED_CYCLES - 16,
+            "sixteen cycles into the transfer, not at the end of it"
+        );
+    }
+
+    #[test]
+    fn n_timer_overflows_in_one_advance_pop_n_fifo_samples() {
+        // A reload of 0xFFFF at prescaler 1 overflows on every single cycle, which is the
+        // cheapest way to ask for more than one overflow in one call. It is also what a bitmask
+        // return cannot express: four overflows arrive as one bit, and channel A advances by one
+        // sample where hardware advanced by four.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(crate::fifo::reg::SOUNDCNT_X, 1 << 7);
+        for _ in 0..2 {
+            bus.write32(crate::fifo::reg::FIFO_A, 0x0403_0201);
+        }
+        assert_eq!(bus.sound.a.len(), 8, "eight samples queued");
+
+        bus.write16(TIMER_RELOAD, 0xFFFF);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+        bus.advance(4);
+
+        assert_eq!(
+            bus.sound.a.len(),
+            4,
+            "four overflows in one call, four samples popped"
+        );
+    }
+
+    #[test]
+    fn a_transfer_does_not_charge_its_wait_states_to_whatever_runs_next() {
+        // External WRAM is the expensive end of the map — six cycles for a word — so a burst of
+        // it is unmistakable if it lands on the wrong account. It used to: every wait state a
+        // transfer incurred sat in `pending_waits` until the *next instruction* took the lot,
+        // and the latch it left behind made that instruction's fetch look like a jump too.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write32(SOURCE, 0x0200_0000);
+        bus.write32(DESTINATION, 0x0200_2000);
+        bus.write16(WORD_COUNT, 64);
+        bus.take_pending_waits();
+
+        bus.write16(CONTROL, START_NOW_IN_WORDS);
+        assert_eq!(
+            bus.take_pending_waits(),
+            0,
+            "an I/O store waits for nothing, and the transfer's accesses are the transfer's"
+        );
+        assert_eq!(
+            bus.next_sequential_address(),
+            CONTROL + 2,
+            "the latch sits just past the store the CPU made, not inside the copy"
+        );
+    }
+
+    #[test]
+    fn a_transfer_that_re_arms_itself_terminates_instead_of_recursing() {
+        // The pathological input the re-entrancy guard exists for: a channel whose destination is
+        // its own control register, copying an enable bit into it. Every completed block arms the
+        // same channel again from inside `write16_routed`'s DMA hook, which used to call straight
+        // back into `run_pending_dma` — unbounded recursion, and a stack overflow rather than a
+        // failed assertion. It now finishes the block, picks the re-armed channel up from the
+        // drain loop, and gives the bus back after a frame's worth of cycles so the machine can
+        // be traced rather than hung.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        // Immediate, 16-bit units, enabled: the value the copy will keep writing to CONTROL.
+        bus.memory.write16(0x0200_0000, 0x8000);
+        bus.write32(SOURCE, 0x0200_0000);
+        bus.write32(DESTINATION, CONTROL);
+        bus.write16(WORD_COUNT, 1);
+        // Source and destination both fixed (bits 7-8 and 5-6 = 2), enabled, immediate.
+        bus.write16(CONTROL, 0x0100 | 0x0040 | 0x8000);
+
+        assert!(
+            bus.take_dma_cycles() >= FRAME_CYCLES as u32,
+            "it ran until the progress bound rather than for ever"
         );
     }
 }

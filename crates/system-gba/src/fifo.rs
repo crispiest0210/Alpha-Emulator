@@ -22,6 +22,8 @@
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
 
+use crate::timers::Overflows;
+
 /// Bytes a queue holds.
 pub const CAPACITY: usize = 32;
 /// Falling to this many bytes is what triggers a refill request.
@@ -279,15 +281,24 @@ impl DirectSound {
         Some(())
     }
 
-    /// Advance whichever channels the given timers pace.
+    /// Advance whichever channels the given timers pace, once per overflow.
     ///
-    /// `overflowed` is the bitmask [`crate::Timers::tick`] returns. Both channels can be paced
-    /// by the same timer, which is how a game plays stereo from one clock.
-    pub fn on_timer_overflow(&mut self, overflowed: u8) {
-        if overflowed & (1 << self.control.timer(false)) != 0 {
+    /// `overflowed` is what [`crate::Timers::tick`] returns. Both channels can be paced by the
+    /// same timer, which is how a game plays stereo from one clock.
+    ///
+    /// # Once per overflow, not once per call
+    ///
+    /// The count is the whole point of [`Overflows`] carrying one. A `tick` covering a long DMA
+    /// burst can overflow a sound timer dozens of times, and a channel that pops a single sample
+    /// for all of them plays at a fraction of its rate — and, worse, never drains far enough to ask
+    /// for a refill, so the queue stops being a queue.
+    pub fn on_timer_overflow(&mut self, overflowed: &Overflows) {
+        let a = overflowed.count(self.control.timer(false));
+        let b = overflowed.count(self.control.timer(true));
+        for _ in 0..a {
             self.a.pop_sample();
         }
-        if overflowed & (1 << self.control.timer(true)) != 0 {
+        for _ in 0..b {
             self.b.pop_sample();
         }
     }
