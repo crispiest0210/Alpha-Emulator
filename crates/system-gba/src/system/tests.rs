@@ -100,6 +100,182 @@ fn audio_is_drained_exactly_once_per_frame() {
     assert!(gba.take_audio_samples().is_empty(), "already taken");
 }
 
+/// The two halves of the sound unit, set up one at a time so the mix can be checked.
+mod sound_mix {
+    use super::*;
+    use crate::fifo::reg as fifo_reg;
+    use crate::psg::reg as psg_reg;
+
+    /// Timer 0, which paces direct sound below.
+    const TIMER_RELOAD: u32 = crate::timers::BASE;
+    const TIMER_CONTROL: u32 = crate::timers::BASE + 2;
+    const TIMER_ENABLE: u16 = 1 << 7;
+
+    /// Channel A at full volume on both sides, paced by timer 0. Bits 0-1 are left clear so the
+    /// PSG's own scaling can be supplied per test.
+    const DIRECT_A_FULL: u16 = (1 << 2) | (1 << 8) | (1 << 9);
+
+    /// Long enough for several samples at 48 kHz — one every 350 CPU cycles or so — and for the
+    /// square wave to move through its duty cycle rather than being caught at one level.
+    const CYCLES: u32 = 20_000;
+
+    /// Arm channel 1 at full volume with a short period, panned to both sides.
+    fn start_psg(bus: &mut GbaSystemBus) {
+        bus.write16(psg_reg::SOUNDCNT_L, 0xFF77);
+        bus.write16(psg_reg::SOUND1CNT_H, 0xF080); // envelope full, no movement, duty 2
+        bus.write16(psg_reg::SOUND1CNT_X, (1 << 15) | 2044); // trigger, a 16 t-cycle period
+    }
+
+    /// Queue direct-sound samples and start the timer that drains them.
+    fn start_direct_sound(bus: &mut GbaSystemBus) {
+        bus.write32(fifo_reg::FIFO_A, 0x7F7F_7F7F);
+        bus.write16(TIMER_RELOAD, 0xFF00);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+    }
+
+    /// One run of the machine with the requested halves playing, returning what came out.
+    fn run(psg: bool, direct: bool, psg_volume_bits: u16) -> Vec<AudioSample> {
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        // The master enable gates both halves, so it goes first whichever is being tested.
+        bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+        bus.write16(fifo_reg::SOUNDCNT_H, DIRECT_A_FULL | psg_volume_bits);
+        if psg {
+            start_psg(bus);
+        }
+        if direct {
+            start_direct_sound(bus);
+        }
+        bus.advance(CYCLES);
+        bus.take_samples().to_vec()
+    }
+
+    fn peak(samples: &[AudioSample]) -> f32 {
+        samples.iter().fold(0.0f32, |m, s| m.max(s.left.abs()))
+    }
+
+    #[test]
+    fn a_sample_put_into_the_psg_comes_out_of_the_other_end_of_the_mix() {
+        // Written the way direct sound's own absence should have been. That channel accepted
+        // every byte DMA delivered and dropped it on the floor for two weeks, and nothing
+        // failed, because no test asserted that audio put in comes back out. The PSG had the
+        // same hole from the far end: four channels generating a waveform that
+        // `generate_samples` never summed, so `psg_volume` sat there with no caller at all.
+        let samples = run(true, false, 2);
+        assert!(!samples.is_empty(), "no samples at all");
+        assert!(
+            peak(&samples) > 0.0,
+            "the PSG was triggered and produced nothing"
+        );
+    }
+
+    #[test]
+    fn direct_sound_and_the_psg_both_appear_in_the_final_mix() {
+        // Each alone must be audible, and the two together must be the sum — not one of them
+        // winning, and not one of them quietly missing under the other.
+        let psg_only = run(true, false, 2);
+        let direct_only = run(false, true, 2);
+        let both = run(true, true, 2);
+
+        assert!(peak(&psg_only) > 0.0, "the PSG half is silent");
+        assert!(peak(&direct_only) > 0.0, "the direct-sound half is silent");
+        assert_eq!(both.len(), psg_only.len());
+
+        for (index, sample) in both.iter().enumerate() {
+            let summed = psg_only[index].left + direct_only[index].left;
+            assert!(
+                (sample.left - summed).abs() < 1e-6,
+                "sample {index}: {} is not {} + {}",
+                sample.left,
+                psg_only[index].left,
+                direct_only[index].left
+            );
+        }
+    }
+
+    #[test]
+    fn soundcnt_h_scales_the_psg_contribution_a_quarter_a_half_or_not_at_all() {
+        // Two cascaded volume controls: this one multiplies whatever `SOUNDCNT_L`'s master
+        // volume already produced, so the check is proportionality across the three settings
+        // rather than "louder than zero" at each.
+        let quarter = run(true, false, 0);
+        let half = run(true, false, 1);
+        let full = run(true, false, 2);
+        let prohibited = run(true, false, 3);
+
+        assert!(peak(&full) > 0.0);
+        for index in 0..full.len() {
+            let reference = full[index].left;
+            assert!(
+                (half[index].left * 2.0 - reference).abs() < 1e-6,
+                "sample {index}: {} is not half of {reference}",
+                half[index].left
+            );
+            assert!(
+                (quarter[index].left * 4.0 - reference).abs() < 1e-6,
+                "sample {index}: {} is not a quarter of {reference}",
+                quarter[index].left
+            );
+            // The fourth setting is prohibited on hardware and treated as silence rather than
+            // as full volume, so a game landing there by accident gets nothing, not a burst.
+            assert_eq!(prohibited[index].left, 0.0, "sample {index}");
+        }
+    }
+
+    #[test]
+    fn the_master_enable_gates_the_psg_as_well_as_direct_sound() {
+        // One bit in `SOUNDCNT_X` switches the whole sound unit off on hardware, and it lives in
+        // the direct-sound block — so the PSG has to be told, rather than owning the address a
+        // second time.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+        bus.write16(fifo_reg::SOUNDCNT_H, 2);
+        start_psg(bus);
+        bus.advance(CYCLES);
+        assert!(peak(bus.take_samples()) > 0.0);
+
+        bus.write16(fifo_reg::SOUNDCNT_X, 0);
+        assert!(!bus.psg.is_powered(), "the PSG followed the enable bit");
+        bus.advance(CYCLES);
+        assert_eq!(peak(bus.take_samples()), 0.0, "and went quiet with it");
+    }
+
+    #[test]
+    fn psg_register_state_survives_a_save_state_round_trip() {
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+            bus.write16(fifo_reg::SOUNDCNT_H, 1);
+            start_psg(bus);
+            bus.write16(psg_reg::SOUND4CNT_L, 0xF000);
+            bus.write16(psg_reg::SOUND4CNT_H, (1 << 15) | 0x0042);
+            bus.advance(CYCLES);
+            bus.take_samples();
+        }
+        let state = gba.save_state();
+
+        let mut restored = system();
+        restored.load_state(&state).expect("the state is valid");
+        assert_eq!(restored.bus().psg, gba.bus().psg);
+        assert_eq!(
+            restored.bus().psg.read16(psg_reg::SOUNDCNT_L),
+            Some(0xFF77),
+            "the register block came back too, not just the channels"
+        );
+
+        // And the two must go on producing identical audio, which is what a field left out of
+        // `save` breaks even when the comparison above passes.
+        gba.bus_mut().advance(CYCLES);
+        restored.bus_mut().advance(CYCLES);
+        assert_eq!(
+            restored.bus_mut().take_samples(),
+            gba.bus_mut().take_samples()
+        );
+    }
+}
+
 #[test]
 fn the_cpu_reaches_every_region_through_one_bus() {
     let mut gba = system();

@@ -529,27 +529,28 @@ of structure for a little reuse. Worth doing only when a third caller appears.
 
 ### The biggest gap
 
-**PSG audio on the Game Boy Advance.** A commercial game now plays through its opening, overworld,
-menus and battles at a measured 100% speed with sound. The loudest thing still missing is that the
-GBA makes sound two ways and only direct sound is wired, so part of a game's mix is silent.
+**Channel 3 of PSG audio on the Game Boy Advance.** A commercial game now plays through its
+opening, overworld, menus and battles at a measured 100% speed with sound, and as of the PSG's
+register layer (`system-gba::psg`) three of its four channels now reach the mix too: square
+channels 1 and 2 and the noise channel 4, at CGB semantics, panned and scaled by `SOUNDCNT_L`'s
+own master volume and then attenuated again by `SOUNDCNT_H` bits 0-1 — the two cascade rather than
+one overriding the other. What was recorded here for a long time as one blocked decision turned out
+to be two separate, much smaller questions, and the first one is now answered: the claim that the
+register layer is shared, lives in `system-gb::apu`, cannot be reached across a `system-*`
+boundary, and wants moving to `apu-shared` with its `GbModel` gating resolved was **wrong** — the
+*channels* were already in `apu-shared` and directly usable, what was missing was the address
+decode, and it needed none of that gating since the GBA follows the CGB rule throughout.
 
-This was recorded for a long time as blocked on a design decision, and **that framing was wrong**.
-The claim was that the `NR10`-`NR52` register layer is shared, lives in `system-gb::apu`, cannot be
-reached across a `system-*` boundary, and wants moving to `apu-shared` with its `GbModel` gating
-resolved. Checking it: the *channels* — `SquareChannel`, `WaveChannel`, `NoiseChannel`, `Envelope`,
-`Sweep`, `LengthCounter`, `Mixer` — are **already in `apu-shared` and directly usable**. What sits
-in `system-gb::apu` is the **address decode**, and the GBA's is genuinely a different thing: its
-registers are halfwords from `0x0400_0060` laid out with gaps rather than the Game Boy's contiguous
-block, its wave RAM is two banks of sixteen bytes with the CPU seeing whichever is not playing, and
-it has a 75% volume step the Game Boy lacks. So the work is a new register layer over shared
-channels, not a copy of an existing one, and the `GbModel` gating does not apply at all — the GBA
-follows the CGB rule throughout. No decision is needed; write `system-gba::psg`, mix its output into
-`generate_samples` alongside `DirectSound::output`, and scale by `SOUNDCNT_H` bits 0-1.
-
-The one judgement call inside it: the 64-sample wave mode spans both banks, and `apu_shared::WaveChannel`
-holds sixteen bytes and walks 32 samples. Either extend it with a sample count or implement the
-32-sample mode and say the other is not modelled. Prefer extending it — the Game Boy never changes
-the default, and "do not approximate a behaviour you have not modelled" applies to audio too.
+What is still missing is channel 3 (wave), left out on purpose rather than rushed in: its registers
+(`SOUND3CNT_L/H/X` at `0x0400_0070`-`0x0400_0074`) and wave RAM window are unclaimed and read as
+unmapped, not as a channel that happens to be quiet. **The one judgement call inside it, unchanged
+from before**: this machine's wave RAM is two sixteen-byte banks with the CPU seeing whichever is
+not playing, and a 64-sample mode that spans both, which `apu_shared::WaveChannel` — one bank,
+sixteen bytes, thirty-two samples — does not model. Either extend it with a sample count or
+implement the 32-sample mode and say the other is not modelled. Prefer extending it — the Game Boy
+never changes the default, and "do not approximate a behaviour you have not modelled" applies to
+audio too. `SOUNDBIAS` (the DAC bias `bios::dispatch`'s `SoundBias` call recognises but does not
+act on) is unclaimed for the same reason: nothing owns that register yet.
 
 Then, in order:
 
@@ -664,10 +665,11 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-- **PSG mixing on the GBA** is now the biggest gap and is *not* blocked on a decision, though it
-  was recorded that way here for a long time. See "The biggest gap" above for why the blocker
-  dissolved on inspection: the channels are already shared, and only the address decode is
-  per-system — which the GBA needs its own of regardless.
+- **PSG channel 3 (wave) on the GBA** is now the biggest gap; channels 1, 2, and 4 are mixed in as
+  of `system-gba::psg`. Not blocked on a decision either, though the *first* PSG question was
+  recorded that way here for a long time — see "The biggest gap" above for why that blocker
+  dissolved on inspection, and for the one real judgement call channel 3 still carries: this
+  machine's two-bank wave RAM against `apu_shared::WaveChannel`'s one.
 - **Alpha blending on the GBA** composes its real lower layer as a second pass over the line, with a
   write mask that excludes — at each pixel — exactly the layer *that pixel's own winner* came from,
   not every layer `BLDCNT` declares a first target. Excluding declared first targets wholesale was

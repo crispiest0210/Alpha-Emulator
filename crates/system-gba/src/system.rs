@@ -65,6 +65,7 @@ use crate::fifo::DirectSound;
 use crate::irq::{self, InterruptController};
 use crate::keypad::Keypad;
 use crate::memory::{GbaBus, Region, BIOS_SIZE};
+use crate::psg::Psg;
 use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::waitstates::{Access, WaitControl};
 use crate::{background::Backgrounds, timers::Timers};
@@ -72,8 +73,10 @@ use crate::{background::Backgrounds, timers::Timers};
 /// Bumped on any change to what this system serializes.
 ///
 /// 2 added the in-progress `IntrWait` mask, which a state taken mid-wait needs to resume without
-/// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`.
-const STATE_VERSION: u32 = 3;
+/// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`. 4 added
+/// the PSG: three channels, its register block, and the divider and frame sequencer that clock
+/// them.
+const STATE_VERSION: u32 = 4;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;
@@ -122,6 +125,10 @@ pub struct GbaSystemBus {
     /// save states: it is a debugging aid, not machine state.
     pub watch: AccessLog,
     pub sound: DirectSound,
+    /// The other half of the sound unit: the four Game Boy channels behind the register block at
+    /// `0x0400_0060`. Separate from [`Self::sound`] because they share nothing but a master
+    /// enable and the final mix.
+    pub psg: Psg,
     pub waits: WaitControl,
 
     framebuffer: Framebuffer,
@@ -169,6 +176,7 @@ impl GbaSystemBus {
             keypad: Keypad::new(),
             watch: AccessLog::new(),
             sound: DirectSound::new(),
+            psg: Psg::new(),
             waits: WaitControl::new(),
             framebuffer: Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT),
             samples: Vec::with_capacity(1024),
@@ -315,6 +323,10 @@ impl GbaSystemBus {
             // first from registers none of them had actually seen updated yet.
             self.run_pending_dma();
         }
+        // The PSG advances by the whole span at once rather than per line: nothing it does raises
+        // an interrupt or moves another subsystem, so the only thing that can observe where inside
+        // the span a duty step landed is the sample generator on the next line.
+        self.psg.tick(cycles);
         self.generate_samples(cycles as u64);
     }
 
@@ -454,12 +466,31 @@ impl GbaSystemBus {
         spent
     }
 
+    /// Mix both halves of the sound unit into output samples.
+    ///
+    /// # Two volume controls in series, not one
+    ///
+    /// The PSG has already been scaled by its own master volume, `SOUNDCNT_L`'s three bits a side.
+    /// `SOUNDCNT_H` bits 0-1 then attenuate the whole PSG mix again — to a quarter, a half, or not
+    /// at all — before it meets direct sound. The two cascade on hardware, so they multiply here;
+    /// treating either as the volume would make a game that sets one to a quarter and the other to
+    /// full play at the wrong level in one direction or the other.
+    ///
+    /// The fourth `SOUNDCNT_H` setting is prohibited and [`crate::fifo::DirectSoundControl::psg_volume`]
+    /// reports it as silence, which is why the numerator is over four rather than a shift.
     fn generate_samples(&mut self, cycles: u64) {
         self.sample_accumulator += cycles * core_common::AUDIO_SAMPLE_RATE as u64;
         while self.sample_accumulator >= CLOCK_HZ {
             self.sample_accumulator -= CLOCK_HZ;
-            let (left, right) = self.sound.output();
-            self.samples.push(AudioSample { left, right });
+            let (direct_left, direct_right) = self.sound.output();
+            let (psg_left, psg_right) = self.psg.output();
+            let psg_scale = self.sound.control.psg_volume() as f32 / 4.0;
+            // Clamped only at the end: the two halves can each be at full scale, and a game
+            // mixing loud direct sound under loud PSG music really does saturate the DAC.
+            self.samples.push(AudioSample {
+                left: (direct_left + psg_left * psg_scale).clamp(-1.0, 1.0),
+                right: (direct_right + psg_right * psg_scale).clamp(-1.0, 1.0),
+            });
         }
     }
 
@@ -495,6 +526,9 @@ impl GbaSystemBus {
         if let Some(value) = self.sound.read16(addr) {
             return Some(value);
         }
+        if let Some(value) = self.psg.read16(addr) {
+            return Some(value);
+        }
         if WaitControl::owns(addr) {
             return Some(self.waits.read16());
         }
@@ -506,6 +540,14 @@ impl GbaSystemBus {
     }
 
     fn write_io16(&mut self, addr: u32, value: u16) {
+        // Taken out of the chain below because the answer has to be attributed: `SOUNDCNT_X`'s
+        // bit 7 is one master enable over the whole sound unit, and the register belongs to the
+        // direct-sound block. The PSG is told what it now reads rather than being given a second
+        // claim on the same address, which would make the order of these two calls load-bearing.
+        if self.sound.write16(addr, value).is_some() {
+            self.psg.set_power(self.sound.control.sound_enabled());
+            return;
+        }
         if self.video.write16(addr, value).is_some()
             || self.backgrounds.write16(addr, value).is_some()
             || self.timers.write16(addr, value).is_some()
@@ -513,7 +555,7 @@ impl GbaSystemBus {
             || self.effects.write16(addr, value).is_some()
             || self.irq.write16(addr, value).is_some()
             || self.keypad.write16(addr, value).is_some()
-            || self.sound.write16(addr, value).is_some()
+            || self.psg.write16(addr, value).is_some()
         {
             return;
         }
@@ -1350,6 +1392,7 @@ impl Savable for GbaSystemBus {
         self.irq.save(w);
         self.keypad.save(w);
         self.sound.save(w);
+        self.psg.save(w);
         self.waits.save(w);
         w.write_u64(self.sample_accumulator);
     }
@@ -1368,6 +1411,7 @@ impl Savable for GbaSystemBus {
         self.irq.load(r)?;
         self.keypad.load(r)?;
         self.sound.load(r)?;
+        self.psg.load(r)?;
         self.waits.load(r)?;
         self.sample_accumulator = r.read_u64()?;
         Ok(())

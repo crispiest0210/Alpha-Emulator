@@ -15,16 +15,19 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **The four `apu-shared` PSG channels are not mixed** alongside the two FIFO channels, so a
-//!   game whose music comes through them is silent. What blocks it is smaller than it looks and
-//!   was recorded here backwards for a while: the *channels* already live in `apu-shared` and are
-//!   directly usable. What lives in `system-gb::apu`, unreachable because `system-*` crates may
-//!   not depend on each other, is the **address decode** — and the GBA's is genuinely different
-//!   anyway. Its registers are halfwords at `0x0400_0060`, laid out with gaps rather than as the
-//!   Game Boy's contiguous `NR10`-`NR52`; its wave RAM is two banks of sixteen bytes with the CPU
-//!   seeing whichever is not playing; and it has a 75% volume step the Game Boy lacks. So this is
-//!   a new register layer over shared channels, not a copy of an existing one, and the `GbModel`
-//!   gating that was called the obstacle does not apply — the GBA follows the CGB rule throughout.
+//! - **Three of the four `apu-shared` PSG channels are now mixed in**, alongside the two FIFO
+//!   channels: [`psg`] is a new register layer — halfwords from `0x0400_0060` with gaps between
+//!   them, unlike the Game Boy's contiguous `NR10`-`NR52` — over the same `SquareChannel` and
+//!   `NoiseChannel` types `system-gb::apu` already uses, at CGB semantics throughout (no
+//!   `GbModel`-style gating; the obstacle that gating was once thought to be never applied here).
+//!   `SOUNDCNT_H` bits 0-1 attenuate the PSG's own `SOUNDCNT_L` master volume again, multiplicatively
+//!   rather than one overriding the other, before it meets direct sound in `GbaSystemBus::generate_samples`.
+//!   **Channel 3 (wave) is still missing**, deliberately: its wave RAM is two sixteen-byte banks
+//!   with the CPU seeing whichever is not playing, a real difference from `apu_shared::WaveChannel`'s
+//!   single-bank model that needs its own decision rather than a rushed reuse, so `SOUND3CNT_L/H/X`
+//!   and the wave RAM window are left unclaimed — reading as unmapped, not as a channel that
+//!   happens to be quiet. `SOUNDBIAS` is likewise still unclaimed, so `bios::dispatch`'s
+//!   `SoundBias` call still recognises but does not act on it.
 //! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
 //!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
 //!   write a save file, so the path from a game's write to a file on disk is unverified.
@@ -192,6 +195,7 @@ pub mod irq;
 pub mod keypad;
 pub mod memory;
 pub mod objects;
+pub mod psg;
 pub mod system;
 pub mod timers;
 pub mod video;
@@ -209,6 +213,7 @@ pub use irq::InterruptController;
 pub use keypad::Keypad;
 pub use memory::{GbaBus, Region};
 pub use objects::{Object, ObjectAttributeMemory};
+pub use psg::Psg;
 pub use system::{GbaSystem, GbaSystemBus};
 pub use timers::Timers;
 pub use video::VideoTiming;
