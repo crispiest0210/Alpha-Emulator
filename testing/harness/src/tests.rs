@@ -598,6 +598,26 @@ fn gb_accuracy_suite() {
     assert!(report.is_success(), "{summary}");
 }
 
+/// `run_gba_suite`'s pass detector used to be fooled by exactly this: a settled `PC` plus
+/// `r12 == 0` is also what a machine wedged at its own entry point looks like, and nothing
+/// distinguished "finished" from "never started". Constructed rather than reasoned about, per
+/// the acceptance criterion this pins: a ROM whose entry point is `b .` and nothing else. It
+/// settles on its very first instruction — never having run a single byte of test logic — with
+/// `r12` at its untouched reset value, which is indistinguishable from a genuine all-pass by
+/// register state alone.
+#[test]
+fn run_gba_suite_reports_failure_for_a_machine_that_never_left_its_entry_point() {
+    let mut rom = vec![0u8; 0x1000];
+    rom[0..4].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes()); // b . from the entry point
+    let mut system = system_gba::GbaSystem::new(rom, None).expect("the ROM parses");
+
+    let outcome = run_gba_suite(&mut system, 60);
+    assert!(
+        !outcome.passed(),
+        "a machine that never left its entry point must not be reported as a pass: {outcome:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Banking
 // ---------------------------------------------------------------------------

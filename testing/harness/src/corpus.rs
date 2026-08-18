@@ -470,11 +470,18 @@ impl TestRom {
 }
 
 /// Every ROM across every system.
+///
+/// The single source of truth: `cargo xtask fetch-test-roms` and the accuracy suite both read
+/// this rather than each keeping their own list, which is how `CGB_ROMS` and `GBA_ROMS` went
+/// unfetchable from a clean checkout for as long as they did — the suite chained them by hand,
+/// the fetcher never did, and nothing compared the two lists to notice they had drifted apart.
 pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
     GB_ROMS
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(CGB_ROMS)
+        .chain(GBA_ROMS)
 }
 
 /// Game Boy Color ROMs.
@@ -580,6 +587,76 @@ pub const GBA_ROMS: &[TestRom] = &[
         name: "gba_suite_bios",
         url: "https://github.com/jsmolka/gba-tests/raw/master/bios/bios.gba",
         path: "gba/gba-suite/bios.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Julian Smolka)",
+    },
+    // The save-chip set: each ROM exercises one cartridge chip type's detection and read/write
+    // path from the BIOS side, rather than a commercial game happening to reach it — the gap
+    // README.md's save-RAM section names as unverified. Same suite, same convention, same
+    // publisher as the four above.
+    TestRom {
+        name: "gba_suite_save_sram",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/sram.gba",
+        path: "gba/gba-suite/save_sram.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 1 (r12), settling with r0=0x0, r1=0x2: fails on the very first save-chip \
+             access, a single byte read of address 0x0E000000 that this emulator answers 0x00. \
+             `cartridge::Sram::new` deliberately zero-fills fresh SRAM rather than leaving it at \
+             hardware's undefined power-on content, on the reasoning that a game re-initializes \
+             from a bad checksum either way — this ROM's first check disagrees with that \
+             reasoning, in a way not yet fully traced back to a specific documented rule. \
+             Root cause not confirmed; the trace is real, the fix is not.",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_flash64",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/flash64.gba",
+        path: "gba/gba-suite/save_flash64.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 4 (r12), settling with r0=0xFF01, r1=0x0101: the traced sequence is an \
+             unlock-and-program of a single byte (0x01 at offset 0x60), then reads of 0x60 (0x01, \
+             correct) and 0x61 (0xFF, correct for an untouched erased byte under this emulator's \
+             single-byte `Flash::write_byte`). r1 == 0x0101 suggests the ROM expected offset 0x61 \
+             to also read 0x01, which single-byte programming semantics do not produce — a wider \
+             (halfword) program command reaching this chip as more than one byte is the leading \
+             hypothesis, not yet confirmed against `cart_common::Flash`'s own contract or a \
+             documented chip behaviour.",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_flash128",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/flash128.gba",
+        path: "gba/gba-suite/save_flash128.gba",
+        convention: Convention::GbaSuite,
+        hardware: Hardware::Gba,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "sub-test 4 (r12), settling with r0=0xFF01, r1=0x0101 — the same shape of failure, at \
+             the same sub-test number, as `gba_suite_save_flash64`. See that entry; the two chips \
+             share `cart_common::Flash`, so whatever this is is almost certainly one bug rather \
+             than two.",
+        ),
+        licence: "MIT (Julian Smolka)",
+    },
+    TestRom {
+        name: "gba_suite_save_none",
+        url: "https://github.com/jsmolka/gba-tests/raw/master/save/none.gba",
+        path: "gba/gba-suite/save_none.gba",
         convention: Convention::GbaSuite,
         hardware: Hardware::Gba,
         max_frames: 600,

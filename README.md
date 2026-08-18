@@ -28,7 +28,7 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are now mixed in alongside direct sound**; no cartridge clock or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ⚠️ | The core `gba-suite` ROMs (ARM, Thumb, memory, BIOS) pass; the newly added `save/` set found two genuine save-chip protocol bugs — see below. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are now mixed in alongside direct sound**; no cartridge clock or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
@@ -40,11 +40,11 @@ viewer, breakpoints, and watchpoints.
 
 ### Where the Game Boy Advance actually is
 
-`gba-suite`'s three ROMs pass, and a commercial game **plays in the window at a measured 100%
-speed** — 59.7 fps sustained, zero frames dropped to the drawing thread, zero audio samples
-dropped. Backgrounds in every mode, sprites at both colour depths, affine scaling and rotation,
-windows, colour blending, save states and rewind all work on real software rather than only on
-unit tests.
+`gba-suite`'s core ROMs (ARM, Thumb, memory, BIOS) pass, and a commercial game **plays in the
+window at a measured 100% speed** — 59.7 fps sustained, zero frames dropped to the drawing thread,
+zero audio samples dropped. Backgrounds in every mode, sprites at both colour depths, affine
+scaling and rotation, windows, colour blending, save states and rewind all work on real software
+rather than only on unit tests.
 
 The GBA makes sound two ways — two DMA-fed direct-sound channels and the Game Boy's four older PSG
 channels — and both are now wired. `system-gba::psg` is a register layer over the same square,
@@ -67,10 +67,16 @@ One gap is worth stating plainly because you will notice it:
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
 
-EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
-working by play on a commercial title. SRAM and Flash work and a real
-cartridge's chip and size are detected correctly, but no game has yet been played far enough to
-write a save file, so that last step is unverified.
+EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed working by play
+on a commercial title, and a real cartridge's chip and size are detected correctly from how the
+game talks to it. **`jsmolka/gba-tests`' `save/` suite — added to the corpus for the first time —
+found two genuine, previously-unknown protocol bugs underneath that play-tested success**, in
+`cart_common::Sram` and `cart_common::Flash`: `save_sram` fails its very first access, a read of
+fresh SRAM that this emulator answers `0x00` and the ROM does not expect; `save_flash64` and
+`save_flash128` both fail at the same sub-test, consistent with a single shared bug in `Flash`'s
+byte-granularity programming. Diagnosed with an exact register-state and access trace in
+`testing/harness/src/corpus.rs`'s `expected_failure` entries, not yet root-caused to a specific
+fix. `save_none` (no chip fitted) passes.
 
 Mosaic is implemented for text backgrounds and ordinary sprites, both axes — the sample-and-hold
 effect hardware defines, holding a quantized source line by asking the renderer for it directly
@@ -274,7 +280,7 @@ Component status:
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent; a bitmap mode is background 2 sampled through its affine transform like any other layer, subject to the same enable bit, windows, blend unit, and sprite-priority rule; mosaic on text backgrounds and ordinary sprites, both axes — **not affine backgrounds, the bitmap layer, or affine sprites** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
 | `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass, excluding at each pixel exactly the layer that pixel's own winner came from, and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
-| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **EEPROM reported absent rather than emulated** |
+| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | chip detection done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **`jsmolka/gba-tests`' `save/` suite found two genuine protocol bugs beneath that** — see "Where the Game Boy Advance actually is". **EEPROM reported absent rather than emulated** |
 | `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
 | `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |
 | `system-gba` HLE interrupt wrapper — register save, handler call, `subs pc, lr, #4` return | done; the return is what puts `CPSR` back, and without it a machine takes exactly one interrupt |
@@ -318,7 +324,9 @@ Current Game Boy results:
 | Blargg `cpu_instrs` (combined ROM) | hangs — see below |
 | Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
-| `gba-suite` arm, thumb, memory | **pass** |
+| `gba-suite` arm, thumb, memory, bios | **pass** |
+| `gba-suite` save/none (no chip fitted) | **pass** |
+| `gba-suite` save/sram, save/flash64, save/flash128 | fail — see below |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
 
 **Audio has a regression check now too, and it is not the same guarantee as the picture tests
@@ -391,10 +399,12 @@ All are tracked as known failures in the corpus, so the suite stays green for *r
 while they are open — and fails loudly if one starts passing, which means the marker needs
 removing.
 
-**All three `gba-suite` ROMs pass** — the whole instruction set in both states, and the memory
-suite. Between them they found two real bugs that no amount of unit testing would have caught:
-the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed into
-bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
+**The four core `gba-suite` ROMs pass** — the whole instruction set in both states, the memory
+suite, and the BIOS's documented call and open-bus behaviour. Between them they found two real
+bugs that no amount of unit testing would have caught: the ARM7TDMI's legacy "P" form, and 32-bit
+writes to palette RAM and VRAM being decomposed into bytes and so corrupted by the 16-bit bus
+quirk that applies to genuine byte writes. The suite's `save/` set, added later, found two more —
+see "Where the Game Boy Advance actually is" above.
 
 The Game Boy Color's colour *rendering* is now validated against a reference — that is what
 cgb-acid2 covers. Its speed switch and VRAM DMA are still checked against hardware documentation

@@ -28,9 +28,15 @@
 //!   this machine's mix has no PWM stage for that register to bias in the first place, and most
 //!   games leave it at its default; and the Game Boy's `NRx4` write-during-length-period quirks
 //!   `system-gb::apu` models, which nothing in the GBA corpus exercises yet.
-//! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
-//!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
-//!   write a save file, so the path from a game's write to a file on disk is unverified.
+//! - **EEPROM saves are reported as absent** rather than emulated; a real cartridge's chip and
+//!   size are detected correctly, and in-game saving is confirmed working by play on a commercial
+//!   title. **`jsmolka/gba-tests`' `save/` suite, added to the corpus for the first time, found
+//!   two genuine protocol bugs underneath that play-tested success**: `save_sram` fails its very
+//!   first access (a read of fresh SRAM this crate answers `0x00`, which the ROM does not
+//!   expect), and `save_flash64`/`save_flash128` both fail the same sub-test, consistent with one
+//!   shared bug in `cart_common::Flash`'s byte-granularity programming. See
+//!   `testing/harness/src/corpus.rs`'s `expected_failure` entries for the exact traced sequence;
+//!   neither is root-caused to a specific fix yet.
 //! - **Mosaic is implemented for text backgrounds and ordinary sprites**, both axes, as the
 //!   sample-and-hold hardware defines it — BG mosaic quantizes the *screen* position before
 //!   sampling; OBJ mosaic quantizes the sprite's own *local* position, so a mosaiced sprite looks

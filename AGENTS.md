@@ -434,6 +434,29 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   caught it — a weaker "does it eventually return" test passes with the overshoot still in it.
   Measured on the workload this exists for, a `VBlankIntrWait` loop with `HBlank` also enabled:
   4.74 ms to 33 µs, a 145x reduction; `gba/spin`, which never halts, is unaffected.
+- **The accuracy corpus had three structural holes that let ROMs go permanently untested without
+  anyone noticing, and fixing them immediately found two real GBA save-chip bugs.**
+  `corpus::all_roms()` chained only three of the five ROM lists — `CGB_ROMS` and `GBA_ROMS` were
+  excluded, so the corpus's own validation tests (`every_rom_is_fully_specified`,
+  `rom_names_are_unique`) had never inspected either. `xtask`'s `fetch-test-roms` held a second,
+  hand-copied URL list rather than reading `corpus::all_roms()`, so a ROM added to one and not the
+  other was silently never fetched — which is exactly how the gap above went unnoticed. `xtask` now
+  depends on `harness` for this one function, a real trade-off (it used to build even when the
+  workspace's other crates did not) accepted because a list that provably cannot drift is worth
+  more than that independence. Third: `run_gba_suite`'s pass detector read a settled `PC` plus
+  `R12 == 0` as "every sub-test passed" — but `R12` stays at its power-on value of zero for the
+  *entire* run of a genuine pass too (checked by instrumenting all four ROMs already in the
+  corpus), so a machine wedged at its own cartridge entry point from its very first instruction has
+  the identical signature and was reported as a pass. Fixed by rejecting a settle at the entry
+  point specifically — every real suite settles somewhere inside its own code — proven against a
+  constructed `b .`-from-the-entry-point ROM, not reasoned about.
+
+  Adding the `jsmolka/gba-tests` `save/` set once the fetcher could reach it immediately found what
+  it exists to find: `save_sram` fails its first access (fresh SRAM reads `0x00`, which the ROM
+  does not expect), and `save_flash64`/`save_flash128` both fail the same sub-test, consistent with
+  one shared bug in `cart_common::Flash`'s byte-granularity programming rather than two unrelated
+  ones. Diagnosed with an exact traced access sequence and register state in each ROM's
+  `expected_failure` — not root-caused to a specific fix yet, and said so rather than guessed at.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.

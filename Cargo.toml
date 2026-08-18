@@ -47,6 +47,7 @@ savestate = { path = "crates/savestate" }
 debugger = { path = "crates/debugger" }
 library = { path = "crates/library" }
 frontend-core = { path = "crates/frontend-core" }
+harness = { path = "testing/harness" }
 
 # --- shared third-party (versions pinned once, here) ---
 anyhow = "1.0"
