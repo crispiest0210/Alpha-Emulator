@@ -557,11 +557,21 @@ validated against real hardware audio capture the way prompt 2's still-unbuilt f
 manifest is designed to require of picture hashes; said so in its own module docs rather than
 implied.
 
-The next biggest gap is not audio-shaped at all: **`panic = "abort"` silently voids the
-save-durability design** `frontend-core::session` documents and relies on — `session.rs:334-339`
-checks `thread.join().is_err()` on the assumption that a panicked emulation thread cannot take the
-frontend down with it, which is false under `abort`: the process dies before the shutdown save
-flush can run. See `Cargo.toml`'s release profile and `session.rs`'s own comments.
+**Save-durability under a panic is now closed, and it took two fixes, not one.** `Cargo.toml`'s
+`[profile.release]` was `panic = "abort"`, which silently voided the design `session.rs`'s
+`Session::stop` documented and relied on: `thread.join().is_err()` only means anything under
+unwinding, and under `abort` the whole process dies the instant any thread panics, before
+`close_rom`'s save-RAM flush gets a chance to run. Switching to `panic = "unwind"` alone was not
+enough, though — `emulation::run`'s loop calls `Emulator::tick` with nothing catching a panic out
+of it, so even with unwinding restored, a panic *during a frame* (the CPU/PPU "indexing bug" class
+this whole audit is chasing) still propagated straight out of `run` with no `close_rom` in between,
+losing whatever save RAM the current debounce window held. `run` now wraps that one call in
+`std::panic::catch_unwind`, flushes on `Err`, and re-raises the same panic with
+`std::panic::resume_unwind` so `join()` still observes and logs it exactly as before.
+`a_panic_mid_frame_still_flushes_dirty_save_ram` (`frontend-core/src/tests.rs`) is the test that
+would have caught either half missing on its own: it dirties SRAM through a real cartridge write
+(not a pre-seeded file, which would pass even with no flush at all), panics the thread on the next
+tick via a `#[cfg(test)]`-only command, and asserts the marker byte reached disk anyway.
 
 Smaller items, in order:
 

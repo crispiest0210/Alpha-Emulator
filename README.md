@@ -453,7 +453,7 @@ Linux, macOS, and Windows:
 `cargo deny`, unit tests and the full accuracy suite on Linux, macOS, and Windows, `cargo doc` with
 warnings denied, a release-profile build of the two shipped binaries, and `cargo bench --no-run`.
 
-The last two are there because both fail in ways nothing else catches. `panic = "abort"` and thin LTO
+The last two are there because both fail in ways nothing else catches. `panic = "unwind"` and thin LTO
 apply only to the release profile, so a release-only compile error is real and would otherwise be
 discovered while cutting a tag. And nothing references the benchmarks, so they would rot silently
 until the next person needed a measurement — CI compiles them but never times them, because timings
