@@ -42,7 +42,12 @@ use crate::ppu::{self, GbPpu};
 use crate::timing::{interrupt, reg as timing_reg, GbTiming, TimingOutput, CLOCK_HZ};
 
 /// Bumped on any change to what this system serializes, including in a subsystem it owns.
-const STATE_VERSION: u32 = 2;
+///
+/// 2 added the CGB-specific state. 3 is `apu_shared::WaveChannel` gaining GBA-only fields
+/// (a second wave-RAM bank, a sample count, a 75% volume step) that this system's own channel
+/// always writes at their fixed Game Boy defaults — the fields change nothing this machine does,
+/// but the byte layout every save state carries changed for every caller of that type at once.
+const STATE_VERSION: u32 = 3;
 
 /// Everything the CPU can reach, plus the subsystems that run on their own schedule.
 pub struct GbSystemBus {

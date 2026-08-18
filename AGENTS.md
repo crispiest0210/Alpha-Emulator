@@ -527,32 +527,43 @@ GBA's PSG register layer was stuck on; that one turned out not to be a placement
 timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
 of structure for a little reuse. Worth doing only when a third caller appears.
 
-### The biggest gap
+### PSG audio on the Game Boy Advance is now done
 
-**Channel 3 of PSG audio on the Game Boy Advance.** A commercial game now plays through its
-opening, overworld, menus and battles at a measured 100% speed with sound, and as of the PSG's
-register layer (`system-gba::psg`) three of its four channels now reach the mix too: square
-channels 1 and 2 and the noise channel 4, at CGB semantics, panned and scaled by `SOUNDCNT_L`'s
-own master volume and then attenuated again by `SOUNDCNT_H` bits 0-1 — the two cascade rather than
-one overriding the other. What was recorded here for a long time as one blocked decision turned out
-to be two separate, much smaller questions, and the first one is now answered: the claim that the
-register layer is shared, lives in `system-gb::apu`, cannot be reached across a `system-*`
-boundary, and wants moving to `apu-shared` with its `GbModel` gating resolved was **wrong** — the
-*channels* were already in `apu-shared` and directly usable, what was missing was the address
-decode, and it needed none of that gating since the GBA follows the CGB rule throughout.
+Closed as of `system-gba::psg` plus `apu_shared::WaveChannel` growing GBA-only additive fields.
+All four PSG channels reach the mix alongside the two FIFO ones — squares 1 and 2, noise 4, and
+now wave channel 3 too, panned and scaled by `SOUNDCNT_L`'s own master volume and attenuated again
+by `SOUNDCNT_H` bits 0-1, the two cascading rather than one overriding the other. What this was
+recorded as for a long time — one decision blocked on moving a shared register layer out of
+`system-gb::apu` and resolving its `GbModel` gating — was **wrong on both counts**: the channels
+were already in `apu-shared` and directly usable, the actual work was a new address decode, and it
+needed none of that gating since the GBA follows the CGB rule throughout.
 
-What is still missing is channel 3 (wave), left out on purpose rather than rushed in: its registers
-(`SOUND3CNT_L/H/X` at `0x0400_0070`-`0x0400_0074`) and wave RAM window are unclaimed and read as
-unmapped, not as a channel that happens to be quiet. **The one judgement call inside it, unchanged
-from before**: this machine's wave RAM is two sixteen-byte banks with the CPU seeing whichever is
-not playing, and a 64-sample mode that spans both, which `apu_shared::WaveChannel` — one bank,
-sixteen bytes, thirty-two samples — does not model. Either extend it with a sample count or
-implement the 32-sample mode and say the other is not modelled. Prefer extending it — the Game Boy
-never changes the default, and "do not approximate a behaviour you have not modelled" applies to
-audio too. `SOUNDBIAS` (the DAC bias `bios::dispatch`'s `SoundBias` call recognises but does not
-act on) is unclaimed for the same reason: nothing owns that register yet.
+Channel 3's one real judgement call, resolved: this machine's wave RAM is two sixteen-byte banks
+with the CPU seeing whichever is not selected for playback, and a 64-sample mode that plays both
+back to back — `apu_shared::WaveChannel` now carries `sample_count`, a second bank, `active_bank`,
+and `force_75_percent` as additive fields defaulting to exactly the Game Boy's single-bank
+behaviour, proven unchanged by `wave_channel_defaults_reproduce_game_boy_hardware_exactly`. Not
+independently verified: which bank the wave-RAM window exposes to the CPU while a 64-sample
+channel plays, where the "expose the bank not currently playing" idiom does not apply the same way
+as it does in 32-sample mode — documented in `psg`'s module docs rather than guessed at.
 
-Then, in order:
+`SOUNDBIAS` is stored and round-trips (`fifo::DirectSound::soundbias`), but its bit-depth and
+sample-rate effect on final output is **not modelled** — this machine's mix has no PWM stage for
+that register to bias, and most games leave it at its default. An audio regression golden now
+exists too (`testing/harness/src/audio_golden.rs`), pinning a hash of each system's own output on
+a small deterministic ROM with a negative control proving an all-silent buffer would fail it — the
+same shape of check that would have caught direct sound's two-week silent outage. It is **not**
+validated against real hardware audio capture the way prompt 2's still-unbuilt framebuffer golden
+manifest is designed to require of picture hashes; said so in its own module docs rather than
+implied.
+
+The next biggest gap is not audio-shaped at all: **`panic = "abort"` silently voids the
+save-durability design** `frontend-core::session` documents and relies on — `session.rs:334-339`
+checks `thread.join().is_err()` on the assumption that a panicked emulation thread cannot take the
+frontend down with it, which is false under `abort`: the process dies before the shutdown save
+flush can run. See `Cargo.toml`'s release profile and `session.rs`'s own comments.
+
+Smaller items, in order:
 
 - **Saving works and is confirmed by play**, as of 2026-08-11: a commercial game's in-game save,
   quicksave, and the save-state list were all exercised by hand and all three behave. The chip is
@@ -665,11 +676,9 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-- **PSG channel 3 (wave) on the GBA** is now the biggest gap; channels 1, 2, and 4 are mixed in as
-  of `system-gba::psg`. Not blocked on a decision either, though the *first* PSG question was
-  recorded that way here for a long time — see "The biggest gap" above for why that blocker
-  dissolved on inspection, and for the one real judgement call channel 3 still carries: this
-  machine's two-bank wave RAM against `apu_shared::WaveChannel`'s one.
+- **`SOUNDBIAS`'s bit-depth and sample-rate effect on the GBA** is stored and round-trips but not
+  applied to final output — this machine's mix has no PWM stage for it to bias, and most games
+  leave it at its default. See "PSG audio on the Game Boy Advance is now done" above.
 - **Alpha blending on the GBA** composes its real lower layer as a second pass over the line, with a
   write mask that excludes — at each pixel — exactly the layer *that pixel's own winner* came from,
   not every layer `BLDCNT` declares a first target. Excluding declared first targets wholesale was

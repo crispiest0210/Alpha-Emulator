@@ -212,16 +212,18 @@ pub fn dispatch<B: Bus + ?Sized>(
             soft_reset(cpu, bus);
             effect = BiosEffect::Jump;
         }
-        // Hardware ramps `SOUNDBIAS`'s level toward the target over a handful of VBlanks rather
-        // than writing it in one step, which cannot be answered here without either blocking
-        // (like `IntrWait`) or the register itself existing to ramp — and nothing in this crate
-        // owns `SOUNDBIAS` yet. Recognising the call at all is still worth doing: MP2K calls it
-        // during its own init, and answering it here means that startup sequence sees a call that
-        // exists rather than one that silently vanished. See the crate docs' Status section.
+        // `fifo::DirectSound::soundbias` now stores the register a plain write to `0x0400_0088`
+        // reaches, but this call is a different contract: hardware ramps the level toward the
+        // target over a handful of VBlanks rather than snapping to it, which cannot be answered
+        // in one step here without either blocking (like `IntrWait`) or fabricating a ramp rate
+        // this crate has not modelled. Recognising the call at all is still worth doing: MP2K
+        // calls it during its own init, and answering it here means that startup sequence sees a
+        // call that exists rather than one that silently vanished. See the crate docs' Status
+        // section.
         BiosCall::SoundBias => {
             tracing::debug!(
-                "SoundBias asked to ramp SOUNDBIAS toward {:#X}; the register does not exist in \
-                 this crate yet, so the ramp has no effect",
+                "SoundBias asked to ramp SOUNDBIAS toward {:#X}; the ramp itself is not \
+                 modelled, so the register is unaffected by this call",
                 cpu.reg(0)
             );
         }

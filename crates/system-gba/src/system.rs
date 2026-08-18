@@ -75,8 +75,9 @@ use crate::{background::Backgrounds, timers::Timers};
 /// 2 added the in-progress `IntrWait` mask, which a state taken mid-wait needs to resume without
 /// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`. 4 added
 /// the PSG: three channels, its register block, and the divider and frame sequencer that clock
-/// them.
-const STATE_VERSION: u32 = 4;
+/// them. 5 added the PSG's fourth channel, the wave channel and its two banks. 6 added raw
+/// `SOUNDBIAS` storage.
+const STATE_VERSION: u32 = 6;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;

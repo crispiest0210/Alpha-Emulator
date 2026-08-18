@@ -37,6 +37,9 @@ pub mod reg {
     pub const SOUNDCNT_X: u32 = 0x0400_0084;
     pub const FIFO_A: u32 = 0x0400_00A0;
     pub const FIFO_B: u32 = 0x0400_00A4;
+    /// PWM bias level and sampling cycle. See [`super::DirectSound::soundbias`] for what is and is not
+    /// modelled.
+    pub const SOUNDBIAS: u32 = 0x0400_0088;
 }
 
 /// One direct-sound channel.
@@ -200,6 +203,18 @@ pub struct DirectSound {
     pub a: SoundFifo,
     pub b: SoundFifo,
     pub control: DirectSoundControl,
+    /// Raw `SOUNDBIAS`.
+    ///
+    /// Stored and read back exactly as written, but **not applied to the mixed output**: real
+    /// hardware runs its final samples through a PWM DAC whose zero level and sample rate this
+    /// register adjusts, resampling and re-quantising everything downstream of it. This machine's
+    /// mix is float samples handed straight to the frontend's own audio backend, which has no PWM
+    /// stage to bias — modelling the effect faithfully would mean simulating one that does not
+    /// otherwise exist here, purely to reproduce a filter most games leave at its default. Left
+    /// honestly unapplied rather than approximated; a game relying on a non-default bias to shift
+    /// its output level will sound unaffected by that shift, though not distorted or wrong-pitched
+    /// the way a half-modelled resample could be.
+    pub soundbias: u16,
 }
 
 impl DirectSound {
@@ -208,6 +223,7 @@ impl DirectSound {
             a: SoundFifo::new(),
             b: SoundFifo::new(),
             control: DirectSoundControl::default(),
+            soundbias: 0,
         }
     }
 
@@ -219,6 +235,7 @@ impl DirectSound {
     pub fn owns(addr: u32) -> bool {
         (reg::SOUNDCNT_H..reg::SOUNDCNT_H + 2).contains(&addr)
             || (reg::SOUNDCNT_X..reg::SOUNDCNT_X + 4).contains(&addr)
+            || (reg::SOUNDBIAS..reg::SOUNDBIAS + 2).contains(&addr)
             || (reg::FIFO_A..reg::FIFO_B + 4).contains(&addr)
     }
 
@@ -235,6 +252,7 @@ impl DirectSound {
                 self.control.control = value & !(1 << 11) & !(1 << 15);
             }
             reg::SOUNDCNT_X => self.control.master = value & (1 << 7),
+            reg::SOUNDBIAS => self.soundbias = value,
             // The two FIFOs themselves. `owns` has always claimed these addresses and this match
             // never handled them, so every byte a DMA channel delivered was accepted by the bus
             // and then dropped: the queues stayed empty, the held sample stayed zero, and the
@@ -262,6 +280,7 @@ impl DirectSound {
         Some(match addr {
             reg::SOUNDCNT_H => self.control.control,
             reg::SOUNDCNT_X => self.control.master,
+            reg::SOUNDBIAS => self.soundbias,
             // The queues are write-only. Reading one returns nothing rather than a sample: a
             // game has no way to inspect how much audio is left.
             reg::FIFO_A | reg::FIFO_B => 0,
@@ -373,6 +392,7 @@ impl Savable for DirectSound {
         self.b.save(w);
         w.write_u16(self.control.control);
         w.write_u16(self.control.master);
+        w.write_u16(self.soundbias);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -380,6 +400,7 @@ impl Savable for DirectSound {
         self.b.load(r)?;
         self.control.control = r.read_u16()?;
         self.control.master = r.read_u16()?;
+        self.soundbias = r.read_u16()?;
         Ok(())
     }
 }

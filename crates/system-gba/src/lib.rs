@@ -15,19 +15,19 @@
 //!
 //! What is not done, in rough order of how much it matters:
 //!
-//! - **Three of the four `apu-shared` PSG channels are now mixed in**, alongside the two FIFO
-//!   channels: [`psg`] is a new register layer — halfwords from `0x0400_0060` with gaps between
-//!   them, unlike the Game Boy's contiguous `NR10`-`NR52` — over the same `SquareChannel` and
-//!   `NoiseChannel` types `system-gb::apu` already uses, at CGB semantics throughout (no
-//!   `GbModel`-style gating; the obstacle that gating was once thought to be never applied here).
-//!   `SOUNDCNT_H` bits 0-1 attenuate the PSG's own `SOUNDCNT_L` master volume again, multiplicatively
-//!   rather than one overriding the other, before it meets direct sound in `GbaSystemBus::generate_samples`.
-//!   **Channel 3 (wave) is still missing**, deliberately: its wave RAM is two sixteen-byte banks
-//!   with the CPU seeing whichever is not playing, a real difference from `apu_shared::WaveChannel`'s
-//!   single-bank model that needs its own decision rather than a rushed reuse, so `SOUND3CNT_L/H/X`
-//!   and the wave RAM window are left unclaimed — reading as unmapped, not as a channel that
-//!   happens to be quiet. `SOUNDBIAS` is likewise still unclaimed, so `bios::dispatch`'s
-//!   `SoundBias` call still recognises but does not act on it.
+//! - **The PSG is now fully mixed in**, all four `apu-shared` channels alongside the two FIFO
+//!   ones: [`psg`] is a register layer — halfwords from `0x0400_0060` with gaps between them,
+//!   unlike the Game Boy's contiguous `NR10`-`NR52` — over the same `SquareChannel`,
+//!   `NoiseChannel`, and (since it grew additive, Game-Boy-default fields for a second bank, a
+//!   64-sample mode, and a 75% volume step) `WaveChannel` types `system-gb::apu` already uses, at
+//!   CGB semantics throughout — no `GbModel`-style gating; the obstacle that gating was once
+//!   thought to be never applied here. `SOUNDCNT_H` bits 0-1 attenuate the PSG's own `SOUNDCNT_L`
+//!   master volume again, multiplicatively rather than one overriding the other, before it meets
+//!   direct sound in `GbaSystemBus::generate_samples`. **Not modelled:** `SOUNDBIAS`'s bit-depth
+//!   and sample-rate effect on final output — the register is stored and read back correctly, but
+//!   this machine's mix has no PWM stage for that register to bias in the first place, and most
+//!   games leave it at its default; and the Game Boy's `NRx4` write-during-length-period quirks
+//!   `system-gb::apu` models, which nothing in the GBA corpus exercises yet.
 //! - **EEPROM saves are reported as absent** rather than emulated; SRAM and Flash work, and a real
 //!   cartridge's chip and size are detected correctly. No game has yet been played far enough to
 //!   write a save file, so the path from a game's write to a file on disk is unverified.
@@ -48,8 +48,10 @@
 //!   `Div`/`DivArm`/`Sqrt`/`ArcTan`/`ArcTan2`, `CpuSet`/`CpuFastSet`, `GetBiosChecksum`, all five
 //!   decompressors plus `BitUnPack`, `BgAffineSet`/`ObjAffineSet`, `RegisterRamReset`,
 //!   `SoftReset`, `Halt`/`Stop`/`IntrWait`/`VBlankIntrWait`, and `MidiKey2Freq`. `SoundBias` is
-//!   recognised — MP2K's own init calls it — but does not ramp `SOUNDBIAS`, because nothing in
-//!   this crate owns that register yet; see `bios::dispatch`'s `SoundBias` arm. **Not
+//!   recognised — MP2K's own init calls it — but does not ramp `SOUNDBIAS`: `fifo::DirectSound`
+//!   stores that register now, so a plain write to it round-trips correctly, but this call's own
+//!   contract is a multi-VBlank ramp toward a target rather than a one-step write, which nothing
+//!   here models; see `bios::dispatch`'s `SoundBias` arm. **Not
 //!   implemented, deliberately:** the M4A/MP2K sound-engine entry points at `SWI` 0x1A-0x1E and
 //!   0x20-0x2A (`SoundDriverInit`/`Main`/`Mode`/`VSync`, the `MusicPlayer*` family,
 //!   `SoundChannelClear`) — these are not small pure functions but the BIOS-resident sound

@@ -28,7 +28,7 @@ There are no released builds yet, but all four systems run. The table below refl
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **PSG channels 1, 2, and 4 are mixed in; channel 3 (wave) is not, so music using it is incomplete**; no cartridge clock or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are now mixed in alongside direct sound**; no cartridge clock or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
@@ -46,18 +46,23 @@ dropped. Backgrounds in every mode, sprites at both colour depths, affine scalin
 windows, colour blending, save states and rewind all work on real software rather than only on
 unit tests.
 
-Two gaps are worth stating plainly because you will notice both:
+The GBA makes sound two ways — two DMA-fed direct-sound channels and the Game Boy's four older PSG
+channels — and both are now wired. `system-gba::psg` is a register layer over the same square,
+noise, and (now additively extended for a second wave-RAM bank, a 64-sample mode, and a 75% volume
+step) wave channel types the Game Boy uses, panned and scaled by their own master volume and then
+attenuated again by `SOUNDCNT_H`, cascading into the same mix as direct sound. `SOUNDBIAS` is
+stored and round-trips through a save state, though its bit-depth and sample-rate effect on final
+output is not modelled — this machine's mix has no PWM stage for that register to bias, and most
+games leave it at its default. Direct sound itself works: until 2026-08-10 it produced **exact
+digital silence**, because `DirectSound::owns` claimed both FIFO addresses and `write16` answered
+`None` for them, so every byte a DMA channel delivered was accepted by the bus and dropped. Nothing
+caught it because nothing checked that a sample put into a FIFO comes back out — an audio
+regression golden (`testing/harness/src/audio_golden.rs`) now exists specifically to catch a
+recurrence of exactly that shape of bug, with a negative control proving an all-silent buffer
+would fail it.
 
-- **PSG channel 3 (wave) is not wired.** The GBA makes sound two ways — two DMA-fed direct-sound
-  channels and the Game Boy's four older PSG channels — and, as of `system-gba::psg`, three of the
-  four PSG channels (both squares and noise) now reach the mix alongside direct sound, panned and
-  scaled by their own master volume and then attenuated again by `SOUNDCNT_H`. Channel 3 is the
-  one still missing: its wave RAM is two sixteen-byte banks with the CPU seeing whichever is not
-  playing, a real difference from the single-bank model the shared channel type uses, left
-  unclaimed rather than approximated. Direct sound itself works: until 2026-08-10 it produced
-  **exact digital silence**, because `DirectSound::owns` claimed both FIFO addresses and `write16`
-  answered `None` for them, so every byte a DMA channel delivered was accepted by the bus and
-  dropped. Nothing caught it because nothing checked that a sample put into a FIFO comes back out.
+One gap is worth stating plainly because you will notice it:
+
 - **There is no cartridge GPIO**, so a game with a real-time clock finds none and reports a flat
   battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
   battery behaves identically and games handle it — but time-of-day events never fire.
@@ -244,7 +249,7 @@ Component status:
 | `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules, both tile-mapping arrangements, and per-sprite bit depth |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; dmg-acid2 validated pixel-exact |
-| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
+| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass. The wave channel carries additive, Game-Boy-default fields for the GBA's second bank, 64-sample mode, and 75% volume step; a dedicated test pins that those defaults reproduce Game Boy behaviour exactly |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done and driven from the window; keyboard only, gamepads are future work |
@@ -264,7 +269,7 @@ Component status:
 | `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |
 | `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
 | `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10 |
-| `system-gba` PSG — the Game Boy's four channels, re-addressed | channels 1, 2, and 4 done and mixed in, over `apu-shared`'s existing channel types at CGB semantics; **channel 3 (wave) and `SOUNDBIAS` are not wired**, the former because this machine's two-bank wave RAM needs its own decision rather than a rushed reuse of the single-bank shared model |
+| `system-gba` PSG — the Game Boy's four channels, re-addressed | all four channels done and mixed in, over `apu-shared`'s existing channel types (the wave channel additively extended for this machine's second bank, 64-sample mode, and 75% volume step) at CGB semantics; `SOUNDBIAS` is stored and round-trips but its output effect is **not modelled**, since this machine's mix has no PWM stage for it to bias |
 | `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
 | `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent; a bitmap mode is background 2 sampled through its affine transform like any other layer, subject to the same enable bit, windows, blend unit, and sprite-priority rule; mosaic on text backgrounds and ordinary sprites, both axes — **not affine backgrounds, the bitmap layer, or affine sprites** |
 | `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
@@ -315,6 +320,14 @@ Current Game Boy results:
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
 | `gba-suite` arm, thumb, memory | **pass** |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
+
+**Audio has a regression check now too, and it is not the same guarantee as the picture tests
+above.** `testing/harness/src/audio_golden.rs` hashes each system's sample output on a small
+deterministic ROM and pins it, with a negative control proving an all-silent buffer would fail —
+the check that would have caught direct sound's two-week silent outage. Unlike dmg-acid2 and
+cgb-acid2's pixel-exact references, these hashes are **not validated against real hardware audio
+capture**; they pin this emulator's own output so a later regression is caught, which is a
+narrower and more honest claim than "correct."
 
 **Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
 asks for whatever test-ROM coverage exists at implementation time and for an explicit statement of

@@ -70,21 +70,18 @@ fn the_gaps_between_the_registers_decode_to_nothing() {
 }
 
 #[test]
-fn channel_threes_registers_are_left_unclaimed_for_the_wave_bank_work() {
-    // Deliberately not "claimed and ignored": wave RAM here is two banks with the CPU seeing
-    // whichever is not playing, which `apu_shared::WaveChannel` does not model. An address that
-    // answers zero would look implemented.
+fn channel_threes_registers_and_wave_ram_window_are_claimed() {
     let mut p = psg();
     for addr in [
-        0x0400_0070,
-        0x0400_0072,
-        0x0400_0074,
-        0x0400_0090,
-        0x0400_009E,
+        reg::SOUND3CNT_L,
+        reg::SOUND3CNT_H,
+        reg::SOUND3CNT_X,
+        reg::WAVE_RAM,
+        reg::WAVE_RAM + WAVE_RAM_WINDOW_BYTES - 2, // the window's last halfword
     ] {
-        assert!(!Psg::owns(addr), "{addr:#X}");
-        assert_eq!(p.read16(addr), None, "{addr:#X}");
-        assert_eq!(p.write16(addr, 0xFFFF), None, "{addr:#X}");
+        assert!(Psg::owns(addr), "{addr:#X}");
+        assert!(p.read16(addr).is_some(), "{addr:#X}");
+        assert!(p.write16(addr, 0xFFFF).is_some(), "{addr:#X}");
     }
 }
 
@@ -104,7 +101,8 @@ fn the_psg_and_direct_sound_blocks_never_claim_the_same_address() {
     assert!(DirectSound::owns(crate::fifo::reg::SOUNDCNT_X));
     assert!(!Psg::owns(crate::fifo::reg::SOUNDCNT_H));
     assert!(!Psg::owns(crate::fifo::reg::SOUNDCNT_X));
-    assert!(!Psg::owns(0x0400_0088), "SOUNDBIAS belongs to neither yet");
+    assert!(DirectSound::owns(0x0400_0088), "SOUNDBIAS");
+    assert!(!Psg::owns(0x0400_0088));
     assert!(!Psg::owns(0x0400_005E), "below the block");
 }
 
@@ -246,6 +244,106 @@ fn channel_four_makes_a_sound_when_it_is_triggered() {
 }
 
 #[test]
+fn channel_three_makes_a_sound_when_it_is_triggered() {
+    let mut p = psg();
+    p.write16(reg::SOUNDCNT_L, FULL_VOLUME_BOTH_SIDES);
+    assert_eq!(p.output(), (0.0, 0.0), "nothing playing yet");
+
+    // Loaded directly into the field that plays at the defaults (bank 0, `active_bank` false)
+    // rather than through the wave-RAM window: that indirection, and which bank it targets, is
+    // `the_wave_ram_window_exposes_the_bank_not_selected_for_playback`'s own test.
+    for (i, byte) in p.ch3.wave_ram.iter_mut().enumerate() {
+        *byte = ((((i * 2 + 1) % 16) << 4) | ((i * 2) % 16)) as u8;
+    }
+    p.write16(reg::SOUND3CNT_L, 1 << 7); // DAC on, dimension and bank left at their defaults
+    p.write16(reg::SOUND3CNT_H, 1 << 13); // full volume
+    p.write16(reg::SOUND3CNT_X, TRIGGER | 2044);
+
+    let levels = sweep_output(&mut p, 32, 32);
+    assert!(levels.iter().any(|&v| v != 0.0), "{levels:?}");
+    assert!(
+        levels.iter().any(|&v| v != levels[0]),
+        "and it is a waveform, not a held level: {levels:?}"
+    );
+}
+
+#[test]
+fn the_wave_ram_window_exposes_the_bank_not_selected_for_playback() {
+    // The double-buffering idiom the window exists for: a game loads a fresh waveform into
+    // whichever bank is not currently sounding, then flips the bank-select bit to swap them
+    // without a gap. `active_bank` is the bank *playing*, so the CPU must see the other one.
+    let mut p = psg();
+    p.write16(reg::SOUND3CNT_L, 1 << 7); // DAC on, bank 0 selected (bit 6 clear)
+    p.write16(reg::WAVE_RAM, 0x1111);
+    assert_eq!(
+        p.ch3.wave_ram_bank1[0..2],
+        [0x11, 0x11],
+        "bank 0 plays, so the window wrote bank 1"
+    );
+    assert_eq!(
+        p.ch3.wave_ram[0..2],
+        [0, 0],
+        "and left the playing bank alone"
+    );
+
+    p.write16(reg::SOUND3CNT_L, (1 << 7) | (1 << 6)); // swap to bank 1
+    p.write16(reg::WAVE_RAM, 0x2222);
+    assert_eq!(
+        p.ch3.wave_ram[0..2],
+        [0x22, 0x22],
+        "bank 1 plays now, so the window wrote bank 0"
+    );
+}
+
+#[test]
+fn a_sixty_four_sample_channel_three_plays_both_banks_through_the_register_layer() {
+    let mut p = psg();
+    p.write16(reg::SOUNDCNT_L, FULL_VOLUME_BOTH_SIDES);
+    p.ch3.wave_ram = [0x11; WAVE_RAM_BYTES]; // every bank-0 sample is 1
+    p.ch3.wave_ram_bank1 = [0x22; WAVE_RAM_BYTES]; // every bank-1 sample is 2
+    p.write16(reg::SOUND3CNT_L, (1 << 7) | (1 << 5)); // DAC on, 64-sample dimension
+    p.write16(reg::SOUND3CNT_H, 1 << 13); // full volume
+    p.write16(reg::SOUND3CNT_X, TRIGGER | 2044);
+
+    // `Psg::tick` takes CPU cycles, four per t-cycle, unlike `WaveChannel::tick` which the other
+    // apu-shared-level tests drive directly in t-cycles.
+    let period_in_cpu_cycles = (2048 - 2044) * 2 * 4;
+    assert_eq!(p.ch3.output(), 1, "sample 0 is bank 0");
+    p.tick(period_in_cpu_cycles * 32);
+    assert_eq!(p.ch3.output(), 2, "sample 32 crossed into bank 1");
+}
+
+#[test]
+fn force_75_percent_reaches_the_wave_channel_through_soundcnt_h() {
+    // `volume_shift` 0 mutes by forcing every sample to the same fixed digital level, not by
+    // driving the DAC toward analog zero — 0 maps to this DAC's *loudest* extreme (see
+    // `apu_shared::dac_output`), so a magnitude comparison could not tell "muted" from "loud"
+    // apart. What actually distinguishes them is variation: a muted channel holds one constant
+    // level regardless of what the waveform says, and an unmuted one moves with it.
+    let mut p = psg();
+    p.write16(reg::SOUNDCNT_L, FULL_VOLUME_BOTH_SIDES);
+    for (i, byte) in p.ch3.wave_ram.iter_mut().enumerate() {
+        *byte = ((((i * 2 + 1) % 16) << 4) | ((i * 2) % 16)) as u8;
+    }
+    p.write16(reg::SOUND3CNT_L, 1 << 7);
+    p.write16(reg::SOUND3CNT_H, 0); // volume_shift 0: mute, if the override did not apply
+    p.write16(reg::SOUND3CNT_X, TRIGGER | 2044);
+    let muted = sweep_output(&mut p, 32, 8);
+    assert!(
+        muted.iter().all(|&v| v == muted[0]),
+        "volume_shift 0 should hold one level regardless of the waveform: {muted:?}"
+    );
+
+    p.write16(reg::SOUND3CNT_H, 1 << 15); // force 75%, volume_shift still 0
+    p.write16(reg::SOUND3CNT_X, TRIGGER | 2044);
+    let forced = sweep_output(&mut p, 32, 8);
+    assert!(
+        forced.iter().any(|&v| v != forced[0]),
+        "the force-75% override should let the waveform move again: {forced:?}"
+    );
+}
+
+#[test]
 fn panning_routes_a_channel_to_the_side_that_selected_it() {
     let mut p = psg();
     // Full volume both sides; channel 1 left only, channel 4 right only.
@@ -268,10 +366,11 @@ fn panning_routes_a_channel_to_the_side_that_selected_it() {
 }
 
 #[test]
-fn channel_threes_silent_slot_does_not_displace_channel_four() {
-    // `Mixer::mix` reads panning by position, so the missing channel has to be fed silence in
-    // place rather than left out — dropping it would route channel 4 through channel 3's
-    // enable bits, and a game panning them differently would hear the wrong one.
+fn channel_threes_untriggered_slot_does_not_displace_channel_four() {
+    // `Mixer::mix` reads panning by position, so an unplayed channel still occupies its own
+    // slot rather than shifting the ones after it — if channel 3's silence here came from
+    // being skipped rather than merely untriggered, channel 4 would be routed through channel
+    // 3's enable bits, and a game panning them differently would hear the wrong one.
     let mut p = psg();
     p.write16(reg::SOUND4CNT_L, 0xF000);
     p.write16(reg::SOUND4CNT_H, TRIGGER);

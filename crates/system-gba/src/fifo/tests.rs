@@ -242,10 +242,21 @@ fn the_queues_are_write_only() {
 fn the_block_claims_its_registers_and_no_others() {
     assert!(DirectSound::owns(reg::SOUNDCNT_H));
     assert!(DirectSound::owns(reg::SOUNDCNT_X));
+    assert!(DirectSound::owns(reg::SOUNDBIAS));
     assert!(DirectSound::owns(reg::FIFO_A));
     assert!(DirectSound::owns(reg::FIFO_B + 3));
     assert!(!DirectSound::owns(0x0400_0060), "that is the PSG block");
     assert!(!DirectSound::owns(0x0400_00B0), "that is DMA");
+}
+
+#[test]
+fn soundbias_is_stored_and_read_back_raw() {
+    // Not applied to the mix — see `DirectSound::soundbias`'s doc comment for why — but a game
+    // that reads what it wrote must get that value back regardless.
+    let mut sound = DirectSound::new();
+    assert_eq!(sound.read16(reg::SOUNDBIAS), Some(0), "unwritten default");
+    sound.write16(reg::SOUNDBIAS, 0xC200);
+    assert_eq!(sound.read16(reg::SOUNDBIAS), Some(0xC200));
 }
 
 #[test]
@@ -254,6 +265,7 @@ fn direct_sound_state_round_trips_mid_playback() {
     let mut sound = enabled_sound();
     sound.write32(reg::FIFO_A, 0x0403_0201);
     sound.write32(reg::FIFO_B, 0x0807_0605);
+    sound.write16(reg::SOUNDBIAS, 0xC200);
     sound.on_timer_overflow(&once(0));
 
     let bytes = encode_state("gba-fifo", 1, &sound);

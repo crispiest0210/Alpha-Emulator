@@ -32,7 +32,7 @@
 
 pub mod corpus;
 
-use core_common::{Framebuffer, InputState, RegisterValue, System};
+use core_common::{AudioSample, Framebuffer, InputState, RegisterValue, System};
 
 /// A system the harness can inspect beyond what [`System`] exposes.
 ///
@@ -318,6 +318,25 @@ pub fn framebuffer_hash(framebuffer: &Framebuffer) -> String {
     format!("{hash:016x}")
 }
 
+/// The same digest, over an audio buffer's raw sample bits rather than a framebuffer's pixels.
+///
+/// FNV-1a for the same reason as [`framebuffer_hash`]: this identifies a specific stream of
+/// samples so a later change is caught, not a cryptographic property. Left and right are hashed
+/// separately per sample rather than as a merged value, so a regression that swapped the two
+/// channels — a real, easy mistake in a panning path — still changes the digest.
+pub fn audio_hash(samples: &[AudioSample]) -> String {
+    let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
+    for sample in samples {
+        for value in [sample.left, sample.right] {
+            for byte in value.to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+    }
+    format!("{hash:016x}")
+}
+
 // ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
@@ -489,6 +508,9 @@ impl SuiteReport {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod audio_golden;
 
 // ---------------------------------------------------------------------------
 // System adapters

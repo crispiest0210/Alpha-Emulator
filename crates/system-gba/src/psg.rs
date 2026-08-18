@@ -28,15 +28,25 @@
 //! in the scheduler, unlike the Game Boy's: this machine has no scheduler to put it in (see
 //! [`crate::system`]), and nothing outside audio wants it.
 //!
-//! # Channel 3 is absent on purpose
+//! # Channel 3 has two banks, and the CPU only ever sees one of them
 //!
-//! Wave RAM on this machine is two sixteen-byte banks with the CPU seeing whichever is not
-//! playing, and a 64-sample mode that spans both — a real difference from the Game Boy's single
-//! bank that `apu_shared::WaveChannel` does not model. Its registers (`SOUND3CNT_L/H/X` at
-//! `0x0400_0070`-`0x0400_0074`) and its wave RAM window are therefore claimed by nothing yet,
-//! and read as unmapped rather than as a channel that is merely quiet.
+//! Wave RAM on this machine is two sixteen-byte banks rather than the Game Boy's one, plus a
+//! 64-sample mode that plays both back to back — a real difference `apu_shared::WaveChannel`
+//! did not model until it grew additive fields for exactly this (`sample_count`,
+//! `wave_ram_bank1`, `active_bank`, `force_75_percent`; all default to the Game Boy's single-bank
+//! behaviour, which is why extending the type was safe rather than a second implementation).
+//!
+//! `SOUND3CNT_L` bit 6 selects which bank *plays* in 32-sample mode; the wave RAM window at
+//! `0x0400_0090` always exposes the *other* one, so a game can load a fresh waveform into the
+//! bank that is not currently sounding and flip the bit to swap them.
+//! That swap-while-playing idiom is the reason the window exists at all rather than a single
+//! sixteen-byte block; a game not using it just leaves the bit alone and always writes the same
+//! bank. **Not independently verified**: which bank the window exposes in 64-sample mode, where
+//! both are already in use for playback and the inactive-bank idiom does not apply the same way.
+//! This follows the same bit regardless, rather than guessing at a special case with nothing in
+//! the corpus to check it against.
 
-use apu_shared::{Mixer, NoiseChannel, SquareChannel};
+use apu_shared::{Mixer, NoiseChannel, SquareChannel, WaveChannel, WAVE_RAM_BYTES};
 use core_common::{Savable, StateError, StateReader, StateWriter};
 
 /// Register addresses. Each holds the two `NRxx` bytes named beside it, low byte first.
@@ -51,18 +61,30 @@ pub mod reg {
     pub const SOUND2CNT_L: u32 = 0x0400_0068;
     /// Channel 2 frequency and trigger — `NR23`, `NR24`.
     pub const SOUND2CNT_H: u32 = 0x0400_006C;
+    /// Channel 3 dimension, bank select, and DAC power — `NR30`, repositioned and extended.
+    pub const SOUND3CNT_L: u32 = 0x0400_0070;
+    /// Channel 3 length, volume, and the force-75%-volume bit `NR32` has no room for.
+    pub const SOUND3CNT_H: u32 = 0x0400_0072;
+    /// Channel 3 frequency and trigger — `NR33`, `NR34`.
+    pub const SOUND3CNT_X: u32 = 0x0400_0074;
     /// Channel 4 length and envelope — `NR41`, `NR42`.
     pub const SOUND4CNT_L: u32 = 0x0400_0078;
     /// Channel 4 noise parameters and trigger — `NR43`, `NR44`.
     pub const SOUND4CNT_H: u32 = 0x0400_007C;
     /// Master volume and per-channel panning — `NR50`, `NR51`.
     pub const SOUNDCNT_L: u32 = 0x0400_0080;
+    /// Sixteen bytes exposing whichever wave-RAM bank the CPU currently owns. Not part of the
+    /// control-register block below — this is sample data, not a register with write-only bits.
+    pub const WAVE_RAM: u32 = 0x0400_0090;
 
     /// The first address of the block, which the read-back table is indexed from.
     pub const BLOCK_START: u32 = SOUND1CNT_L;
     /// One past the last address of the block.
     pub const BLOCK_END: u32 = SOUNDCNT_L + 2;
 }
+
+/// Bytes in the wave-RAM window: one bank's worth.
+const WAVE_RAM_WINDOW_BYTES: u32 = WAVE_RAM_BYTES as u32;
 
 /// Halfword slots between [`reg::BLOCK_START`] and [`reg::BLOCK_END`], gaps included.
 const SLOTS: usize = ((reg::BLOCK_END - reg::BLOCK_START) / 2) as usize;
@@ -87,7 +109,13 @@ fn read_mask(addr: u32) -> u16 {
         // Duty and the whole envelope byte; the length is write-only.
         reg::SOUND1CNT_H | reg::SOUND2CNT_L => 0xFFC0,
         // Only the length-enable flag. The frequency and the trigger are write-only.
-        reg::SOUND1CNT_X | reg::SOUND2CNT_H => 0x4000,
+        reg::SOUND1CNT_X | reg::SOUND2CNT_H | reg::SOUND3CNT_X => 0x4000,
+        // Dimension and bank select; the DAC power bit and the four unused low bits are not
+        // readable. GBATEK marks bit 7 write-only here, unlike every other channel's on/off
+        // equivalent — there is no register-level way to ask a GBA whether channel 3 is powered.
+        reg::SOUND3CNT_L => 0x0060,
+        // Volume and the force-75% bit; the length in the low byte is write-only.
+        reg::SOUND3CNT_H => 0xE000,
         // The envelope byte only; channel 4's length shares the low byte and is write-only.
         reg::SOUND4CNT_L => 0xFF00,
         // The noise parameters are fully readable, plus the length-enable flag.
@@ -100,12 +128,11 @@ fn read_mask(addr: u32) -> u16 {
 }
 
 /// The four PSG channels and their register layer.
-///
-/// Channel 3 is missing rather than silent; see the module docs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Psg {
     pub ch1: SquareChannel,
     pub ch2: SquareChannel,
+    pub ch3: WaveChannel,
     pub ch4: NoiseChannel,
     /// `SOUNDCNT_L`: panning and the PSG's own master volume.
     pub mixer: Mixer,
@@ -136,6 +163,7 @@ impl Psg {
         Self {
             ch1: SquareChannel::with_sweep(),
             ch2: SquareChannel::new(),
+            ch3: WaveChannel::new(),
             ch4: NoiseChannel::new(),
             mixer: Mixer::default(),
             powered: false,
@@ -150,20 +178,24 @@ impl Psg {
     ///
     /// Written as explicit ranges rather than a masked comparison, for the reason
     /// [`crate::fifo::DirectSound::owns`] gives at length: the block is not contiguous. Gaps sit
-    /// at `0x66`, `0x6A`, `0x6E`, `0x7A`, and `0x7E`, channel 3's three registers sit inside it
-    /// unclaimed, and `SOUNDCNT_H` and `SOUNDCNT_X` belong to the direct-sound block *between*
-    /// `SOUNDCNT_L` and the FIFOs. Any single mask over that either swallows registers this
-    /// module must not answer for or misses ones it must — and both failures are silent, because
-    /// an unclaimed sound register reads back zero and does nothing rather than trapping.
+    /// at `0x66`, `0x6A`, `0x6E`, `0x7A`, and `0x7E`, and `SOUNDCNT_H` and `SOUNDCNT_X` belong to
+    /// the direct-sound block *between* `SOUNDCNT_L` and the FIFOs. Any single mask over that
+    /// either swallows registers this module must not answer for or misses ones it must — and
+    /// both failures are silent, because an unclaimed sound register reads back zero and does
+    /// nothing rather than trapping.
     pub fn owns(addr: u32) -> bool {
         (reg::SOUND1CNT_L..reg::SOUND1CNT_L + 2).contains(&addr)
             || (reg::SOUND1CNT_H..reg::SOUND1CNT_H + 2).contains(&addr)
             || (reg::SOUND1CNT_X..reg::SOUND1CNT_X + 2).contains(&addr)
             || (reg::SOUND2CNT_L..reg::SOUND2CNT_L + 2).contains(&addr)
             || (reg::SOUND2CNT_H..reg::SOUND2CNT_H + 2).contains(&addr)
+            || (reg::SOUND3CNT_L..reg::SOUND3CNT_L + 2).contains(&addr)
+            || (reg::SOUND3CNT_H..reg::SOUND3CNT_H + 2).contains(&addr)
+            || (reg::SOUND3CNT_X..reg::SOUND3CNT_X + 2).contains(&addr)
             || (reg::SOUND4CNT_L..reg::SOUND4CNT_L + 2).contains(&addr)
             || (reg::SOUND4CNT_H..reg::SOUND4CNT_H + 2).contains(&addr)
             || (reg::SOUNDCNT_L..reg::SOUNDCNT_L + 2).contains(&addr)
+            || (reg::WAVE_RAM..reg::WAVE_RAM + WAVE_RAM_WINDOW_BYTES).contains(&addr)
     }
 
     /// Which read-back slot an owned address falls in.
@@ -191,8 +223,17 @@ impl Psg {
         if on {
             return;
         }
+        // Wave RAM survives a power cycle intact — it is sample data a game loaded, not a sound
+        // register — which is why both banks are saved and put back rather than left to
+        // `WaveChannel::new`'s zeroed default. `system-gb::apu::set_power` does the same for the
+        // Game Boy's one bank; this machine follows the CGB rule throughout, so unlike that DMG
+        // case the length counter is not carried over.
+        let (wave_ram, wave_ram_bank1) = (self.ch3.wave_ram, self.ch3.wave_ram_bank1);
         self.ch1 = SquareChannel::with_sweep();
         self.ch2 = SquareChannel::new();
+        self.ch3 = WaveChannel::new();
+        self.ch3.wave_ram = wave_ram;
+        self.ch3.wave_ram_bank1 = wave_ram_bank1;
         self.ch4 = NoiseChannel::new();
         self.mixer = Mixer::default();
         self.written = [0; SLOTS];
@@ -217,6 +258,7 @@ impl Psg {
 
         self.ch1.tick(ticks);
         self.ch2.tick(ticks);
+        self.ch3.tick(ticks);
         self.ch4.tick(ticks);
 
         self.sequencer_timer += ticks;
@@ -232,6 +274,7 @@ impl Psg {
         if self.sequencer_step.is_multiple_of(2) {
             self.ch1.clock_length();
             self.ch2.clock_length();
+            self.ch3.clock_length();
             self.ch4.clock_length();
         }
         if self.sequencer_step == 2 || self.sequencer_step == 6 {
@@ -250,21 +293,42 @@ impl Psg {
     /// a quarter, a half, or not at all, and the two controls cascade rather than one overriding
     /// the other — so that half is applied by the caller, where the direct-sound mix it is summed
     /// with also lives. See `GbaSystemBus::generate_samples`.
-    ///
-    /// Channel 3's slot is fed silence rather than skipped, because
-    /// [`apu_shared::Mixer::mix`]'s panning bits are positional: dropping the entry would route
-    /// channel 4 through channel 3's enables.
     pub fn output(&self) -> (f32, f32) {
         if !self.powered {
             return (0.0, 0.0);
         }
-        let sample = self
-            .mixer
-            .mix([self.ch1.signal(), self.ch2.signal(), 0.0, self.ch4.signal()]);
+        let sample = self.mixer.mix([
+            self.ch1.signal(),
+            self.ch2.signal(),
+            self.ch3.signal(),
+            self.ch4.signal(),
+        ]);
         (sample.left, sample.right)
     }
 
+    /// Which bank the wave-RAM window currently exposes: always the one *not* selected for
+    /// playback. See the module docs for the idiom this serves and the one case it is not
+    /// verified for.
+    fn wave_ram_mut(&mut self) -> &mut [u8; WAVE_RAM_BYTES] {
+        if self.ch3.active_bank {
+            &mut self.ch3.wave_ram
+        } else {
+            &mut self.ch3.wave_ram_bank1
+        }
+    }
+
     pub fn read16(&self, addr: u32) -> Option<u16> {
+        if (reg::WAVE_RAM..reg::WAVE_RAM + WAVE_RAM_WINDOW_BYTES).contains(&addr) {
+            // Wave RAM is sample data, not a control register: it has no read mask and is not
+            // gated on `powered`, the same way `system-gb::apu` never blocks a read of `ch3.wave_ram`.
+            let bank = if self.ch3.active_bank {
+                &self.ch3.wave_ram
+            } else {
+                &self.ch3.wave_ram_bank1
+            };
+            let offset = (addr - reg::WAVE_RAM) as usize;
+            return Some(u16::from_le_bytes([bank[offset], bank[offset + 1]]));
+        }
         if !Self::owns(addr) {
             return None;
         }
@@ -272,6 +336,14 @@ impl Psg {
     }
 
     pub fn write16(&mut self, addr: u32, value: u16) -> Option<()> {
+        if (reg::WAVE_RAM..reg::WAVE_RAM + WAVE_RAM_WINDOW_BYTES).contains(&addr) {
+            let offset = (addr - reg::WAVE_RAM) as usize;
+            let [low, high] = value.to_le_bytes();
+            let bank = self.wave_ram_mut();
+            bank[offset] = low;
+            bank[offset + 1] = high;
+            return Some(());
+        }
         if !Self::owns(addr) {
             return None;
         }
@@ -294,6 +366,30 @@ impl Psg {
             reg::SOUND1CNT_X => write_frequency_trigger(&mut self.ch1, value),
             reg::SOUND2CNT_L => write_duty_length_envelope(&mut self.ch2, value),
             reg::SOUND2CNT_H => write_frequency_trigger(&mut self.ch2, value),
+            reg::SOUND3CNT_L => {
+                self.ch3.sample_count = if value & (1 << 5) != 0 { 64 } else { 32 };
+                self.ch3.active_bank = value & (1 << 6) != 0;
+                self.ch3.dac_enabled = value & (1 << 7) != 0;
+                // The wave channel has no envelope, so its DAC is its own bit rather than
+                // implied by one — same as `system-gb::apu`'s `NR30` handling, and the same
+                // reason: switching it off has to silence the channel immediately, not just
+                // starve it of a future trigger.
+                if !self.ch3.dac_enabled {
+                    self.ch3.enabled = false;
+                }
+            }
+            reg::SOUND3CNT_H => {
+                self.ch3.length.write_length(value & 0xFF);
+                self.ch3.volume_shift = ((value >> 13) & 0x03) as u8;
+                self.ch3.force_75_percent = value & (1 << 15) != 0;
+            }
+            reg::SOUND3CNT_X => {
+                self.ch3.frequency = value & 0x07FF;
+                self.ch3.length.enabled = value & LENGTH_ENABLE != 0;
+                if value & TRIGGER != 0 {
+                    self.ch3.trigger();
+                }
+            }
             reg::SOUND4CNT_L => {
                 self.ch4.length.write_length(value & 0x3F);
                 self.ch4.write_envelope((value >> 8) as u8);
@@ -350,6 +446,7 @@ impl Savable for Psg {
     fn save(&self, w: &mut StateWriter) {
         self.ch1.save(w);
         self.ch2.save(w);
+        self.ch3.save(w);
         self.ch4.save(w);
         self.mixer.save(w);
         w.write_bool(self.powered);
@@ -364,6 +461,7 @@ impl Savable for Psg {
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.ch1.load(r)?;
         self.ch2.load(r)?;
+        self.ch3.load(r)?;
         self.ch4.load(r)?;
         self.mixer.load(r)?;
         self.powered = r.read_bool()?;
