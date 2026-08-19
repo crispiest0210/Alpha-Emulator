@@ -27,7 +27,7 @@
 //! whose status it simply assumed. Without one, [`GbSystem::new`] jumps straight to the
 //! documented post-boot register state, so the emulator is usable out of the box.
 
-use cart_common::{create_mapper, GbHeader};
+use cart_common::{create_mapper, GbHeader, RTC_TRAILER_LEN};
 use core_common::{
     compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, AccessKind,
     AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer, InputState,
@@ -650,11 +650,69 @@ impl System for GbSystem {
         self.bus.memory.mapper.battery_save().map(|s| s.as_bytes())
     }
 
-    fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError> {
-        match self.bus.memory.mapper.battery_save_mut() {
-            Some(save) => save.load_from_bytes(data),
-            None => Err(CartridgeError::NoSaveRam),
+    /// Appends the MBC3 RTC trailer (see [`cart_common::RTC_TRAILER_LEN`]) when the cartridge
+    /// has both battery-backed RAM and a clock. RTC-without-RAM is real cartridge-type space
+    /// (`0x0F`) but no known game ships that way — every RTC title needs somewhere to keep its
+    /// save data too — so gating on RAM being present keeps this exactly as permissive as
+    /// [`Self::save_ram`] already is about which cartridges get a file at all.
+    ///
+    /// `SystemTime::now()` is read here, in the one place a `.sav` file is actually written,
+    /// not inside `cart_common::rtc` — that module stays free of the host clock so the clock's
+    /// own tests stay deterministic, per its module docs. Falls back to a zero timestamp if the
+    /// host clock is unavailable or reads before the epoch; a zero is indistinguishable from
+    /// "no catch-up information available" to any reader of the trailer.
+    fn save_ram_for_disk(&self) -> Option<Vec<u8>> {
+        let save = self.bus.memory.mapper.battery_save()?;
+        let mut bytes = save.as_bytes().to_vec();
+        if let Some(rtc) = self.bus.memory.mapper.rtc() {
+            let unix_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            bytes.extend_from_slice(&rtc.to_trailer_bytes(unix_time));
         }
+        Some(bytes)
+    }
+
+    /// The inverse of [`Self::save_ram_for_disk`].
+    ///
+    /// A file exactly `RTC_TRAILER_LEN` bytes longer than the cartridge's RAM is read as
+    /// SRAM-plus-trailer; anything else is passed to the RAM chip whole, which is what makes a
+    /// pre-existing trailer-less `.sav` load cleanly — it is simply the RAM-only case, already
+    /// handled below — and what makes a genuinely wrong-sized file fail with the RAM chip's own
+    /// size-mismatch error rather than a confusing one about the trailer.
+    ///
+    /// A cartridge with an RTC but no trailer in the file — the legacy case, or a save
+    /// transplanted from an emulator that does not write one — gets a freshly reset clock
+    /// rather than whatever the cartridge's clock happened to be running before, so "load a
+    /// save" always produces the same clock state for the same file.
+    fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError> {
+        let Some(save) = self.bus.memory.mapper.battery_save_mut() else {
+            return Err(CartridgeError::NoSaveRam);
+        };
+        let sram_len = save.size();
+        let has_trailer =
+            self.bus.memory.mapper.rtc().is_some() && data.len() == sram_len + RTC_TRAILER_LEN;
+        let sram_bytes = if has_trailer { &data[..sram_len] } else { data };
+
+        self.bus
+            .memory
+            .mapper
+            .battery_save_mut()
+            .expect("checked above")
+            .load_from_bytes(sram_bytes)?;
+
+        if let Some(rtc) = self.bus.memory.mapper.rtc_mut() {
+            if has_trailer {
+                let trailer: [u8; RTC_TRAILER_LEN] = data[sram_len..]
+                    .try_into()
+                    .expect("length checked by has_trailer above");
+                rtc.from_trailer_bytes(&trailer);
+            } else {
+                *rtc = cart_common::Mbc3Rtc::new();
+            }
+        }
+        Ok(())
     }
 }
 

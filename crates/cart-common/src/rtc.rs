@@ -149,11 +149,11 @@ impl Mbc3Rtc {
             mbc3_register::MINUTES => self.latched.minutes,
             mbc3_register::HOURS => self.latched.hours,
             mbc3_register::DAY_LOW => self.latched.days as u8,
-            mbc3_register::DAY_HIGH => {
-                ((self.latched.days >> 8) & 1) as u8
-                    | ((self.latched_halted as u8) << 6)
-                    | ((self.latched_day_carry as u8) << 7)
-            }
+            mbc3_register::DAY_HIGH => day_high_byte(
+                self.latched.days,
+                self.latched_day_carry,
+                self.latched_halted,
+            ),
             _ => 0xFF,
         }
     }
@@ -175,9 +175,10 @@ impl Mbc3Rtc {
                 self.live.days = (self.live.days & 0x100) | value as u16;
             }
             mbc3_register::DAY_HIGH => {
-                self.live.days = (self.live.days & 0xFF) | (((value & 1) as u16) << 8);
-                self.halted = value & 0x40 != 0;
-                self.day_carry = value & 0x80 != 0;
+                let (day_bit, carry, halted) = split_day_high(value);
+                self.live.days = (self.live.days & 0xFF) | (u16::from(day_bit) << 8);
+                self.halted = halted;
+                self.day_carry = carry;
             }
             _ => return,
         }
@@ -194,6 +195,111 @@ impl Mbc3Rtc {
     pub fn now(&self) -> RtcTime {
         self.live
     }
+
+    /// Serialize into the trailer a `.sav` file carries after cartridge RAM, so the clock
+    /// survives a normal save without needing a full save state.
+    ///
+    /// This is the layout BGB, Gambatte, SameBoy, and mGBA all read and write: ten
+    /// little-endian 32-bit fields — five live registers, then the same five latched — followed
+    /// by an 8-byte Unix timestamp, 48 bytes in all. Only the low byte of each 32-bit field is
+    /// ever nonzero; the format pads to 32 bits per field rather than packing tightly, and
+    /// matching that padding is what makes a file this project writes readable by those
+    /// emulators and vice versa. An older 44-byte variant (the same ten fields, a 4-byte
+    /// timestamp) exists from the original VBA implementation; it is not produced or accepted
+    /// here; see [`RTC_TRAILER_LEN`].
+    ///
+    /// `unix_time` is folded into the timestamp field purely for those other emulators, which
+    /// use it to catch the clock up to wall time on load. This project never does that — the
+    /// module docs above explain why — so [`Self::from_trailer_bytes`] reads the field back and
+    /// discards it. Reading the host clock is the caller's business for exactly that reason:
+    /// this module stays free of it, the same as every other cycle-driven thing in it.
+    pub fn to_trailer_bytes(&self, unix_time: u64) -> [u8; RTC_TRAILER_LEN] {
+        let mut out = [0u8; RTC_TRAILER_LEN];
+        let put = |out: &mut [u8; RTC_TRAILER_LEN], offset: usize, value: u8| {
+            out[offset..offset + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        };
+        put(&mut out, 0, self.live.seconds);
+        put(&mut out, 4, self.live.minutes);
+        put(&mut out, 8, self.live.hours);
+        put(&mut out, 12, self.live.days as u8);
+        put(
+            &mut out,
+            16,
+            day_high_byte(self.live.days, self.day_carry, self.halted),
+        );
+        put(&mut out, 20, self.latched.seconds);
+        put(&mut out, 24, self.latched.minutes);
+        put(&mut out, 28, self.latched.hours);
+        put(&mut out, 32, self.latched.days as u8);
+        put(
+            &mut out,
+            36,
+            day_high_byte(
+                self.latched.days,
+                self.latched_day_carry,
+                self.latched_halted,
+            ),
+        );
+        out[40..48].copy_from_slice(&unix_time.to_le_bytes());
+        out
+    }
+
+    /// Restore from [`Self::to_trailer_bytes`]'s format. The timestamp is read and discarded;
+    /// see that function's docs for why.
+    ///
+    /// The sub-second phase is not part of the format — hardware does not expose it either, and
+    /// no emulator's trailer carries it — so a loaded clock always starts exactly on a second
+    /// boundary. That is a few hundred milliseconds of drift at worst, once, and is what every
+    /// other emulator's own reload does too.
+    pub fn from_trailer_bytes(&mut self, bytes: &[u8; RTC_TRAILER_LEN]) {
+        let get = |offset: usize| -> u8 {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as u8
+        };
+        let (live_days, live_carry, live_halted) = split_day_high(get(16));
+        let (latched_days, latched_carry, latched_halted) = split_day_high(get(36));
+
+        self.live = RtcTime {
+            seconds: get(0) % 60,
+            minutes: get(4) % 60,
+            hours: get(8) % 24,
+            days: u16::from(live_days) << 8 | u16::from(get(12)),
+        };
+        self.day_carry = live_carry;
+        self.halted = live_halted;
+
+        self.latched = RtcTime {
+            seconds: get(20) % 60,
+            minutes: get(24) % 60,
+            hours: get(28) % 24,
+            days: u16::from(latched_days) << 8 | u16::from(get(32)),
+        };
+        self.latched_day_carry = latched_carry;
+        self.latched_halted = latched_halted;
+
+        // The timestamp at bytes[40..48] is read implicitly by not being read at all — see the
+        // docs above.
+        self.latch_armed = false;
+        self.cycle_accumulator = 0;
+    }
+}
+
+/// Bytes in the canonical MBC3 RTC trailer a `.sav` file carries after cartridge RAM.
+///
+/// See [`Mbc3Rtc::to_trailer_bytes`] for the layout and which other emulators share it.
+pub const RTC_TRAILER_LEN: usize = 48;
+
+/// Pack the day counter's ninth bit, the halt flag, and the carry flag into one byte, in the
+/// same bit positions as the hardware `DAY_HIGH` register (see [`mbc3_register::DAY_HIGH`]).
+///
+/// Shared between the trailer format and the register read path rather than duplicated, so the
+/// two can never silently disagree about which bit means what.
+fn day_high_byte(days: u16, carry: bool, halted: bool) -> u8 {
+    ((days >> 8) & 1) as u8 | ((halted as u8) << 6) | ((carry as u8) << 7)
+}
+
+/// The inverse of [`day_high_byte`]: `(day bit 9, carry, halted)`.
+fn split_day_high(byte: u8) -> (u8, bool, bool) {
+    (byte & 1, byte & 0x80 != 0, byte & 0x40 != 0)
 }
 
 impl Savable for Mbc3Rtc {
@@ -545,6 +651,139 @@ mod tests {
         restored.tick(GB_HZ * 2 / 3, GB_HZ);
         rtc.tick(GB_HZ * 2 / 3, GB_HZ);
         assert_eq!(restored.now(), rtc.now());
+    }
+
+    // -- The .sav trailer -----------------------------------------------------
+
+    #[test]
+    fn the_trailer_is_forty_eight_bytes() {
+        // The size other emulators — BGB, Gambatte, SameBoy, mGBA — agree on; see
+        // `to_trailer_bytes`'s docs for the older 44-byte variant this deliberately does not
+        // produce.
+        assert_eq!(RTC_TRAILER_LEN, 48);
+    }
+
+    #[test]
+    fn the_trailer_round_trips_live_and_latched_time() {
+        let mut rtc = Mbc3Rtc::new();
+        rtc.tick(GB_HZ * (2 * 3600 + 15 * 60 + 40), GB_HZ); // 02:15:40, day 0
+        rtc.write_latch(0x00);
+        rtc.write_latch(0x01);
+        // Advance the live counter past the latch, so live and latched genuinely differ and a
+        // round trip that mixed them up would be caught.
+        rtc.tick(GB_HZ * 5, GB_HZ);
+
+        let bytes = rtc.to_trailer_bytes(0);
+        let mut restored = Mbc3Rtc::new();
+        restored.from_trailer_bytes(&bytes);
+
+        assert_eq!(restored.now(), rtc.now(), "the live counter");
+        assert_eq!(
+            restored.read_register(mbc3_register::SECONDS),
+            rtc.read_register(mbc3_register::SECONDS),
+        );
+        assert_eq!(
+            restored.read_register(mbc3_register::MINUTES),
+            rtc.read_register(mbc3_register::MINUTES),
+        );
+        assert_eq!(
+            restored.read_register(mbc3_register::HOURS),
+            rtc.read_register(mbc3_register::HOURS),
+        );
+        assert_eq!(
+            restored.read_register(mbc3_register::DAY_LOW),
+            rtc.read_register(mbc3_register::DAY_LOW),
+            "the latched day counter, not the live one that has since moved on"
+        );
+    }
+
+    #[test]
+    fn the_trailer_round_trips_the_day_counter_past_the_low_byte() {
+        let mut rtc = Mbc3Rtc::new();
+        rtc.tick(GB_HZ * 3600 * 24 * 300, GB_HZ); // 300 days: day bit 9 is set
+        rtc.write_latch(0x00);
+        rtc.write_latch(0x01);
+        assert_eq!(rtc.now().days, 300);
+
+        let bytes = rtc.to_trailer_bytes(0);
+        let mut restored = Mbc3Rtc::new();
+        restored.from_trailer_bytes(&bytes);
+        assert_eq!(restored.now().days, 300);
+    }
+
+    #[test]
+    fn the_trailer_round_trips_the_halt_and_day_carry_bits() {
+        let mut rtc = Mbc3Rtc::new();
+        // Bit 6 halts, bit 7 is the carry the day counter's overflow sets; see `mbc3_register`.
+        rtc.write_register(mbc3_register::DAY_HIGH, 0b1100_0000);
+        assert!(rtc.is_halted());
+
+        let bytes = rtc.to_trailer_bytes(0);
+        let mut restored = Mbc3Rtc::new();
+        restored.from_trailer_bytes(&bytes);
+
+        assert!(restored.is_halted(), "the halt bit");
+        assert_eq!(
+            restored.read_register(mbc3_register::DAY_HIGH) & 0x80,
+            0x80,
+            "the day-carry bit"
+        );
+    }
+
+    #[test]
+    fn the_trailers_timestamp_is_written_but_never_read_back() {
+        // Folded in purely for other emulators that catch a clock up to wall time on load; this
+        // one never does, so a garbage or absent-information (zero) timestamp must not change
+        // anything it restores.
+        let mut rtc = Mbc3Rtc::new();
+        rtc.tick(GB_HZ * 42, GB_HZ);
+        rtc.write_latch(0x00);
+        rtc.write_latch(0x01);
+
+        let with_real_time = rtc.to_trailer_bytes(1_700_000_000);
+        let with_zero_time = rtc.to_trailer_bytes(0);
+        assert_ne!(
+            with_real_time, with_zero_time,
+            "the timestamp field itself does differ"
+        );
+
+        let mut a = Mbc3Rtc::new();
+        a.from_trailer_bytes(&with_real_time);
+        let mut b = Mbc3Rtc::new();
+        b.from_trailer_bytes(&with_zero_time);
+        assert_eq!(
+            a.now(),
+            b.now(),
+            "but restoring from either gives the same clock"
+        );
+    }
+
+    #[test]
+    fn a_trailer_restore_does_not_leave_a_latch_armed_or_a_stale_sub_second_phase() {
+        // The 0x00-then-0x01 latch sequence and the sub-second accumulator are both emulator
+        // state that has no place in the portable trailer format; a restore must not leave
+        // either half-set from whatever a previous run happened to be doing.
+        let mut rtc = Mbc3Rtc::new();
+        rtc.write_latch(0x00); // arm the latch, then never complete it
+        rtc.tick(GB_HZ / 2, GB_HZ); // half a second into the next tick
+
+        let bytes = rtc.to_trailer_bytes(0);
+        let mut restored = Mbc3Rtc::new();
+        restored.from_trailer_bytes(&bytes);
+
+        // If the latch were still armed, completing it here would jump the latched view; if it
+        // is not, this is a no-op arm-and-cancel.
+        restored.write_latch(0x01);
+        assert_eq!(restored.now().seconds, 0);
+        // A full second of ticking should be needed to reach one, not half.
+        restored.tick(GB_HZ / 2, GB_HZ);
+        assert_eq!(
+            restored.now().seconds,
+            0,
+            "the stale half-second was not carried over"
+        );
+        restored.tick(GB_HZ / 2, GB_HZ);
+        assert_eq!(restored.now().seconds, 1);
     }
 
     // -- GBA -----------------------------------------------------------------

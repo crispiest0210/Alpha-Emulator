@@ -25,6 +25,51 @@ fn rom_with_program(program: &[u8]) -> Vec<u8> {
     rom
 }
 
+/// The same shape as [`rom_with_program`], but MBC3 with a real-time clock — cartridge type
+/// `0x10`, which is what Pokémon Gold/Silver and Harvest Moon GB actually ship as.
+fn rom_with_program_mbc3_rtc(program: &[u8]) -> Vec<u8> {
+    let mut rom = rom_with_program(program);
+    rom[0x0147] = 0x10; // MBC3 + TIMER + RAM + BATTERY
+    rom[0x0148] = 0x00;
+    rom[0x0149] = 0x02; // 8 KiB of cartridge RAM
+    rom[0x014D] = GbHeader::header_checksum(&rom);
+    rom
+}
+
+fn system_mbc3_rtc(program: &[u8]) -> GbSystem {
+    GbSystem::new(rom_with_program_mbc3_rtc(program), None).expect("the test ROM is valid")
+}
+
+// The MBC3 RTC registers, mapped into 0xA000-0xBFFF once 0x4000-0x5FFF selects one of them.
+// Mirrors `cart_common::rtc::mbc3_register`, which is not public outside that crate.
+const RTC_SECONDS: u8 = 0x08;
+const RTC_MINUTES: u8 = 0x09;
+const RTC_HOURS: u8 = 0x0A;
+const RTC_DAY_LOW: u8 = 0x0B;
+const RTC_DAY_HIGH: u8 = 0x0C;
+
+fn select_rtc_register(gb: &mut GbSystem, register: u8) {
+    write(gb, 0x0000, 0x0A); // enable cartridge RAM/RTC
+    write(gb, 0x4000, register);
+}
+
+fn write_rtc_register(gb: &mut GbSystem, register: u8, value: u8) {
+    select_rtc_register(gb, register);
+    write(gb, 0xA000, value);
+}
+
+fn read_rtc_register(gb: &mut GbSystem, register: u8) -> u8 {
+    select_rtc_register(gb, register);
+    read(gb, 0xA000)
+}
+
+/// Copy the live counter into the latch, the same 0x00-then-0x01 sequence a game uses before
+/// reading the time — without it every read still shows whatever was latched last.
+fn latch_rtc(gb: &mut GbSystem) {
+    write(gb, 0x6000, 0x00);
+    write(gb, 0x6000, 0x01);
+}
+
 /// Increment a byte in work RAM forever, so progress is observable.
 ///
 /// ```text
@@ -286,6 +331,169 @@ fn a_battery_backed_cartridge_exposes_its_save_ram() {
     fresh.load_save_ram(&dumped).unwrap();
     write(&mut fresh, 0x0000, 0x0A);
     assert_eq!(read(&mut fresh, 0xA000), 0x5A);
+}
+
+// ---------------------------------------------------------------------------
+// The MBC3 RTC's .sav trailer
+// ---------------------------------------------------------------------------
+//
+// The clock used to live only in a full save state: closing and reopening through the normal
+// battery-save path silently reset it to zero, for Pokémon Gold/Silver/Crystal, Harvest Moon
+// GB, and every other RTC cartridge. These exercise the fix end to end, through the same
+// `save_ram_for_disk` / `load_save_ram` pair the frontend's flush and load paths call.
+
+#[test]
+fn the_rtc_persists_through_save_ram_alone_with_no_save_state_involved() {
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    write_rtc_register(&mut gb, RTC_SECONDS, 40);
+    write_rtc_register(&mut gb, RTC_MINUTES, 15);
+    write_rtc_register(&mut gb, RTC_HOURS, 2);
+    write_rtc_register(&mut gb, RTC_DAY_LOW, 100);
+
+    let dumped = gb
+        .save_ram_for_disk()
+        .expect("an RTC cartridge always has a save file");
+    assert_eq!(
+        dumped.len(),
+        8192 + cart_common::RTC_TRAILER_LEN,
+        "cartridge RAM plus the trailer, not a save state"
+    );
+
+    let mut fresh = system_mbc3_rtc(SPIN_PROGRAM);
+    fresh.load_save_ram(&dumped).unwrap();
+    latch_rtc(&mut fresh);
+
+    assert_eq!(read_rtc_register(&mut fresh, RTC_SECONDS), 40);
+    assert_eq!(read_rtc_register(&mut fresh, RTC_MINUTES), 15);
+    assert_eq!(read_rtc_register(&mut fresh, RTC_HOURS), 2);
+    assert_eq!(read_rtc_register(&mut fresh, RTC_DAY_LOW), 100);
+}
+
+#[test]
+fn the_halt_bit_and_the_day_carry_bit_survive_the_round_trip() {
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    // Bit 6 halts the clock, bit 7 is the day counter's sticky overflow carry.
+    write_rtc_register(&mut gb, RTC_DAY_HIGH, 0b1100_0001); // + day bit 9 set, for good measure
+
+    let dumped = gb.save_ram_for_disk().unwrap();
+    let mut fresh = system_mbc3_rtc(SPIN_PROGRAM);
+    fresh.load_save_ram(&dumped).unwrap();
+    latch_rtc(&mut fresh);
+
+    let day_high = read_rtc_register(&mut fresh, RTC_DAY_HIGH);
+    assert_eq!(day_high & 0x40, 0x40, "halt bit");
+    assert_eq!(day_high & 0x80, 0x80, "day-carry bit");
+    assert_eq!(day_high & 0x01, 0x01, "day counter bit 9");
+}
+
+#[test]
+fn a_trailer_less_legacy_sav_loads_cleanly_with_the_clock_at_zero() {
+    // A .sav written before this feature existed — or by an emulator that never wrote an RTC
+    // trailer — is just the cartridge RAM, exactly `load_save_ram` already accepted. It must
+    // keep loading without error, and the clock should not carry over whatever it was running
+    // before: there is no time information in the file to trust instead.
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    write_rtc_register(&mut gb, RTC_HOURS, 5); // running before the load, to prove it resets
+    write_rtc_register(&mut gb, 0x00, 0x99); // ram_bank 0, not an RTC register: plain SRAM
+    write(&mut gb, 0x0000, 0x0A);
+    write(&mut gb, 0xA000, 0x42); // now genuinely writing SRAM byte 0
+
+    let legacy_sav = vec![0u8; 8192]; // trailer-less: exactly the cartridge's RAM size
+    gb.load_save_ram(&legacy_sav)
+        .expect("a trailer-less .sav must still load");
+
+    latch_rtc(&mut gb);
+    assert_eq!(
+        read_rtc_register(&mut gb, RTC_HOURS),
+        0,
+        "the clock was reset, not carried over"
+    );
+    assert_eq!(
+        gb.save_ram().unwrap()[0],
+        0,
+        "and the RAM contents came from the loaded file"
+    );
+}
+
+#[test]
+fn a_non_rtc_cartridges_save_file_is_unchanged_in_size_and_content() {
+    // The trailer is additive to RTC cartridges specifically; every other save-RAM cartridge
+    // must see byte-for-byte the same file it always did.
+    let mut gb = system(SPIN_PROGRAM); // plain MBC1, no RTC
+    write(&mut gb, 0x0000, 0x0A);
+    write(&mut gb, 0xA000, 0x5A);
+
+    let via_save_ram = gb.save_ram().unwrap().to_vec();
+    let via_disk = gb.save_ram_for_disk().unwrap();
+    assert_eq!(via_disk, via_save_ram);
+    assert_eq!(via_disk.len(), 8192, "no trailer appended");
+}
+
+#[test]
+fn the_trailers_timestamp_does_not_make_two_flushes_of_identical_state_disagree_about_the_clock() {
+    // The wall-clock timestamp folded into the trailer for other emulators' benefit changes
+    // between two flushes a heartbeat apart; the clock state it wraps must not.
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    write_rtc_register(&mut gb, RTC_MINUTES, 30);
+
+    let first = gb.save_ram_for_disk().unwrap();
+    let second = gb.save_ram_for_disk().unwrap();
+
+    let mut a = system_mbc3_rtc(SPIN_PROGRAM);
+    a.load_save_ram(&first).unwrap();
+    latch_rtc(&mut a);
+    let mut b = system_mbc3_rtc(SPIN_PROGRAM);
+    b.load_save_ram(&second).unwrap();
+    latch_rtc(&mut b);
+
+    assert_eq!(read_rtc_register(&mut a, RTC_MINUTES), 30);
+    assert_eq!(
+        read_rtc_register(&mut a, RTC_MINUTES),
+        read_rtc_register(&mut b, RTC_MINUTES),
+    );
+}
+
+#[test]
+fn a_wrong_sized_sav_still_reports_a_size_mismatch_rather_than_being_misread_as_a_trailer() {
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    let bogus = vec![0u8; 100]; // neither 8192 nor 8192 + 48
+    let err = gb.load_save_ram(&bogus).unwrap_err();
+    assert!(
+        matches!(err, CartridgeError::SaveSizeMismatch { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_save_state_and_a_sav_file_agree_on_a_running_clock() {
+    // Belt and suspenders: the trailer path is new, the save-state path (`Mbc3Rtc: Savable`)
+    // already existed and is unchanged here. Both must describe the same clock.
+    let mut gb = system_mbc3_rtc(SPIN_PROGRAM);
+    write_rtc_register(&mut gb, RTC_HOURS, 7);
+    write_rtc_register(&mut gb, RTC_MINUTES, 45);
+
+    let sav = gb.save_ram_for_disk().unwrap();
+    let mut from_sav = system_mbc3_rtc(SPIN_PROGRAM);
+    from_sav.load_save_ram(&sav).unwrap();
+    latch_rtc(&mut from_sav);
+
+    let mut w = core_common::StateWriter::new();
+    gb.save(&mut w);
+    let blob = w.into_inner();
+    let mut from_state = system_mbc3_rtc(SPIN_PROGRAM);
+    from_state
+        .load(&mut core_common::StateReader::new(&blob))
+        .unwrap();
+    latch_rtc(&mut from_state);
+
+    assert_eq!(
+        read_rtc_register(&mut from_sav, RTC_HOURS),
+        read_rtc_register(&mut from_state, RTC_HOURS),
+    );
+    assert_eq!(
+        read_rtc_register(&mut from_sav, RTC_MINUTES),
+        read_rtc_register(&mut from_state, RTC_MINUTES),
+    );
 }
 
 #[test]

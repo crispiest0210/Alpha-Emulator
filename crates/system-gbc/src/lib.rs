@@ -166,6 +166,10 @@ impl System for GbcSystem {
         self.inner.save_ram()
     }
 
+    fn save_ram_for_disk(&self) -> Option<Vec<u8>> {
+        self.inner.save_ram_for_disk()
+    }
+
     fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError> {
         self.inner.load_save_ram(data)
     }
