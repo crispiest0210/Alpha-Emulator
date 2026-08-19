@@ -25,6 +25,12 @@ fn run_sliced(timing: &mut GbTiming, cycles: u64) -> TimingOutput {
         let out = timing.advance_to(target);
         total.interrupts |= out.interrupts;
         total.frame_ready |= out.frame_ready;
+        total.frame_started |= out.frame_started;
+        // First one wins: these name a line, and a caller running past several of them wants
+        // the one it stepped up to, not the last of the batch.
+        total.line_started = total.line_started.or(out.line_started);
+        total.drawing_started = total.drawing_started.or(out.drawing_started);
+        total.scanline_ready = total.scanline_ready.or(out.scanline_ready);
         total.apu_length_clocks += out.apu_length_clocks;
         total.apu_envelope_clocks += out.apu_envelope_clocks;
         total.apu_sweep_clocks += out.apu_sweep_clocks;
@@ -250,18 +256,229 @@ fn a_scanline_runs_through_the_three_visible_modes_in_order() {
     run_sliced(&mut t, OAM_SCAN_CYCLES);
     assert_eq!(t.ppu.mode, PpuMode::Drawing);
 
-    run_sliced(&mut t, DRAWING_CYCLES);
+    run_sliced(&mut t, MIN_DRAWING_CYCLES);
     assert_eq!(t.ppu.mode, PpuMode::HBlank);
 
-    run_sliced(&mut t, HBLANK_CYCLES);
+    run_sliced(&mut t, MAX_HBLANK_CYCLES);
     assert_eq!(t.ppu.mode, PpuMode::OamScan, "and on to the next line");
     assert_eq!(t.ppu.ly, 1);
+}
+
+/// Step to the start of mode 3 on the current line, answering `drawing_started` with `length`.
+fn enter_drawing(timing: &mut GbTiming, length: u64) {
+    let out = run_sliced(timing, OAM_SCAN_CYCLES);
+    assert_eq!(out.drawing_started, Some(timing.ppu.ly));
+    assert_eq!(timing.ppu.mode, PpuMode::Drawing);
+    timing.set_mode3_length(length);
+}
+
+#[test]
+fn mode_three_is_scheduled_at_its_minimum_and_the_system_corrects_it() {
+    // The scheduler cannot see SCX, the window, or OAM, so it books the shortest mode 3 there
+    // is and the system replaces it in the same cycle.
+    let mut t = timing();
+    let out = run_sliced(&mut t, OAM_SCAN_CYCLES);
+    assert_eq!(out.drawing_started, Some(0), "the mode reports itself");
+    assert_eq!(t.mode3_length(), MIN_DRAWING_CYCLES);
+
+    t.set_mode3_length(MIN_DRAWING_CYCLES + 40);
+    assert_eq!(t.mode3_length(), MIN_DRAWING_CYCLES + 40);
+
+    // The correction is measured from where mode 3 started, so mode 0 begins exactly 40 cycles
+    // later than it would have — not 40 cycles after wherever the clock had reached.
+    run_sliced(&mut t, MIN_DRAWING_CYCLES + 39);
+    assert_eq!(t.ppu.mode, PpuMode::Drawing, "still drawing");
+    run_sliced(&mut t, 1);
+    assert_eq!(t.ppu.mode, PpuMode::HBlank);
+}
+
+#[test]
+fn a_longer_mode_three_comes_out_of_mode_zero_not_the_line() {
+    // The line is 456 cycles whatever the fetcher does. Every cycle mode 3 gains, mode 0 loses.
+    for length in [
+        MIN_DRAWING_CYCLES,
+        MIN_DRAWING_CYCLES + 1,
+        MIN_DRAWING_CYCLES + 63,
+        crate::ppu::MODE3_MAX_CYCLES,
+    ] {
+        let mut t = timing();
+        let start = t.now();
+        enter_drawing(&mut t, length);
+
+        // To the end of mode 3.
+        run_sliced(&mut t, length);
+        assert_eq!(t.ppu.mode, PpuMode::HBlank, "length {length}");
+        assert_eq!(
+            (t.now() - start).get(),
+            OAM_SCAN_CYCLES + length,
+            "mode 0 begins {length} cycles into the line"
+        );
+
+        // And on to the next line, which still starts on the 456-cycle grid.
+        run_sliced(&mut t, LINE_CYCLES - OAM_SCAN_CYCLES - length);
+        assert_eq!(t.ppu.ly, 1, "length {length}");
+        assert_eq!(t.ppu.mode, PpuMode::OamScan);
+        assert_eq!((t.now() - start).get(), LINE_CYCLES);
+    }
+}
+
+#[test]
+fn a_longer_mode_three_delays_the_hblank_stat_interrupt() {
+    // This is the whole point of the exercise. A game rewriting SCX from an HBlank interrupt
+    // is depending on that interrupt landing where hardware puts it; a mode 0 that starts up
+    // to 117 cycles early hands the write to the wrong line.
+    let mut t = timing();
+    t.write_register(reg::LYC, 0xFF); // keep coincidence out of it
+    t.write_register(reg::STAT, 0x08); // HBlank source only
+    enter_drawing(&mut t, MIN_DRAWING_CYCLES + 20);
+
+    let out = run_sliced(&mut t, MIN_DRAWING_CYCLES);
+    assert_eq!(
+        out.interrupts & interrupt::LCD_STAT,
+        0,
+        "the unpenalised mode 3 would have ended here"
+    );
+    let out = run_sliced(&mut t, 20);
+    assert_ne!(out.interrupts & interrupt::LCD_STAT, 0, "20 cycles later");
+}
+
+#[test]
+fn mode_three_lengths_outside_what_hardware_can_do_are_clamped() {
+    // A mode 3 longer than the line would push mode 0 past the end of it and desynchronise LY
+    // from the frame, so the length is capped rather than trusted.
+    let mut t = timing();
+    enter_drawing(&mut t, 10_000);
+    assert_eq!(t.mode3_length(), crate::ppu::MODE3_MAX_CYCLES);
+
+    let mut t = timing();
+    enter_drawing(&mut t, 0);
+    assert_eq!(t.mode3_length(), MIN_DRAWING_CYCLES);
+}
+
+#[test]
+fn setting_a_mode_three_length_outside_mode_three_does_nothing() {
+    // The length belongs to the line being drawn. Arriving late — during mode 0, say — it
+    // would move an event that is no longer mode 3's.
+    let mut t = timing();
+    run_sliced(&mut t, OAM_SCAN_CYCLES + MIN_DRAWING_CYCLES);
+    assert_eq!(t.ppu.mode, PpuMode::HBlank);
+    let before = t.cycles_until_next_event();
+    t.set_mode3_length(MIN_DRAWING_CYCLES + 50);
+    assert_eq!(t.cycles_until_next_event(), before);
+}
+
+#[test]
+fn every_line_reports_its_own_start_and_drawing_period() {
+    // The window's WY latch is sampled at the start of a line and nowhere else, so a line that
+    // does not report itself would silently lose its window.
+    let mut t = timing();
+    let mut starts = Vec::new();
+    let mut draws = Vec::new();
+    let deadline = t.now() + Cycles(FRAME_CYCLES);
+    while t.now() < deadline {
+        let slice = t.cycles_until_next_event().min(deadline - t.now());
+        let target = t.now() + slice;
+        let out = t.advance_to(target);
+        starts.extend(out.line_started);
+        draws.extend(out.drawing_started);
+    }
+    // Line 0 of the first frame is the one line no event begins: the PPU is already in mode 2
+    // when the machine powers on, so the system samples it directly. Every other visible line
+    // is here, and the frame wrap re-reports line 0 for the next frame.
+    assert_eq!(starts, (1..VISIBLE_LINES).chain([0]).collect::<Vec<_>>());
+    assert_eq!(draws, (0..VISIBLE_LINES).collect::<Vec<_>>());
+}
+
+#[test]
+fn stats_mode_field_trails_the_mode_change_by_one_machine_cycle() {
+    // The interrupt and the flag are not the same event. Mooneye's `intr_2_mode0_timing` reads
+    // the flag and `intr_2_0_timing` counts from the interrupt, and the two disagree by exactly
+    // this — which is the only reason to believe the lag is real rather than an off-by-four in
+    // a mode length.
+    let mut t = timing();
+    let mode_of = |t: &GbTiming| t.read_register(reg::STAT).unwrap() & 0x03;
+
+    assert_eq!(mode_of(&t), PpuMode::OamScan as u8, "power-on has no lag");
+
+    // Mode 2 -> 3.
+    advance(&mut t, OAM_SCAN_CYCLES);
+    assert_eq!(t.ppu.mode, PpuMode::Drawing);
+    assert_eq!(mode_of(&t), PpuMode::OamScan as u8, "STAT still says 2");
+    advance(&mut t, STAT_MODE_LAG_CYCLES);
+    assert_eq!(mode_of(&t), PpuMode::Drawing as u8);
+
+    // Mode 3 -> 0, and its interrupt, which is *not* delayed.
+    let out = advance(&mut t, MIN_DRAWING_CYCLES - STAT_MODE_LAG_CYCLES);
+    assert_eq!(t.ppu.mode, PpuMode::HBlank);
+    assert_eq!(mode_of(&t), PpuMode::Drawing as u8, "STAT still says 3");
+    assert_eq!(
+        out.scanline_ready,
+        Some(0),
+        "while the line is already done"
+    );
+    advance(&mut t, STAT_MODE_LAG_CYCLES);
+    assert_eq!(mode_of(&t), PpuMode::HBlank as u8);
+}
+
+#[test]
+fn ly_reads_153_for_one_machine_cycle_and_then_reads_zero() {
+    // The last line of the frame is the only one whose LY does not last the whole line. Games
+    // put raster splits on `LYC = 0` and would get them a line early without this.
+    let mut t = timing();
+    let ly = |t: &GbTiming| t.read_register(reg::LY).unwrap();
+
+    // To the start of line 153.
+    run_sliced(&mut t, LINE_CYCLES * 153);
+    assert_eq!(ly(&t), 153);
+    assert_eq!(t.ppu.mode, PpuMode::VBlank);
+
+    run_sliced(&mut t, LY_153_CYCLES);
+    assert_eq!(ly(&t), 0, "LY rolls over while the line runs on");
+    assert_eq!(
+        t.ppu.mode,
+        PpuMode::VBlank,
+        "still line 153, still in VBlank"
+    );
+
+    // The rest of line 153 still belongs to line 153: mode 2 does not start early.
+    run_sliced(&mut t, LINE_CYCLES - LY_153_CYCLES - 1);
+    assert_eq!(t.ppu.mode, PpuMode::VBlank);
+    let out = run_sliced(&mut t, 1);
+    assert_eq!(t.ppu.mode, PpuMode::OamScan, "and the frame begins on time");
+    assert!(out.frame_started);
+    assert_eq!(ly(&t), 0);
+}
+
+#[test]
+fn a_lyc_zero_interrupt_arrives_on_line_153_not_on_line_0() {
+    // The consequence games actually use, and the reason the rollover is worth modelling: with
+    // `LYC = 0` the coincidence interrupt arrives most of a line before the frame does.
+    let mut t = timing();
+    t.write_register(reg::LYC, 0);
+    t.write_register(reg::STAT, 0x40); // coincidence source only
+
+    // Up to the start of line 153, by which point line 0's coincidence is long over.
+    run_sliced(&mut t, LINE_CYCLES * 153);
+    assert_eq!(t.read_register(reg::LY), Some(153));
+
+    let out = run_sliced(&mut t, LY_153_CYCLES);
+    assert_ne!(
+        out.interrupts & interrupt::LCD_STAT,
+        0,
+        "LY rolled to 0 while line 153 still had 452 cycles to run"
+    );
+
+    // And not again when the frame actually starts: the condition never dropped in between, so
+    // there is no second rising edge. One interrupt, a line early — which is the whole point.
+    let out = run_sliced(&mut t, LINE_CYCLES - LY_153_CYCLES);
+    assert_eq!(out.interrupts & interrupt::LCD_STAT, 0);
+    assert!(t.ppu.ly == 0 && t.ppu.mode == PpuMode::OamScan);
 }
 
 #[test]
 fn the_mode_lengths_sum_to_a_scanline() {
     assert_eq!(
-        OAM_SCAN_CYCLES + DRAWING_CYCLES + HBLANK_CYCLES,
+        OAM_SCAN_CYCLES + MIN_DRAWING_CYCLES + MAX_HBLANK_CYCLES,
         LINE_CYCLES
     );
     assert_eq!(LINE_CYCLES * TOTAL_LINES as u64, FRAME_CYCLES);
@@ -340,7 +557,7 @@ fn the_stat_interrupt_fires_on_a_rising_edge_not_once_per_source() {
     t.write_register(reg::STAT, 0x08); // HBlank source only
 
     // Reach the first HBlank.
-    let out = run_sliced(&mut t, OAM_SCAN_CYCLES + DRAWING_CYCLES);
+    let out = run_sliced(&mut t, OAM_SCAN_CYCLES + MIN_DRAWING_CYCLES);
     assert_eq!(t.ppu.mode, PpuMode::HBlank);
     assert_ne!(out.interrupts & interrupt::LCD_STAT, 0, "rising edge");
 

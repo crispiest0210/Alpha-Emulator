@@ -7,7 +7,7 @@
 use super::*;
 use crate::corpus::{
     Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
-    GB_DMG_SOUND_SINGLES, GB_ROMS,
+    GB_DMG_SOUND_SINGLES, GB_MEALYBUG, GB_MOONEYE_PPU, GB_ROMS,
 };
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
@@ -544,6 +544,8 @@ fn gb_accuracy_suite() {
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(GB_MOONEYE_PPU)
+        .chain(GB_MEALYBUG)
         .chain(CGB_ROMS)
         .chain(GBA_ROMS)
     {

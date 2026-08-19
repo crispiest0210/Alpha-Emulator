@@ -26,7 +26,7 @@ There are no released builds yet, but all four systems run. The table below refl
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
+| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, 9 of 12 `dmg_sound` sub-tests, and 6 of 12 Mooneye PPU acceptance tests — **mode 3's length is computed per scanline** from fine scroll, window, and objects, so `HBlank` lands where hardware puts it. Mid-*scanline* register changes still do not: see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ❌ | **Partial, and deliberately so.** Boots a `.nds` ROM, runs both CPUs, draws both screens in 2D and 3D, plays its sixteen sound channels, and keeps saves. Held to a lower accuracy bar than the other three; expect some games to misbehave. See below for exactly what is missing |
@@ -281,6 +281,29 @@ Current Game Boy results:
 | Blargg `cgb_sound` sub-test 09 | fails — see below |
 | `gba-suite` arm, thumb, memory | **pass** |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
+| Mooneye PPU `intr_2_mode0_timing`, `intr_2_mode3_timing`, `intr_2_0_timing`, `intr_1_2_timing-GS`, `hblank_ly_scx_timing-GS`, `stat_irq_blocking` | **pass** |
+| Mooneye PPU `intr_2_oam_ok_timing`, `intr_2_mode0_timing_sprites`, `lcdon_timing-GS`, `lcdon_write_timing-GS`, `stat_lyc_onoff`, `vblank_stat_intr-GS` | fail, each diagnosed in the corpus — see below |
+| mealybug-tearoom-tests `m3_scx_low_3_bits`, `m3_bgp_change`, `m3_wx_4/5/6_change` | fail — need a per-dot fetcher; see below |
+
+#### Mode 3 is computed, mid-scanline rendering is not
+
+Mode 3 — the pixel transfer, during which the CPU cannot touch VRAM — used to be a flat 172
+cycles, which meant `HBlank` always began at the same point on every line. Hardware stretches it
+from 172 to 289 depending on the fine scroll (`SCX % 8`), whether the window opens, and where the
+line's objects fall, and `HBlank` is only what is left of the line afterwards. It is now computed
+per scanline by `GbPpu::mode3_cycles` and the mode-3 event is rescheduled to match, which is what
+the Mooneye passes above measure — `hblank_ly_scx_timing-GS` walks all eight fine-scroll values.
+
+Two things were found on the way there and are now modelled: `STAT`'s mode field trails the mode
+change it describes by one machine cycle while the interrupt fires on time, and `LY` reads 153 for
+only one machine cycle before rolling to 0 partway through the frame's last line.
+
+What is still missing is *per-dot* rendering. This renderer composites a scanline once, when
+mode 3 ends, using the registers as they stand then — so a game that rewrites `BGP`, `SCX`, or
+`WX` **partway along a line** gets one value applied to the whole line instead of two applied to
+their halves. That is the whole of what the five mealybug ROMs measure, and each carries a note in
+the corpus saying how many pixels differ from the hardware reference and where. `m3_scx_low_3_bits`
+is the closest: 540 of 23 040 pixels, all in the last ten columns.
 
 **Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
 asks for whatever test-ROM coverage exists at implementation time and for an explicit statement of

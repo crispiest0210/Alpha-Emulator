@@ -17,6 +17,20 @@
 //! The CGB-only register blocks — colour palette RAM, the `KEY1` speed switch, VRAM DMA — are
 //! in [`cgb`], which explains why they are here rather than in `system-gbc`. What is left to
 //! that crate is the assembled machine and the boot path that recolours a DMG cartridge.
+//!
+//! # What "scanline-accurate" means here, and where it stops
+//!
+//! Each line is *timed* to the cycle: mode 3's length is computed from the fine scroll, the
+//! window, and the line's objects ([`ppu::GbPpu::mode3_cycles`]), and mode 0 is whatever is left
+//! of the 456 — so a game that writes registers from an `HBlank` interrupt lands where hardware
+//! puts it. Mooneye's PPU acceptance tests are what hold that down.
+//!
+//! Each line is *drawn* once, when mode 3 ends, from the registers as they stand at that moment.
+//! So a register rewritten **partway along a line** applies to all of it or none of it, where
+//! hardware would split the line. Getting that too means a per-dot fetcher and a pixel FIFO,
+//! which is a different renderer, not a refinement of this one. The five
+//! `mealybug-tearoom-tests` ROMs in the corpus measure exactly that gap and each carries a note
+//! saying how large it is.
 
 #![deny(unsafe_code)]
 

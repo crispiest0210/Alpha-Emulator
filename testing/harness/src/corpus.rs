@@ -440,6 +440,312 @@ pub const GB_ROMS: &[TestRom] = &[
     },
 ];
 
+/// The bundle several suites are fetched from.
+///
+/// Neither the Mooneye test suite nor mealybug-tearoom-tests publishes built ROMs as individual
+/// downloads — Mooneye's repository is source and a `Makefile`, and mealybug's binaries live
+/// only inside an archive. `game-boy-test-roms` is the community bundle of both, versioned and
+/// released, so it is one fetch and one pinned version rather than a build toolchain.
+///
+/// Every ROM naming this URL is extracted from the one download; see `xtask`'s fetch step.
+pub const ARCHIVE_GAME_BOY_TEST_ROMS: &str =
+    "https://github.com/c-sp/game-boy-test-roms/releases/download/v7.0/game-boy-test-roms-v7.0.zip";
+
+/// Mooneye's PPU acceptance tests: what `STAT` says and when, to the cycle.
+///
+/// This is the suite that judges the mode 3 length work directly. `intr_2_mode0_timing` and
+/// `hblank_ly_scx_timing-GS` measure when mode 0 *starts*, which is precisely "how long did
+/// mode 3 take" asked from the CPU's side, and the latter varies `SCX` to walk the fine-scroll
+/// penalty across all eight values. Nothing else in the corpus could tell a fixed 172-cycle
+/// mode 3 from a computed one.
+///
+/// They report through the Mooneye convention — Fibonacci in `B C D E H L`, then `LD B,B` —
+/// so a failure here is a definite "wrong", not a picture somebody has to judge.
+pub const GB_MOONEYE_PPU: &[TestRom] = &[
+    TestRom {
+        name: "mooneye_intr_2_mode0_timing",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_2_mode0_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_intr_2_mode3_timing",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_2_mode3_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_intr_2_oam_ok_timing",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_2_oam_ok_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "OAM is readable again the moment mode 3 ends here; hardware makes it readable one \
+             machine cycle later, the same one-cycle lag `STAT`'s mode field has. The lag is \
+             modelled for the register (`STAT_MODE_LAG_CYCLES`) but not for the VRAM/OAM \
+             lockout, which flips at the mode boundary itself",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_intr_2_0_timing",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_2_0_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_intr_1_2_timing_gs",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_1_2_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_intr_2_mode0_timing_sprites",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/intr_2_mode0_timing_sprites.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "the object penalty is Pan Docs' model — 6 cycles per object plus up to 5 more for \
+             the first in each background tile — and this ROM measures the real fetcher, which \
+             also depends on how the objects overlap each other and on where the fetch sits \
+             relative to the background fetch in flight. Mode 3 does lengthen with object count \
+             here (`intr_2_mode0_timing`, which has none, passes); the per-object number is not \
+             exact to the cycle",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_hblank_ly_scx_timing_gs",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/hblank_ly_scx_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_lcdon_timing_gs",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/lcdon_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "the first line after `LCDC.7` goes up is not an ordinary line: hardware does not \
+             announce its OAM scan as mode 2 at all, and the line is short. Both were tried \
+             here — reporting mode 0 through that scan, and shortening it by one machine cycle \
+             — and neither alone satisfies this ROM, so the LCD-on line needs modelling as its \
+             own case rather than as a normal line started early",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_lcdon_write_timing_gs",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/lcdon_write_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "the same LCD-on line as `lcdon_timing-GS`, measured through when writes to VRAM and \
+             the PPU registers start landing rather than through `STAT`",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_stat_lyc_onoff",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/stat_lyc_onoff.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "the coincidence flag is recomputed whenever `LY` or `LYC` changes, which is right, \
+             but hardware also has a cycle-level dead zone around the `LY` increment where the \
+             comparison reads false regardless. Writing `LYC` inside that window is what this \
+             ROM does",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_stat_irq_blocking",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/stat_irq_blocking.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: None,
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mooneye_vblank_stat_intr_gs",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mooneye/ppu/vblank_stat_intr-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        // These finish in a handful of frames or hang; a large budget only makes a hang slow.
+        max_frames: 120,
+        expected_hash: None,
+        expected_failure: Some(
+            "the VBlank and `STAT` mode 1 interrupts both fire when line 144 begins. On hardware \
+             the mode 1 `STAT` source asserts one machine cycle earlier than the VBlank \
+             interrupt, so a game with both enabled sees them in the other order",
+        ),
+        licence: "MIT (Joonas Javanainen), redistributed in the game-boy-test-roms bundle.",
+    },
+];
+
+/// mealybug-tearoom-tests: the picture produced by rewriting registers *during* mode 3.
+///
+/// These are the hardest PPU tests there are, and they are reference-image tests: each ROM
+/// changes a register partway along a scanline and the resulting picture shows exactly where
+/// the change landed. Judged by [`Convention::Framebuffer`] against a validated hash, the same
+/// mechanism dmg-acid2 uses — a picture that merely rendered is not a result.
+///
+/// They are here because they are the only ROMs that can *see* a mode 3 length. What they
+/// demand beyond it is a per-dot fetcher: the picture is the register values at each dot, and a
+/// renderer that composites a line once, at the end of mode 3, cannot draw two halves of a line
+/// with two different palettes however well it counts cycles. Their `expected_failure` notes
+/// say which half of that each one needs, so the ones that become reachable are visible.
+///
+/// The pixel counts in those notes are measured, not estimated. The comparison was done offline,
+/// against the DMG reference images that ship in the same bundle as the ROMs — the same
+/// procedure dmg-acid2 above documents, and it is written down here because redoing it means
+/// fetching those images again:
+///
+///   cargo run --release -p frontend-headless -- run \
+///       testing/test-roms/gb/mealybug/m3_scx_low_3_bits.gb --frames 30 --save-frame mine.png
+///   unzip -j game-boy-test-roms-v7.0.zip \
+///       'mealybug-tearoom-tests/ppu/m3_scx_low_3_bits_dmg_blob.png'
+///   # then compare pixel for pixel, quantising both to the four DMG shades: the reference is
+///   # an indexed PNG and this framebuffer is RGBA, so a raw byte compare says nothing
+///
+/// The references are *not* committed, on the same rule as the ROMs.
+pub const GB_MEALYBUG: &[TestRom] = &[
+    TestRom {
+        name: "mealybug_m3_scx_low_3_bits",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mealybug/m3_scx_low_3_bits.gb",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
+        max_frames: 30,
+        expected_hash: None,
+        expected_failure: Some(
+            "540 of 23 040 pixels differ from the DMG reference, all of them in columns 150-159 \
+             — the right-hand edge of every line, which is where this ROM's mid-mode-3 `SCX` \
+             write takes effect on hardware. The rest of the picture matches, and the mode 3 \
+             *length* this ROM's fine scroll produces is now right (Mooneye's \
+             `hblank_ly_scx_timing-GS` passes). What is missing is per-dot rendering: this \
+             renderer composites the line once, when mode 3 ends, so a register write partway \
+             along it applies to the whole line or to none of it",
+        ),
+        licence: "MIT (Matt Currie), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mealybug_m3_bgp_change",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mealybug/m3_bgp_change.gb",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
+        max_frames: 30,
+        expected_hash: None,
+        expected_failure: Some(
+            "21 360 of 23 040 pixels differ from the DMG reference. The ROM rewrites `BGP` \
+             repeatedly *within* each line, so the correct picture has several palettes across \
+             one row; this renderer resolves a line's palette indices once, at the end of mode \
+             3, and can only produce one. Needs a per-dot fetcher, not a timing fix",
+        ),
+        licence: "MIT (Matt Currie), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mealybug_m3_wx_4_change",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mealybug/m3_wx_4_change.gb",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
+        max_frames: 30,
+        expected_hash: None,
+        expected_failure: Some(
+            "11 888 of 23 040 pixels differ from the DMG reference, in rows 4-143. `WX` is \
+             rewritten mid-line so the window's left edge moves partway along it. The window \
+             *penalty* is modelled (mode 3 lengthens by 6 when the window opens) but its edge \
+             is placed once per line",
+        ),
+        licence: "MIT (Matt Currie), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mealybug_m3_wx_5_change",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mealybug/m3_wx_5_change.gb",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
+        max_frames: 30,
+        expected_hash: None,
+        expected_failure: Some(
+            "11 471 of 23 040 pixels differ from the DMG reference; the same mid-line `WX` \
+             rewrite as `m3_wx_4_change` at the next `WX` value",
+        ),
+        licence: "MIT (Matt Currie), redistributed in the game-boy-test-roms bundle.",
+    },
+    TestRom {
+        name: "mealybug_m3_wx_6_change",
+        url: ARCHIVE_GAME_BOY_TEST_ROMS,
+        path: "gb/mealybug/m3_wx_6_change.gb",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Dmg,
+        max_frames: 30,
+        expected_hash: None,
+        expected_failure: Some(
+            "8 550 of 23 040 pixels differ from the DMG reference; the same mid-line `WX` \
+             rewrite as `m3_wx_4_change` at the next `WX` value",
+        ),
+        licence: "MIT (Matt Currie), redistributed in the game-boy-test-roms bundle.",
+    },
+];
+
 /// The corpus directory, resolved relative to the workspace root.
 ///
 /// Found by walking up from this crate rather than from the current directory, so it resolves
@@ -475,6 +781,8 @@ pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(GB_MOONEYE_PPU)
+        .chain(GB_MEALYBUG)
 }
 
 /// Game Boy Color ROMs.

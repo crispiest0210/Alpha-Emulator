@@ -77,15 +77,39 @@ pub const FRAME_CYCLES: u64 = LINE_CYCLES * TOTAL_LINES as u64;
 
 /// Mode 2, scanning OAM for sprites on this line.
 pub const OAM_SCAN_CYCLES: u64 = 80;
-/// Mode 3, the pixel transfer.
+/// How long `LY` reads 153 for, on the one line where it does.
 ///
-/// The real duration stretches from 172 to 289 cycles depending on scroll, window, and sprite
-/// count. The baseline is used here because mode 3's *length* is a rendering property: it
-/// depends on what the fetcher actually has to do, which prompt 08 owns. That prompt refines
-/// this into a computed value; the state machine around it does not change.
-pub const DRAWING_CYCLES: u64 = 172;
-/// Mode 0, whatever is left of the line.
-pub const HBLANK_CYCLES: u64 = LINE_CYCLES - OAM_SCAN_CYCLES - DRAWING_CYCLES;
+/// The last line of the frame is the only one whose `LY` does not last the whole line: it reads
+/// 153 for a single machine cycle and then reads **0** for the remaining 452 cycles, while the
+/// PPU is still on line 153. So `LYC = 0` coincides twice per frame, once here and once on line
+/// 0 proper, and a game that puts its raster split on `LYC = 0` gets it a line early without
+/// this. It is also why `LYC = 153` is nearly impossible to catch.
+pub const LY_153_CYCLES: u64 = 4;
+
+/// How long `STAT`'s mode field lags the mode change it describes, in t-cycles.
+///
+/// The interrupt and the flag are not the same event. The STAT interrupt for a mode fires when
+/// the mode actually begins; the two mode bits the CPU can *read* take one more machine cycle
+/// to follow. Mooneye's `intr_2_mode0_timing` and `intr_2_mode3_timing` measure the flag and
+/// `intr_2_0_timing` and `hblank_ly_scx_timing-GS` measure the interrupt, and they disagree by
+/// exactly this — which is how the lag is separable from an error in a mode's length.
+pub const STAT_MODE_LAG_CYCLES: u64 = 4;
+
+/// Mode 3 at its shortest: no fine scroll, no window, no objects.
+///
+/// Mode 3's real length is a *rendering* property — it is however long the fetcher's work takes
+/// — so the number itself belongs to the PPU and is computed per line by
+/// [`crate::ppu::GbPpu::mode3_cycles`]. This is only the floor the scheduler starts from.
+///
+/// The state machine schedules this, then the system immediately replaces it through
+/// [`GbTiming::set_mode3_length`] with the line's real length. See that function for why the
+/// length arrives a step late rather than being asked for up front.
+pub const MIN_DRAWING_CYCLES: u64 = crate::ppu::MODE3_MIN_CYCLES;
+/// Mode 0 at its longest, which is the line minus the two modes before it at *their* shortest.
+///
+/// Every cycle mode 3 spends past its minimum comes out of this, which is the entire point:
+/// mode 0 is not scheduled, it is what is left.
+pub const MAX_HBLANK_CYCLES: u64 = LINE_CYCLES - OAM_SCAN_CYCLES - MIN_DRAWING_CYCLES;
 
 /// Interrupt bit positions in `IF`/`IE`, in hardware priority order.
 pub mod interrupt {
@@ -160,6 +184,16 @@ pub struct TimingOutput {
     pub scanline_ready: Option<u8>,
     /// `LY` wrapped back to zero, so a new frame's rendering state begins.
     pub frame_started: bool,
+    /// The PPU began this line's OAM scan.
+    ///
+    /// Reported because one piece of rendering state is sampled *here* and nowhere else: the
+    /// window's `WY == LY` latch. See [`crate::ppu::GbPpu::begin_line`].
+    pub line_started: Option<u8>,
+    /// The PPU entered mode 3 on this line, scheduled at its minimum length.
+    ///
+    /// The system answers with [`GbTiming::set_mode3_length`]. Until it does, the line is
+    /// booked as the shortest mode 3 there is.
+    pub drawing_started: Option<u8>,
     /// Frame-sequencer clocks that fired, as counts rather than flags so a caller that
     /// advances by a long jump still applies each one.
     pub apu_length_clocks: u8,
@@ -294,6 +328,19 @@ pub enum PpuMode {
     Drawing = 3,
 }
 
+impl PpuMode {
+    /// Decode the two-bit form a save state stores.
+    fn from_bits(bits: u8) -> Result<Self, StateError> {
+        Ok(match bits {
+            0 => PpuMode::HBlank,
+            1 => PpuMode::VBlank,
+            2 => PpuMode::OamScan,
+            3 => PpuMode::Drawing,
+            other => return Err(StateError::Malformed(format!("bad PPU mode {other}"))),
+        })
+    }
+}
+
 /// The PPU's mode/`LY`/`STAT` state machine.
 ///
 /// Rendering is prompt 08's job. This owns only the question of which mode the PPU is in at
@@ -315,6 +362,29 @@ pub struct PpuTiming {
     /// the behavior usually called STAT blocking, and something games rely on.
     stat_line: bool,
     handle: EventHandle,
+
+    /// The cycle mode 3 began on the current line.
+    ///
+    /// Kept so the end of mode 3 can be *re*scheduled from where it started rather than from
+    /// wherever the clock has reached, which is what makes a late correction land on the same
+    /// cycle it would have if the length had been known up front.
+    mode3_start: Cycles,
+    /// The current line's mode 3 length, in t-cycles. Mode 0's length is the remainder.
+    mode3_length: u64,
+
+    /// Whether `LY` has already been rolled to 0 while the PPU sits on line 153.
+    ///
+    /// See [`LY_153_CYCLES`]. `ly` is what the CPU reads, so it cannot also be what the state
+    /// machine counts with — this flag is the difference between "line 0" and "the tail of line
+    /// 153, which reads as line 0".
+    ly_153_rolled: bool,
+
+    /// The mode `STAT` still reports, and the cycle the real mode last changed.
+    ///
+    /// See [`STAT_MODE_LAG_CYCLES`]: for one machine cycle after a transition the register
+    /// still shows the mode that just ended.
+    previous_mode: PpuMode,
+    mode_changed_at: Cycles,
 }
 
 impl PpuTiming {
@@ -324,12 +394,33 @@ impl PpuTiming {
     }
 
     /// `STAT` as the CPU reads it. Bit 7 is unused and reads as one.
-    pub fn read_stat(&self) -> u8 {
+    ///
+    /// `now` is needed because the mode field is not the mode: it is the mode as of one machine
+    /// cycle ago. See [`STAT_MODE_LAG_CYCLES`].
+    pub fn read_stat(&self, now: Cycles) -> u8 {
         if !self.lcd_enabled {
             // With the LCD off the mode reads as 0 and no coincidence is reported.
             return 0x80 | self.stat_selects;
         }
-        0x80 | self.stat_selects | ((self.coincidence() as u8) << 2) | self.mode as u8
+        0x80 | self.stat_selects | ((self.coincidence() as u8) << 2) | self.reported_mode(now) as u8
+    }
+
+    /// The mode the CPU would see right now, which trails [`Self::mode`] by one machine cycle.
+    #[inline]
+    pub fn reported_mode(&self, now: Cycles) -> PpuMode {
+        if now < self.mode_changed_at + Cycles(STAT_MODE_LAG_CYCLES) {
+            self.previous_mode
+        } else {
+            self.mode
+        }
+    }
+
+    /// Move to `mode` as of cycle `when`, leaving the old one visible in `STAT` for a moment.
+    #[inline]
+    fn set_mode(&mut self, mode: PpuMode, when: Cycles) {
+        self.previous_mode = self.mode;
+        self.mode_changed_at = when;
+        self.mode = mode;
     }
 
     /// Whether any enabled `STAT` source is currently asserting.
@@ -452,6 +543,10 @@ impl GbTiming {
         self.ppu = PpuTiming {
             lcd_enabled: true,
             mode: PpuMode::OamScan,
+            // Power-on is not a transition, so there is no earlier mode for `STAT` to still be
+            // showing: it reads mode 2 from cycle zero.
+            previous_mode: PpuMode::OamScan,
+            mode3_length: MIN_DRAWING_CYCLES,
             ..Default::default()
         };
         self.apu = ApuSequencer::default();
@@ -577,38 +672,60 @@ impl GbTiming {
 
         match self.ppu.mode {
             PpuMode::OamScan => {
-                self.ppu.mode = PpuMode::Drawing;
-                self.schedule_ppu(when, DRAWING_CYCLES);
+                self.ppu.set_mode(PpuMode::Drawing, when);
+                // Booked at the minimum and corrected by the system in the same cycle; see
+                // `set_mode3_length`.
+                self.ppu.mode3_start = when;
+                self.ppu.mode3_length = MIN_DRAWING_CYCLES;
+                self.schedule_ppu(when, MIN_DRAWING_CYCLES);
+                out.drawing_started = Some(self.ppu.ly);
             }
             PpuMode::Drawing => {
-                self.ppu.mode = PpuMode::HBlank;
+                self.ppu.set_mode(PpuMode::HBlank, when);
                 // Drawing has ended, so this line's pixels are final. Anything the game
                 // writes to the scroll registers from here affects the *next* line.
                 out.scanline_ready = Some(self.ppu.ly);
-                self.schedule_ppu(when, HBLANK_CYCLES);
+                // Mode 0 is the remainder of the line, so a longer mode 3 shortens it — which
+                // is the whole observable consequence of this module knowing mode 3's length.
+                let hblank = LINE_CYCLES - OAM_SCAN_CYCLES - self.ppu.mode3_length;
+                self.schedule_ppu(when, hblank);
             }
             PpuMode::HBlank => {
                 self.ppu.ly += 1;
                 if self.ppu.ly == VISIBLE_LINES {
-                    self.ppu.mode = PpuMode::VBlank;
+                    self.ppu.set_mode(PpuMode::VBlank, when);
                     // The VBlank interrupt is separate from the STAT one and always fires.
                     out.interrupts |= interrupt::VBLANK;
                     out.frame_ready = true;
                     self.schedule_ppu(when, LINE_CYCLES);
                 } else {
-                    self.ppu.mode = PpuMode::OamScan;
+                    self.ppu.set_mode(PpuMode::OamScan, when);
+                    out.line_started = Some(self.ppu.ly);
                     self.schedule_ppu(when, OAM_SCAN_CYCLES);
                 }
             }
             PpuMode::VBlank => {
-                self.ppu.ly += 1;
-                if self.ppu.ly >= TOTAL_LINES {
-                    self.ppu.ly = 0;
-                    self.ppu.mode = PpuMode::OamScan;
+                if self.ppu.ly_153_rolled {
+                    // The tail of line 153 has run out, and `LY` is already 0.
+                    self.ppu.ly_153_rolled = false;
+                    self.ppu.set_mode(PpuMode::OamScan, when);
                     out.frame_started = true;
+                    out.line_started = Some(0);
                     self.schedule_ppu(when, OAM_SCAN_CYCLES);
+                } else if self.ppu.ly == TOTAL_LINES - 1 {
+                    // One machine cycle into line 153, `LY` rolls over early; see
+                    // `LY_153_CYCLES`. The line itself still has 452 cycles to run.
+                    self.ppu.ly = 0;
+                    self.ppu.ly_153_rolled = true;
+                    self.schedule_ppu(when, LINE_CYCLES - LY_153_CYCLES);
                 } else {
-                    self.schedule_ppu(when, LINE_CYCLES);
+                    self.ppu.ly += 1;
+                    let delay = if self.ppu.ly == TOTAL_LINES - 1 {
+                        LY_153_CYCLES
+                    } else {
+                        LINE_CYCLES
+                    };
+                    self.schedule_ppu(when, delay);
                 }
             }
         }
@@ -616,6 +733,44 @@ impl GbTiming {
         if self.ppu.update_stat_line() {
             out.interrupts |= interrupt::LCD_STAT;
         }
+    }
+
+    /// Set the current line's mode 3 length, moving the end of the mode to match.
+    ///
+    /// # Why the length arrives after the mode has already started
+    ///
+    /// Mode 3's length depends on `SCX`, on whether the window is armed, and on which objects
+    /// the OAM scan found — none of which this module can see, and two of which are only
+    /// settled at the instant mode 3 begins. Reaching for the PPU and OAM from inside the
+    /// scheduler would put rendering state in the one module whose entire job is to not have
+    /// any, so the transition instead reports itself through [`TimingOutput::drawing_started`]
+    /// and the system calls this.
+    ///
+    /// Nothing observes the difference. Events are drained and their consequences applied
+    /// inside the same `GbSystemBus::tick`, so the correction lands on the same cycle the mode
+    /// started and the CPU cannot run in between. The rescheduling is measured from the
+    /// *start* of mode 3, not from now, so it is exact either way.
+    ///
+    /// Out-of-range lengths are clamped rather than rejected: the caller is describing
+    /// hardware's fetcher, and a mode 3 longer than the line would push mode 0 past the end of
+    /// it and desynchronise `LY` from the frame — a far worse failure than a capped penalty.
+    pub fn set_mode3_length(&mut self, cycles: u64) {
+        if self.ppu.mode != PpuMode::Drawing {
+            return;
+        }
+        let cycles = cycles.clamp(MIN_DRAWING_CYCLES, crate::ppu::MODE3_MAX_CYCLES);
+        if cycles == self.ppu.mode3_length {
+            return;
+        }
+        self.ppu.mode3_length = cycles;
+        self.scheduler.cancel(self.ppu.handle);
+        let start = self.ppu.mode3_start;
+        self.schedule_ppu(start, cycles);
+    }
+
+    /// The current line's mode 3 length, in t-cycles.
+    pub fn mode3_length(&self) -> u64 {
+        self.ppu.mode3_length
     }
 
     /// Whether the LCD was re-enabled since the last check, which restarts rendering.
@@ -632,9 +787,13 @@ impl GbTiming {
         self.ppu.handle = EventHandle::NONE;
 
         if enabled {
-            // Restarting always begins at the top of the frame.
+            // Restarting always begins at the top of the frame. No lag to honour: the mode is
+            // not transitioning, the whole state machine is being restarted.
             self.ppu.ly = 0;
             self.ppu.mode = PpuMode::OamScan;
+            self.ppu.previous_mode = PpuMode::OamScan;
+            self.ppu.mode_changed_at = self.now;
+            self.ppu.ly_153_rolled = false;
             self.ppu.stat_line = false;
             self.lcd_restarted = true;
             let now = self.now;
@@ -642,7 +801,9 @@ impl GbTiming {
         } else {
             // Switching the LCD off parks the PPU at line 0 in mode 0.
             self.ppu.ly = 0;
+            self.ppu.ly_153_rolled = false;
             self.ppu.mode = PpuMode::HBlank;
+            self.ppu.previous_mode = PpuMode::HBlank;
             self.ppu.stat_line = false;
         }
     }
@@ -711,7 +872,7 @@ impl GbTiming {
             reg::TMA => self.timer.tma,
             // Only three bits of TAC exist; the rest read as ones.
             reg::TAC => 0xF8 | (self.timer.tac & 0x07),
-            reg::STAT => self.ppu.read_stat(),
+            reg::STAT => self.ppu.read_stat(self.now),
             reg::LY => {
                 if self.ppu.lcd_enabled {
                     self.ppu.ly
@@ -833,6 +994,11 @@ impl Savable for GbTiming {
         w.write_bool(self.ppu.lcd_enabled);
         w.write_bool(self.ppu.stat_line);
         w.write_u64(self.ppu.handle.raw());
+        self.ppu.mode3_start.save(w);
+        w.write_u64(self.ppu.mode3_length);
+        w.write_u8(self.ppu.previous_mode as u8);
+        self.ppu.mode_changed_at.save(w);
+        w.write_bool(self.ppu.ly_153_rolled);
 
         w.write_u8(self.apu.step);
         w.write_u64(self.apu.handle.raw());
@@ -853,17 +1019,16 @@ impl Savable for GbTiming {
 
         self.ppu.ly = r.read_u8()?;
         self.ppu.lyc = r.read_u8()?;
-        self.ppu.mode = match r.read_u8()? {
-            0 => PpuMode::HBlank,
-            1 => PpuMode::VBlank,
-            2 => PpuMode::OamScan,
-            3 => PpuMode::Drawing,
-            other => return Err(StateError::Malformed(format!("bad PPU mode {other}"))),
-        };
+        self.ppu.mode = PpuMode::from_bits(r.read_u8()?)?;
         self.ppu.stat_selects = r.read_u8()?;
         self.ppu.lcd_enabled = r.read_bool()?;
         self.ppu.stat_line = r.read_bool()?;
         self.ppu.handle = EventHandle::from_raw(r.read_u64()?);
+        self.ppu.mode3_start.load(r)?;
+        self.ppu.mode3_length = r.read_u64()?;
+        self.ppu.previous_mode = PpuMode::from_bits(r.read_u8()?)?;
+        self.ppu.mode_changed_at.load(r)?;
+        self.ppu.ly_153_rolled = r.read_bool()?;
 
         self.apu.step = r.read_u8()?;
         self.apu.handle = EventHandle::from_raw(r.read_u64()?);
