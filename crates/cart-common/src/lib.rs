@@ -81,7 +81,7 @@ mod save;
 
 pub use header::{CgbSupport, GbHeader, GbaHeader, MapperKind};
 pub use mbc::{create_mapper, Mbc1, Mbc2, Mbc3, Mbc5, NoMbc};
-pub use rtc::{GbaGpioRtc, Mbc3Rtc, RtcTime};
+pub use rtc::{GbaGpioRtc, Mbc3Rtc, RtcTime, RTC_TRAILER_LEN};
 pub use save::{create_save, Eeprom, Flash, SaveKind, Sram};
 
 use core_common::{CartridgeError, Savable};

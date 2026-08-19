@@ -1020,12 +1020,12 @@ impl Emulator {
         if !force && dirty_since.elapsed() < SAVE_RAM_DEBOUNCE {
             return;
         }
-        let Some(data) = active.system.save_ram() else {
+        let Some(data) = active.system.save_ram_for_disk() else {
             active.dirty_since = None;
             return;
         };
         let path = active.save_ram_path.clone();
-        let result = write_atomically(&path, data);
+        let result = write_atomically(&path, &data);
         active.dirty_since = None;
         match result {
             Ok(()) => self.emit(SessionEvent::SaveRamWritten { path }),

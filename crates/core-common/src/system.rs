@@ -166,7 +166,25 @@ pub trait System: Savable {
     /// Battery-backed save contents, or `None` when the cartridge has no save memory.
     fn save_ram(&self) -> Option<&[u8]>;
 
+    /// Battery-backed save contents as they should be written to a `.sav` file, including any
+    /// device state that has to ride along in the same file to survive a normal save rather
+    /// than only a full save state — an MBC3 real-time clock, for the Game Boy family's RTC
+    /// cartridges.
+    ///
+    /// Separate from [`Self::save_ram`], which stays a bare borrow of the save chip's own
+    /// buffer for the debugger and the accuracy tests to read cheaply: a trailer does not exist
+    /// anywhere until it is built, so this one allocates. The default forwards to `save_ram`
+    /// unchanged, which is the correct answer for every system with nothing to add — today,
+    /// every system but the Game Boy family.
+    fn save_ram_for_disk(&self) -> Option<Vec<u8>> {
+        self.save_ram().map(<[u8]>::to_vec)
+    }
+
     /// Restore battery-backed save contents from disk.
+    ///
+    /// Takes whatever [`Self::save_ram_for_disk`] would have written, trailer included where
+    /// one applies — a system that appends one on save is responsible for recognising and
+    /// stripping it here, and for loading cleanly from a file saved before the trailer existed.
     fn load_save_ram(&mut self, data: &[u8]) -> Result<(), CartridgeError>;
 
     /// Serialize the complete machine state.
