@@ -450,6 +450,19 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   the identical signature and was reported as a pass. Fixed by rejecting a settle at the entry
   point specifically — every real suite settles somewhere inside its own code — proven against a
   constructed `b .`-from-the-entry-point ROM, not reasoned about.
+- **There was a fourth copy of that list, and it was the suite itself.** `gb_accuracy_suite` in
+  `testing/harness/src/tests.rs` chained the five constants by hand rather than calling
+  `all_roms()`, so a new corpus entry was fetched, validated, and then never run — the same
+  drift as before with the failure mode inverted, and harder to notice, because the ROM is
+  sitting on disk and the suite reports a clean pass without it. It calls `all_roms()` now.
+  Adding sixteen Mooneye entries is what surfaced it: they downloaded, and the suite's totals
+  did not move.
+- **Not every suite publishes per-file ROMs.** Mooneye's repository holds assembler source, it
+  cuts no GitHub releases, and its CI uploads each build as one dated archive, so
+  `fetch-test-roms` grew a `url#member-inside-the-archive` form that pulls a single file out of
+  a zip with `unzip -p`. The archive is downloaded once per run and cached inside the gitignored
+  corpus. The alternative was committing built ROMs, which is the one thing this corpus exists
+  to avoid.
 
   Adding the `jsmolka/gba-tests` `save/` set once the fetcher could reach it immediately found what
   it exists to find: `save_sram` fails its first access (fresh SRAM reads `0x00`, which the ROM

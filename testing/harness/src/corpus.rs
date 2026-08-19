@@ -440,6 +440,280 @@ pub const GB_ROMS: &[TestRom] = &[
     },
 ];
 
+/// The upstream location of one mooneye ROM, as `archive-url#path-inside-the-archive`.
+///
+/// Mooneye is the one suite here with no per-file download. Its repository holds assembler
+/// source rather than binaries, it publishes no GitHub releases, and its CI uploads each build
+/// as a single dated archive — so the fetcher takes a `#member` fragment and pulls one file out
+/// of the zip. The build is pinned twice over, in the directory name and inside the archive,
+/// which is why this is a macro rather than sixteen hand-copied URLs that could disagree.
+macro_rules! mooneye_url {
+    ($member:literal) => {
+        concat!(
+            "https://gekkio.fi/files/mooneye-test-suite/mts-20240926-1737-443f6e1/",
+            "mts-20240926-1737-443f6e1.zip#mts-20240926-1737-443f6e1/",
+            $member
+        )
+    };
+}
+
+/// What every mooneye entry says about its terms.
+const MOONEYE_LICENCE: &str = "MIT (Joonas Javanainen); fetched from the upstream build.";
+
+/// Mooneye's OAM DMA acceptance tests.
+///
+/// These are the corpus's only check on a transfer being observable *while it runs* rather
+/// than only in the bytes it leaves behind. `oam_dma_start` is the sharpest of them: it starts
+/// a VRAM-sourced transfer, executes an instruction out of OAM one machine cycle later, and
+/// requires that instruction to still be the real one — then requires the next fetch, one cycle
+/// after that, to come back `0xFF`. Nothing else here can tell a two-cycle startup delay from
+/// no delay at all.
+pub const GB_MOONEYE_OAM_DMA: &[TestRom] = &[
+    TestRom {
+        name: "mooneye_oam_dma_basic",
+        url: mooneye_url!("acceptance/oam_dma/basic.gb"),
+        path: "gb/mooneye/acceptance/oam_dma/basic.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_oam_dma_reg_read",
+        url: mooneye_url!("acceptance/oam_dma/reg_read.gb"),
+        path: "gb/mooneye/acceptance/oam_dma/reg_read.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    // Upstream keeps these two beside the `oam_dma` directory rather than inside it, because
+    // they are about when a transfer starts rather than about what it copies.
+    TestRom {
+        name: "mooneye_oam_dma_start",
+        url: mooneye_url!("acceptance/oam_dma_start.gb"),
+        path: "gb/mooneye/acceptance/oam_dma_start.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_oam_dma_restart",
+        url: mooneye_url!("acceptance/oam_dma_restart.gb"),
+        path: "gb/mooneye/acceptance/oam_dma_restart.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+];
+
+/// Mooneye's PPU acceptance tests.
+///
+/// These measure the PPU against the CPU clock to single machine cycles: when `STAT` changes
+/// mode, how long mode 3 runs for a given `SCX`, and how many cycles pass between the LCD being
+/// switched on and it behaving like a running PPU. This emulator's PPU is scanline-accurate —
+/// it composites a whole line at once — so the ones that resolve *within* a line are here to
+/// mark the boundary of what that design can answer, not because they are expected to pass.
+pub const GB_MOONEYE_PPU: &[TestRom] = &[
+    TestRom {
+        name: "mooneye_ppu_hblank_ly_scx_timing",
+        url: mooneye_url!("acceptance/ppu/hblank_ly_scx_timing-GS.gb"),
+        path: "gb/mooneye/acceptance/ppu/hblank_ly_scx_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "mode 3 is a fixed 172 cycles (`timing::DRAWING_CYCLES`) and nothing shortens \
+             horizontal blank to pay for it, so `SCX` does not move the mode-0 boundary at \
+             all. This ROM requires LY to increment 51 cycles after the mode-0 interrupt for \
+             SCX mod 8 = 0, 50 for 1-4, and 49 for 5-7 — the fetcher discarding SCX mod 8 \
+             pixels at the start of the line. Charging that costs a mode 3 whose length the \
+             renderer computes rather than a constant",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_1_2_timing",
+        url: mooneye_url!("acceptance/ppu/intr_1_2_timing-GS.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_1_2_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_2_0_timing",
+        url: mooneye_url!("acceptance/ppu/intr_2_0_timing.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_2_0_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_2_mode0_timing",
+        url: mooneye_url!("acceptance/ppu/intr_2_mode0_timing.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_2_mode0_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "a mode change raises its STAT interrupt and updates the mode field STAT reads in \
+             the same cycle. Hardware separates the two: the interrupt comes one machine cycle \
+             before the field follows it. Confirmed by experiment — moving the mode-2 to mode-3 \
+             edge four cycles later, with the interrupts left where they are, turns this ROM \
+             and `intr_2_mode3_timing` and `intr_2_oam_ok_timing` green and turns \
+             `intr_2_0_timing` red, which measures interrupt to interrupt and is already \
+             correct. So the interrupt cycles are right and only the field lags",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_2_mode0_timing_sprites",
+        url: mooneye_url!("acceptance/ppu/intr_2_mode0_timing_sprites.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_2_mode0_timing_sprites.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "a sprite on the line stalls the fetcher and lengthens mode 3, and mode 3 here is \
+             the constant `timing::DRAWING_CYCLES` — the renderer composites a whole scanline \
+             at once and never reports what the fetch cost. So every sprite configuration this \
+             ROM sets up produces the same mode-0 boundary",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_2_mode3_timing",
+        url: mooneye_url!("acceptance/ppu/intr_2_mode3_timing.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_2_mode3_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "the same one-machine-cycle lag between a STAT mode interrupt and the mode field \
+             STAT reads that `intr_2_mode0_timing` documents; this one polls for mode 3 rather \
+             than mode 0 and misses by the same cycle",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_intr_2_oam_ok_timing",
+        url: mooneye_url!("acceptance/ppu/intr_2_oam_ok_timing.gb"),
+        path: "gb/mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "OAM does become unreachable during modes 2 and 3 now, and this ROM measures when \
+             it opens again rather than whether it ever closes. It opens one machine cycle \
+             early, for the same reason `intr_2_mode0_timing` reads mode 0 one cycle early: \
+             the lockout is driven off the mode field, and the mode field changes on the same \
+             cycle as the interrupt instead of one cycle after it",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_lcdon_timing",
+        url: mooneye_url!("acceptance/ppu/lcdon_timing-GS.gb"),
+        path: "gb/mooneye/acceptance/ppu/lcdon_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "`timing::GbTiming::set_lcd_enabled` restarts the PPU at line 0 in mode 2 and \
+             schedules a full 80-cycle scan, so the first line after the LCD comes on is an \
+             ordinary line. Hardware's is not: line 0 starts in mode 0, goes straight to mode \
+             3 without a scan, and the whole PPU is two t-cycles late for that frame. This ROM \
+             reads LY, STAT, and OAM and VRAM accessibility at fixed offsets from the write to \
+             LCDC, so every one of them lands in the wrong mode",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_lcdon_write_timing",
+        url: mooneye_url!("acceptance/ppu/lcdon_write_timing-GS.gb"),
+        path: "gb/mooneye/acceptance/ppu/lcdon_write_timing-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "the write-side counterpart of `lcdon_timing`, and the same cause: the first line \
+             after the LCD is switched on runs as an ordinary mode-2 line here rather than \
+             starting in mode 0 and going straight to mode 3. Writes to OAM and VRAM are \
+             dropped by mode now, so this ROM measures a real window — it is just the wrong \
+             window on the frame the PPU starts",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_stat_irq_blocking",
+        url: mooneye_url!("acceptance/ppu/stat_irq_blocking.gb"),
+        path: "gb/mooneye/acceptance/ppu/stat_irq_blocking.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: None,
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_stat_lyc_onoff",
+        url: mooneye_url!("acceptance/ppu/stat_lyc_onoff.gb"),
+        path: "gb/mooneye/acceptance/ppu/stat_lyc_onoff.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "with the LCD off, `timing::PpuTiming::read_stat` returns early and reports no \
+             coincidence at all, and `set_lcd_enabled` parks LY at 0 and clears the STAT line \
+             without comparing LY to LYC again. This ROM switches the PPU off while the \
+             comparison is true and then reads the bit back, which is exactly the case that \
+             early return answers with a zero it should not",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+    TestRom {
+        name: "mooneye_ppu_vblank_stat_intr",
+        url: mooneye_url!("acceptance/ppu/vblank_stat_intr-GS.gb"),
+        path: "gb/mooneye/acceptance/ppu/vblank_stat_intr-GS.gb",
+        convention: Convention::Mooneye,
+        hardware: Hardware::Dmg,
+        max_frames: 600,
+        expected_hash: None,
+        expected_failure: Some(
+            "`timing::PpuTiming::stat_condition` maps each mode to exactly one select bit, so \
+             entering vertical blank consults only bit 4. On hardware line 144 asserts the \
+             mode-2 select as well, and a game with only bit 5 enabled still gets a STAT \
+             interrupt at the same moment as the vblank interrupt — which is the coincidence \
+             this ROM measures",
+        ),
+        licence: MOONEYE_LICENCE,
+    },
+];
+
 /// The corpus directory, resolved relative to the workspace root.
 ///
 /// Found by walking up from this crate rather than from the current directory, so it resolves
@@ -480,6 +754,8 @@ pub fn all_roms() -> impl Iterator<Item = &'static TestRom> {
         .iter()
         .chain(GB_CPU_INSTRS_SUBTESTS)
         .chain(GB_DMG_SOUND_SINGLES)
+        .chain(GB_MOONEYE_OAM_DMA)
+        .chain(GB_MOONEYE_PPU)
         .chain(CGB_ROMS)
         .chain(GBA_ROMS)
 }

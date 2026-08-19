@@ -5,10 +5,7 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{
-    Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
-    GB_DMG_SOUND_SINGLES, GB_ROMS,
-};
+use crate::corpus::{all_roms, Convention, Hardware, TestRom, GB_ROMS};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -540,13 +537,11 @@ fn gb_accuracy_suite() {
     let mut known_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
 
-    for rom in GB_ROMS
-        .iter()
-        .chain(GB_CPU_INSTRS_SUBTESTS)
-        .chain(GB_DMG_SOUND_SINGLES)
-        .chain(CGB_ROMS)
-        .chain(GBA_ROMS)
-    {
+    // `all_roms` rather than a chain written out again here. The fetcher and this suite each
+    // keeping their own list is what let `CGB_ROMS` and `GBA_ROMS` go unfetchable for as long
+    // as they did, and a suite that silently ignores a corpus entry fails the same way round:
+    // the ROM is downloaded, nothing runs it, and the corpus looks like coverage it is not.
+    for rom in all_roms() {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);
             continue;

@@ -112,8 +112,17 @@ fn cargo() -> String {
 }
 
 fn have(program: &str) -> bool {
+    have_with(program, "--version")
+}
+
+/// [`have`] for a program that does not answer to `--version`.
+///
+/// Info-ZIP's `unzip` is the one here that does not: it treats `--version` as two unknown
+/// options, prints its usage, and exits 10, so probing it the usual way reports a working
+/// `unzip` as missing.
+fn have_with(program: &str, flag: &str) -> bool {
     Command::new(program)
-        .arg("--version")
+        .arg(flag)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -385,22 +394,14 @@ fn fetch_test_roms(force: bool) -> Result<()> {
         }
 
         println!("fetching {}", rom.path);
-        let status = Command::new("curl")
-            .args([
-                "--location", // these are redirects to a CDN
-                "--fail",     // a 404 must not leave an HTML error page on disk
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "120",
-                "--output",
-            ])
-            .arg(&target)
-            .arg(rom.url)
-            .status()
-            .with_context(|| format!("running curl for {}", rom.path))?;
+        let outcome = match rom.url.split_once('#') {
+            Some((archive_url, member)) => {
+                extract_from_archive(&corpus, archive_url, member, &target)
+            }
+            None => download(rom.url, &target),
+        };
 
-        if status.success() {
+        if outcome? {
             fetched += 1;
         } else {
             // Leave nothing half-written behind: a truncated ROM would fail the suite in a
@@ -422,6 +423,83 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     }
     println!("Run `cargo xtask test --accuracy` to use them.");
     Ok(())
+}
+
+/// Fetch one URL to one file. `Ok(false)` means the server said no, which is not fatal.
+fn download(url: &str, target: &std::path::Path) -> Result<bool> {
+    let status = Command::new("curl")
+        .args([
+            "--location", // these are redirects to a CDN
+            "--fail",     // a 404 must not leave an HTML error page on disk
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "120",
+            "--output",
+        ])
+        .arg(target)
+        .arg(url)
+        .status()
+        .with_context(|| format!("running curl for {url}"))?;
+    Ok(status.success())
+}
+
+/// Pull one ROM out of a zip, given a `url#member-inside-the-zip` corpus entry.
+///
+/// Needed because not every suite publishes its ROMs as individual files. Mooneye's are built
+/// from source by its CI and published only as a dated archive — there is no per-file URL
+/// anywhere upstream, and its repository holds assembler source rather than binaries. The
+/// alternative was to commit the built ROMs, which is the one thing this corpus must never do.
+///
+/// The archive is downloaded once per run and kept beside the ROMs it produced, so the sixteen
+/// mooneye entries cost one download rather than sixteen. That directory is inside the
+/// gitignored corpus, so nothing it holds can be committed either.
+fn extract_from_archive(
+    corpus: &std::path::Path,
+    archive_url: &str,
+    member: &str,
+    target: &std::path::Path,
+) -> Result<bool> {
+    if !have_with("unzip", "-v") {
+        bail!("unzip is required to fetch archived test ROMs; install it and re-run");
+    }
+
+    let cache = corpus.join(".archives");
+    std::fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    let name = archive_url
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .context("the archive URL ends in a file name")?;
+    let archive = cache.join(name);
+
+    if !archive.is_file() {
+        println!("  downloading {name}");
+        if !download(archive_url, &archive)? {
+            let _ = std::fs::remove_file(&archive);
+            return Ok(false);
+        }
+    }
+
+    // `-p` writes the member to stdout, which is the only way to land it under a name of our
+    // choosing rather than the one it happens to have inside the archive.
+    let file =
+        std::fs::File::create(target).with_context(|| format!("creating {}", target.display()))?;
+    let status = Command::new("unzip")
+        .arg("-p")
+        .arg(&archive)
+        .arg(member)
+        .stdout(std::process::Stdio::from(file))
+        .status()
+        .with_context(|| format!("running unzip for {member}"))?;
+
+    // `unzip -p` reports success even when the member does not match anything, leaving an empty
+    // file behind, so the size is the real check.
+    let extracted = status.success()
+        && std::fs::metadata(target)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+    Ok(extracted)
 }
 
 /// The workspace root, found from this crate rather than the current directory.

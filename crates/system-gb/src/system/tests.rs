@@ -687,3 +687,251 @@ fn stepping_one_instruction_advances_the_clock_by_that_instruction() {
     assert!(cycles.get() > 0, "an instruction costs something");
     assert_eq!(gb.bus().timing.now(), cycles);
 }
+
+// ---------------------------------------------------------------------------
+// What the CPU cannot reach, and when
+// ---------------------------------------------------------------------------
+
+/// Park the PPU in one mode with the LCD on, so a lockout can be tested at a known instant.
+///
+/// Reaching a mode by running the machine to it would be at the mercy of where an instruction
+/// happened to land; these tests are about the rule, not about the schedule that produces it.
+fn park_in(system: &mut GbSystem, mode: PpuMode) {
+    system.bus_mut().timing.ppu.lcd_enabled = true;
+    system.bus_mut().timing.ppu.mode = mode;
+}
+
+#[test]
+fn vram_is_unreachable_while_the_ppu_draws() {
+    let mut gb = system(SPIN_PROGRAM);
+    park_in(&mut gb, PpuMode::HBlank);
+    write(&mut gb, 0x8000, 0x5A);
+    assert_eq!(read(&mut gb, 0x8000), 0x5A);
+
+    park_in(&mut gb, PpuMode::Drawing);
+    assert_eq!(read(&mut gb, 0x8000), 0xFF, "the PPU has the memory");
+    write(&mut gb, 0x8000, 0xA5);
+
+    park_in(&mut gb, PpuMode::HBlank);
+    assert_eq!(
+        read(&mut gb, 0x8000),
+        0x5A,
+        "the write was dropped, not held"
+    );
+}
+
+#[test]
+fn vram_is_reachable_in_every_mode_but_drawing() {
+    let mut gb = system(SPIN_PROGRAM);
+    for mode in [PpuMode::HBlank, PpuMode::VBlank, PpuMode::OamScan] {
+        park_in(&mut gb, mode);
+        write(&mut gb, 0x8100, 0x3C);
+        assert_eq!(read(&mut gb, 0x8100), 0x3C, "VRAM is open in {mode:?}");
+        write(&mut gb, 0x8100, 0x00);
+    }
+}
+
+#[test]
+fn oam_is_unreachable_during_the_sprite_scan_as_well_as_the_draw() {
+    let mut gb = system(SPIN_PROGRAM);
+    park_in(&mut gb, PpuMode::HBlank);
+    write(&mut gb, 0xFE00, 0x42);
+    assert_eq!(read(&mut gb, 0xFE00), 0x42);
+
+    // Mode 2 is the extra one: the PPU is reading OAM to decide which sprites are on this
+    // line, which is a period VRAM is left alone for.
+    for mode in [PpuMode::OamScan, PpuMode::Drawing] {
+        park_in(&mut gb, mode);
+        assert_eq!(read(&mut gb, 0xFE00), 0xFF, "OAM is closed in {mode:?}");
+        write(&mut gb, 0xFE00, 0x99);
+    }
+
+    park_in(&mut gb, PpuMode::VBlank);
+    assert_eq!(read(&mut gb, 0xFE00), 0x42, "and neither write landed");
+}
+
+#[test]
+fn colour_palette_data_is_unreachable_while_the_ppu_draws() {
+    let mut gb = GbSystem::with_model(rom_with_program(SPIN_PROGRAM), None, GbModel::Cgb)
+        .expect("the test ROM is valid");
+
+    // Auto-increment off, so every write here addresses the same palette byte.
+    park_in(&mut gb, PpuMode::HBlank);
+    write(&mut gb, 0xFF68, 0x00);
+    write(&mut gb, 0xFF69, 0x1F);
+    assert_eq!(read(&mut gb, 0xFF69), 0x1F);
+
+    park_in(&mut gb, PpuMode::Drawing);
+    assert_eq!(read(&mut gb, 0xFF69), 0xFF, "BCPD is closed while drawing");
+    write(&mut gb, 0xFF69, 0x7E);
+    // Index 0 with auto-increment off, and bit 6 reading high as it always does.
+    assert_eq!(
+        read(&mut gb, 0xFF68),
+        0x40,
+        "but the index register stays reachable"
+    );
+
+    park_in(&mut gb, PpuMode::HBlank);
+    assert_eq!(read(&mut gb, 0xFF69), 0x1F, "the palette write was dropped");
+}
+
+#[test]
+fn switching_the_lcd_off_opens_everything_again() {
+    // Which is the only reason a game can fill VRAM at startup at all: it does that before
+    // switching the display on, in one uninterrupted run.
+    let mut gb = system(SPIN_PROGRAM);
+    gb.bus_mut().timing.ppu.lcd_enabled = false;
+    gb.bus_mut().timing.ppu.mode = PpuMode::Drawing;
+
+    write(&mut gb, 0x8000, 0x11);
+    write(&mut gb, 0xFE00, 0x22);
+    assert_eq!(read(&mut gb, 0x8000), 0x11);
+    assert_eq!(read(&mut gb, 0xFE00), 0x22);
+}
+
+// ---------------------------------------------------------------------------
+// OAM DMA
+// ---------------------------------------------------------------------------
+
+/// Report `cycles` t-cycles of CPU time to the bus, the way the CPU itself would.
+fn tick(system: &mut GbSystem, cycles: u64) {
+    system.bus_mut().tick(Cycles(cycles));
+}
+
+/// A machine with the LCD off and `0xC000` onward filled, ready to be copied out of.
+fn machine_ready_for_dma() -> GbSystem {
+    let mut gb = system(SPIN_PROGRAM);
+    // The LCD is off so that the PPU's own lockouts cannot be mistaken for the DMA's.
+    gb.bus_mut().timing.ppu.lcd_enabled = false;
+    for offset in 0..0xA0u16 {
+        write(&mut gb, 0xC000 + offset, offset as u8);
+    }
+    gb
+}
+
+#[test]
+fn an_oam_dma_takes_640_cycles_and_lands_every_byte() {
+    let mut gb = machine_ready_for_dma();
+    write(&mut gb, 0xFF46, 0xC0);
+
+    // Two machine cycles of nothing, then 160 of copying.
+    tick(&mut gb, 8);
+    assert!(gb.bus().oam_dma.is_running(), "the transfer has begun");
+
+    tick(&mut gb, 636);
+    assert!(
+        gb.bus().oam_dma.is_running(),
+        "and is not finished a machine cycle early"
+    );
+    tick(&mut gb, 4);
+    assert!(gb.bus().oam_dma.is_idle(), "640 cycles, to the cycle");
+
+    for offset in 0..0xA0u16 {
+        assert_eq!(
+            read(&mut gb, 0xFE00 + offset),
+            offset as u8,
+            "OAM byte {offset:#04X}"
+        );
+    }
+}
+
+#[test]
+fn a_transfer_in_progress_locks_the_cpu_out_of_the_bus_it_is_using() {
+    let mut gb = machine_ready_for_dma();
+    write(&mut gb, 0xFF80, 0x77);
+    write(&mut gb, 0x8000, 0x88);
+
+    write(&mut gb, 0xFF46, 0xC0);
+    assert_eq!(
+        read(&mut gb, 0xC000),
+        0x00,
+        "nothing is locked out during the startup delay"
+    );
+
+    tick(&mut gb, 8);
+    assert_eq!(
+        read(&mut gb, 0xC000),
+        0xFF,
+        "work RAM shares the source bus"
+    );
+    assert_eq!(read(&mut gb, 0x0100), 0xFF, "and so does the cartridge");
+    assert_eq!(read(&mut gb, 0xFE00), 0xFF, "OAM is being written");
+    assert_eq!(
+        read(&mut gb, 0xFF80),
+        0x77,
+        "HRAM is why the wait loop works"
+    );
+    assert_eq!(read(&mut gb, 0xFF46), 0xC0, "and the I/O page stays open");
+    assert_eq!(
+        read(&mut gb, 0x8000),
+        0x88,
+        "VRAM is on the other bus, so this transfer never touches it"
+    );
+
+    tick(&mut gb, 640);
+    assert_eq!(read(&mut gb, 0xC000), 0x00, "and it all reopens after");
+}
+
+#[test]
+fn a_transfer_out_of_vram_locks_the_other_bus_instead() {
+    // The asymmetry is what lets mooneye's `oam_dma_start` run its interrupt vector out of the
+    // cartridge while a VRAM-sourced transfer is still going.
+    let mut gb = machine_ready_for_dma();
+    write(&mut gb, 0x8000, 0x88);
+
+    write(&mut gb, 0xFF46, 0x80);
+    tick(&mut gb, 8);
+
+    assert_eq!(read(&mut gb, 0x8000), 0xFF, "VRAM is the source now");
+    assert_eq!(read(&mut gb, 0xFE00), 0xFF, "OAM is locked out either way");
+    assert_eq!(read(&mut gb, 0xC000), 0x00, "but work RAM is free");
+    assert_eq!(read(&mut gb, 0x0100), 0xC3, "and so is the cartridge");
+}
+
+#[test]
+fn a_write_to_the_dma_register_does_not_stop_the_transfer_already_running() {
+    let mut gb = machine_ready_for_dma();
+    write(&mut gb, 0x8000, 0x88);
+    write(&mut gb, 0xFF46, 0xC0);
+    tick(&mut gb, 8 + 4 * 16);
+
+    // Restarting with a VRAM source. For the next two machine cycles the *old* transfer still
+    // owns the external bus; only then does the new one take over the video bus.
+    write(&mut gb, 0xFF46, 0x80);
+    tick(&mut gb, 4);
+    assert_eq!(
+        read(&mut gb, 0xC000),
+        0xFF,
+        "the old transfer is still going"
+    );
+
+    tick(&mut gb, 4);
+    assert_eq!(
+        read(&mut gb, 0xC000),
+        0x00,
+        "now the old one has been replaced"
+    );
+    assert_eq!(read(&mut gb, 0x8000), 0xFF, "and the new one holds VRAM");
+}
+
+#[test]
+fn a_transfer_survives_a_save_state_mid_flight() {
+    let mut gb = machine_ready_for_dma();
+    write(&mut gb, 0xFF46, 0xC0);
+    tick(&mut gb, 8 + 4 * 40);
+
+    let bytes = savestate::encode_state("gb", STATE_VERSION, &gb);
+    let mut restored = machine_ready_for_dma();
+    savestate::decode_state("gb", STATE_VERSION, &bytes, &mut restored).unwrap();
+
+    tick(&mut gb, 600);
+    tick(&mut restored, 600);
+    assert!(gb.bus().oam_dma.is_idle() && restored.bus().oam_dma.is_idle());
+    for offset in 0..0xA0u16 {
+        assert_eq!(
+            read(&mut restored, 0xFE00 + offset),
+            read(&mut gb, 0xFE00 + offset),
+            "OAM byte {offset:#04X} after a restore mid-transfer"
+        );
+    }
+}

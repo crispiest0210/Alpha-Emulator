@@ -252,14 +252,14 @@ Component status:
 | `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
 | `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
 | `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
-| `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
+| `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; STAT mode interrupts land on the right cycles, but the mode field STAT *reads* changes one machine cycle too early and mode 3 is a fixed length — see the Mooneye PPU notes below. **Mooneye timer ROMs not yet run** |
 | `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules, both tile-mapping arrangements, and per-sprite bit depth |
 | `system-gb` PPU — background, window, sprites | done, scanline-accurate; dmg-acid2 validated pixel-exact |
 | `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass. The wave channel carries additive, Game-Boy-default fields for the GBA's second bank, 64-sample mode, and 75% volume step; a dedicated test pins that those defaults reproduce Game Boy behaviour exactly |
 | `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
 | `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
 | `frontend-core` input — keybinds, conflict rule, delivery | done and driven from the window; keyboard only, gamepads are future work |
-| `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
+| `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact. OAM DMA is a timed transfer — two machine cycles of startup, then 160 of copying, locking the CPU out of whichever memory bus its source is on; all four Mooneye `oam_dma` ROMs pass |
 | `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
 | `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass, cgb-acid2 validated pixel-exact; **`OPRI` not modelled** |
 | `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
@@ -328,6 +328,9 @@ Current Game Boy results:
 | `gba-suite` save/none (no chip fitted) | **pass** |
 | `gba-suite` save/sram, save/flash64, save/flash128 | fail — see below |
 | dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
+| Mooneye `acceptance/oam_dma` — basic, reg_read, oam_dma_start, oam_dma_restart | **pass** |
+| Mooneye `acceptance/ppu` — intr_1_2_timing, intr_2_0_timing, stat_irq_blocking | **pass** |
+| Mooneye `acceptance/ppu` — the other 9 | fail — see below |
 
 **Audio has a regression check now too, and it is not the same guarantee as the picture tests
 above.** `testing/harness/src/audio_golden.rs` hashes each system's sample output on a small
@@ -390,6 +393,26 @@ Open gaps, each tracked with the specific reason:
   through OBJ palette 0 with bank 0 tiles; and sprites were ordered by X coordinate, which is the
   DMG rule where a CGB orders by OAM index. Neither would have been caught by anything except a
   reference comparison.
+
+- **Mooneye's four `oam_dma` ROMs pass.** OAM DMA used to copy all 160 bytes the instant `FF46`
+  was written, which left no interval for anything to observe. It is a timed transfer now: two
+  machine cycles of startup, then one byte per machine cycle for 160, during which the CPU is
+  locked out of whichever memory bus the source is on — and out of OAM either way, because the
+  DMA is writing it. The bus distinction is load-bearing rather than pedantry: `oam_dma_start`
+  runs a VRAM-sourced transfer and then executes its `RST $38` handler out of the cartridge
+  while that transfer is still going, which only works because a video-bus transfer leaves the
+  external bus alone. A blanket "only HRAM is reachable" lockout hangs that ROM.
+- **Nine of Mooneye's twelve `ppu` ROMs fail, for two causes.** The first: a mode change raises
+  its STAT interrupt and updates the mode field STAT reads on the same cycle, where hardware
+  puts the interrupt one machine cycle ahead of the field. Moving the mode-2 to mode-3 edge four
+  cycles later turns `intr_2_mode0_timing`, `intr_2_mode3_timing`, and `intr_2_oam_ok_timing`
+  green and turns `intr_2_0_timing` red — and that last one measures interrupt to interrupt, so
+  the interrupt cycles are already right and only the field lags. The second: mode 3 is a fixed
+  172 cycles, because a scanline is composited in one go and never reports what the fetch cost,
+  so neither `SCX mod 8` nor a sprite on the line moves the mode-0 boundary. The remaining
+  three — `lcdon_timing`, `lcdon_write_timing`, `stat_lyc_onoff` — are about the frame the LCD
+  is switched on, which restarts here as an ordinary mode-2 line rather than hardware's line 0
+  that starts in mode 0 and goes straight to mode 3.
 
 Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
 they leave there names the exact rule that failed. `cargo test -p harness --release --
