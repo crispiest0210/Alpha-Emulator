@@ -52,6 +52,7 @@ use crate::gpu3d::Gpu3d;
 use crate::input::{Input, RAW_PER_PIXEL};
 use crate::ipc::Ipc;
 use crate::irq::{sources, InterruptController};
+use crate::math::MathUnits;
 use crate::memory::{NdsMemory, WramSplit};
 use crate::timers::TimerBlock;
 use crate::video::{VideoEvent, VideoTiming, FRAMEBUFFER_HEIGHT, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -129,6 +130,9 @@ pub struct NdsBus {
     /// The 3D core, which only the ARM9 can reach.
     pub gpu3d: Gpu3d,
     pub irq: [InterruptController; 2],
+    /// The ARM9's hardware divider and square-root unit. One of them, not two: the ARM7 has
+    /// neither, and its I/O space has nothing at these addresses.
+    pub math: MathUnits,
     pub timers: [TimerBlock; 2],
     pub dma: [DmaController; 2],
     /// `POSTFLG` for each core, which software uses to tell a cold boot from a warm one.
@@ -167,6 +171,7 @@ impl NdsBus {
                 InterruptController::new(Core::Arm9),
                 InterruptController::new(Core::Arm7),
             ],
+            math: MathUnits::new(),
             timers: [TimerBlock::new(); 2],
             dma: [
                 DmaController::new(Core::Arm9),
@@ -462,6 +467,9 @@ impl NdsBus {
         if addr == 0x0410_0000 {
             return self.ipc.receive(core);
         }
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            return self.math.read32(addr);
+        }
         if let Some(value) = self.irq[core as usize].read32(addr) {
             return value;
         }
@@ -485,6 +493,10 @@ impl NdsBus {
     }
 
     fn io_write32(&mut self, core: Core, addr: u32, value: u32) {
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            self.math.write32(addr, value);
+            return;
+        }
         if self.irq[core as usize].write32(addr, value) {
             return;
         }
@@ -524,6 +536,9 @@ impl NdsBus {
 
     fn io_read16(&mut self, core: Core, addr: u32) -> u16 {
         let addr = addr & !1;
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            return self.math.read16(addr);
+        }
         if addr & !3 == 0x0410_0000 {
             // A narrow read of the receive FIFO still pops one word; software does this to
             // collect a halfword message without draining twice.
@@ -580,6 +595,10 @@ impl NdsBus {
 
     fn io_write16(&mut self, core: Core, addr: u32, value: u16) {
         let addr = addr & !1;
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            self.math.write16(addr, value);
+            return;
+        }
         if self.irq[core as usize].write16(addr, value) {
             return;
         }
@@ -635,6 +654,9 @@ impl NdsBus {
     }
 
     fn io_read8(&mut self, core: Core, addr: u32) -> u8 {
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            return self.math.read8(addr);
+        }
         if let Some(value) = self.irq[core as usize].read8(addr) {
             return value;
         }
@@ -666,6 +688,10 @@ impl NdsBus {
     }
 
     fn io_write8(&mut self, core: Core, addr: u32, value: u8) {
+        if core == Core::Arm9 && MathUnits::owns(addr) {
+            self.math.write8(addr, value);
+            return;
+        }
         if self.irq[core as usize].write8(addr, value) {
             return;
         }
@@ -1495,12 +1521,13 @@ impl System for NdsSystem {
         "Nintendo DS"
     }
 
-    /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag, and to 3 when the
-    /// cartridge gained its transfer-completion latch. Both are one bit that decides whether
-    /// something *will* happen, so a state written without them loads into a machine that is
-    /// waiting for an event nobody is going to deliver.
+    /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag, to 3 when the cartridge
+    /// gained its transfer-completion latch, and to 4 when the ARM9's divider and square-root unit
+    /// arrived. The first two are one bit that decides whether something *will* happen, so a state
+    /// written without them loads into a machine waiting for an event nobody will deliver; the
+    /// third is a block of operands a game may be part-way through writing.
     fn state_version(&self) -> u32 {
-        3
+        4
     }
 
     fn set_input(&mut self, input: InputState) {
@@ -1599,6 +1626,7 @@ impl System for NdsSystem {
             InterruptController::new(Core::Arm9),
             InterruptController::new(Core::Arm7),
         ];
+        self.bus.math = MathUnits::new();
         self.bus.timers = [TimerBlock::new(); 2];
         self.bus.dma = [
             DmaController::new(Core::Arm9),
@@ -1667,6 +1695,7 @@ impl Savable for NdsSystem {
         for controller in &self.bus.irq {
             controller.save(w);
         }
+        self.bus.math.save(w);
         for block in &self.bus.timers {
             block.save(w);
         }
@@ -1704,6 +1733,7 @@ impl Savable for NdsSystem {
         for controller in &mut self.bus.irq {
             controller.load(r)?;
         }
+        self.bus.math.load(r)?;
         for block in &mut self.bus.timers {
             block.load(r)?;
         }

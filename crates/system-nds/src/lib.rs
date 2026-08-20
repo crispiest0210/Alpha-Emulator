@@ -7,6 +7,7 @@
 //! last. See `README.md` for the authoritative status table.
 //!
 //! Implemented: the dual-CPU memory map ([`memory`]), the BIOS calls both cores make ([`bios`]),
+//! the ARM9's divider and square-root unit ([`math`]),
 //! VRAM bank mapping ([`vram`]), both 2D
 //! engines ([`engine2d`]), the 3D core ([`gpu3d`]), the sixteen-channel sound hardware ([`apu`]),
 //! the inter-processor
@@ -29,9 +30,10 @@
 //! NitroFS filesystem out of the ROM by card DMA, finished inside ten frames, and its whole
 //! interface on screen. The accuracy suite runs both; see `testing/harness`'s `NDS_ROMS`.
 //!
-//! What the second one does *not* do is draw its 3D scene, though it enables the layer and submits
-//! geometry every frame. That is the largest open question about this crate, and it is tracked in
-//! the suite rather than left to be found.
+//! The second one also draws: a textured, normal-mapped 3D scene, checked against the reference
+//! screenshot its author committed — mean absolute difference 6.6 of 255. What made it draw was
+//! not a change to the 3D core at all but [`math`], the ARM9's divider, without which every matrix
+//! libnds computes is a matrix of zeros.
 //!
 //! Worth knowing when reading the rest of this crate: getting there took five fixes, and **four of
 //! them were not in this crate**. Two were missing ARMv5 behaviours in `cpu-arm946e` — THUMB
@@ -63,6 +65,7 @@ pub mod gpu3d;
 pub mod input;
 pub mod ipc;
 pub mod irq;
+pub mod math;
 pub mod memory;
 pub mod save;
 pub mod system;
@@ -79,6 +82,7 @@ pub use gpu3d::Gpu3d;
 pub use input::Input;
 pub use ipc::Ipc;
 pub use irq::InterruptController;
+pub use math::MathUnits;
 pub use memory::{Arm7Region, Arm9Region, NdsMemory, WramSplit};
 pub use save::SaveChip;
 pub use system::{NdsBus, NdsSystem};

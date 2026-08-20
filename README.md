@@ -29,7 +29,7 @@ There are no released builds yet, but all four systems run. The table below refl
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
-| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs a real libnds homebrew binary to a stable, correct picture** — it prints its text on the sub screen and the frame is identical from frame 60 to frame 240. That is one program, not a commercial game: no retail title has been tried. Both CPUs, both 2D engines, the 3D core, sound, and saves are built and unit-tested. See below |
+| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene checked against the author's reference screenshot. Two programs, not a commercial game: no retail title has been tried. See below |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
 speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game — see
@@ -168,8 +168,8 @@ program prints when launched with no argv. The picture is byte-identical at 60, 
 frames and reproduces exactly across runs, so it is a stable frame rather than a moment caught
 during startup.
 
-Two real programs have now found **six** bugs in a machine whose unit tests all passed, and four of
-them were not in the DS crate at all. Each is worth knowing about, because each presented the same
+Two real programs have now found **seven** bugs in a machine whose unit tests all passed, and four
+of them were not in the DS crate at all. Each is worth knowing about, because each presented the same
 way: the machine running at full speed with nothing on screen, or nearly nothing.
 
 - **THUMB `BLX` (register) was decoding as `BX`.** One bit apart, and ARMv4T reads that bit as part
@@ -188,14 +188,20 @@ way: the machine running at full speed with nothing on screen, or nearly nothing
   its work RAM when the ARM7 owns all 32 KiB of the shared block. With any other split a 62 KiB
   binary is copied into a 16 KiB window and wraps four times over itself.
 - **The ARM9's boot stacks**, which were the ARM7's addresses — memory the ARM9 cannot see.
-- **`CARD_COMMAND` was one big-endian word rather than eight bytes at eight addresses.** That reads
-  a 32-bit command write correctly and puts every *byte* write at the mirror of its own position —
-  and libnds writes the command a byte at a time, so a real driver's `0xB7` arrived as `0x68`.
-
-A second homebrew, this one reading its own cartridge, found the last of those and confirmed the
-rest of the card path: it streams about 36 KiB of NitroFS out of its ROM by card DMA in the first
-ten frames and draws its whole interface. Its 3D scene does not appear, which is the next thing to
-look at and is tracked as a known failure rather than hidden.
+- **`CARD_COMMAND` was one big-endian word rather than eight bytes at eight addresses**, which
+  reads a 32-bit command write correctly and mirrors every byte write. libnds writes the command a
+  byte at a time, so a real driver's `0xB7` arrived as `0x68`.
+- **The ARM9's hardware divider and square-root unit did not exist.** ARMv5 has no divide
+  instruction, so libnds routes its whole fixed-point maths library through those registers —
+  including every projection matrix. Unimplemented they read as zero, so every division returned
+  zero, every matrix built from one was a matrix of zeros, and every vertex multiplied by it
+  collapsed to the origin. A 3D program submitted its geometry perfectly and drew nothing, which
+  looks exactly like a rasteriser bug and is not one.
+A second homebrew, this one reading its own cartridge and drawing in three dimensions, found the
+last two: it streams about 36 KiB of NitroFS out of its ROM by card DMA in the first ten frames,
+draws its whole interface, and renders its normal-mapped scene. That scene is checked against the
+author's own screenshot, committed upstream — mean absolute difference 6.6 of 255, with 98.6% of
+pixels within 24.
 
 **Implemented:**
 
@@ -221,6 +227,8 @@ look at and is tracked as a known failure rather than hidden.
   the same ones — `Div`, `Sqrt`, `CpuSet`, `CpuFastSet`, `GetCRC16`, the five decompressors, and
   `IntrWait`/`VBlankIntrWait` answered against the flag word each core's BIOS keeps in a different
   place. No BIOS image is vendored and none is needed.
+- **The hardware divider and square-root unit**, which is how an ARM9 divides at all — three
+  division widths, an integer root over 32 or 64 bits, and the divide-by-zero flag software checks.
 - IPC (both FIFOs and `IPCSYNC`), both interrupt controllers, eight timers, eight DMA channels, the
   cartridge transfer interface, direct boot, and save states covering all of it.
 - **Cartridge streaming end to end**: a `ROMCTRL` transfer arms whichever core's DMA channel is set
@@ -239,11 +247,6 @@ look at and is tracked as a known failure rather than hidden.
   express a bus that blocks a CPU part-way through an instruction.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
   card present looks like.
-- **3D geometry that is submitted but never appears**, in at least one real program. The NitroFS
-  homebrew in the corpus enables the 3D layer and queues 39 polygons a frame, and the top screen
-  stays at the clear colour. Its 2D half is correct, so this is a rendering gap rather than a
-  broken machine — but it is the DS's largest open question, and it is tracked in the accuracy
-  suite rather than left to be discovered.
 - Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
   and the per-line sprite budget.
 - **Four BIOS calls that would have to be guessed at**: `BitUnPack`, `SoftReset`, the ARM7's
@@ -301,6 +304,7 @@ Component status:
 | `system-nds` VRAM — nine banks, every `VRAMCNT` mapping, overlap, precomputed page table | done and tested |
 | `system-nds` IPC — `IPCSYNC`, both FIFOs, edge-triggered interrupts | done and tested; driven end to end by two real programs on the two cores |
 | `system-nds` interrupt controllers, timers, DMA | done and tested; per-core source masks, 21-bit ARM9 DMA counts |
+| `system-nds` ARM9 divider and square-root unit | done and tested; all three division widths, both root widths, the divide-by-zero flag and its documented results. Instant rather than timed, so the busy bit always reads clear |
 | `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
@@ -309,7 +313,7 @@ Component status:
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
 | `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
-| `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
+| `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested, and **validated against a real program's own reference screenshot**; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
 | `system-nds` BIOS calls — two per-core tables, `IntrWait` against each core's flag word, decompressors | done and tested; **`BitUnPack`, `SoftReset`, `Sleep`, and the three ARM7 sound tables log and return rather than guessing** |
 | `system-nds` assembly — `System` impl, two bus views, dual-core frame loop, BIOS interrupt wrapper | done; draws both screens and produces audio, and **runs a real libnds binary to a stable, correct picture** — validated in the accuracy suite against the text the program prints |
 | `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |

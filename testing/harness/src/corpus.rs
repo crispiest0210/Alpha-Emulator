@@ -444,9 +444,11 @@ pub const GB_ROMS: &[TestRom] = &[
 
 /// The Nintendo DS, as two homebrew applications.
 ///
-/// The first checks that a program *runs*; the second checks that it can read its own cartridge,
-/// which is a different machine entirely — `ROMCTRL`, a DMA channel on the card start-timing, and
-/// the completion interrupt, none of which the first one touches.
+/// The first checks that a program *runs*; the second checks that it can read its own cartridge
+/// and draw in three dimensions, which is a different machine entirely — `ROMCTRL`, a DMA channel
+/// on the card start-timing, the completion interrupt, the hardware divider every projection
+/// matrix is built with, and the whole geometry and rasterisation pipeline. The first touches none
+/// of it.
 ///
 /// # Why homebrew applications rather than a test suite
 ///
@@ -497,17 +499,24 @@ pub const NDS_ROMS: &[TestRom] = &[
         convention: Convention::Framebuffer,
         hardware: Hardware::Nds,
         max_frames: 120,
-        // Not recorded, because half of this picture is wrong — see below. A hash would freeze that
-        // half in place and make fixing it look like a regression.
-        expected_hash: None,
-        expected_failure: Some(
-            "reads its cartridge and does not draw its scene. The cartridge half works: 72 `0xB7` \
-         commands stream about 36 KiB of NitroFS out of the ROM by card DMA inside the first ten \
-         frames and then stop, and the program draws its whole interface on the sub screen in \
-         readable text. The 3D half does not appear — the layer is enabled and geometry is being \
-         submitted, 39 polygons of it, but the top screen stays at the clear colour. A 3D gap \
-         rather than a cartridge one, and the reason no hash is recorded",
-        ),
+        // **Validated against the author's own screenshot**, which is committed upstream at
+        // `images/screenshot.png` — the top screen at 3x. Box-filtered back down to 256x192 and
+        // compared pixel for pixel against this machine's top screen:
+        //
+        //     mean absolute difference 6.6 of 255, and 98.6% of pixels within 24
+        //
+        // The floor's texture, its perspective, and the light falling across it all line up. What
+        // does not is the small white quad marking the second light source: it sits at the right
+        // edge upstream and is off-screen here, and the red quad marking the first is present but
+        // a few pixels out. Both are consistent with a screenshot taken after moving the lights —
+        // which this program's own controls invite — but that is unproven, and it is the part of
+        // this picture to suspect first if the hash below ever needs changing.
+        //
+        // The reference image is *not* committed, same rule as the ROMs. To redo the comparison,
+        // fetch `https://raw.githubusercontent.com/rmn20/NormalmappingDS/master/images/
+        // screenshot.png` and compare it against `--save-frame`'s output.
+        expected_hash: Some("15c0412432a12737"),
+        expected_failure: None,
         licence: "CC0-1.0 (rmn20). Fetched from the repository, never committed.",
     },
 ];

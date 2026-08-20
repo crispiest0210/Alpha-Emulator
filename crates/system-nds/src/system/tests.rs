@@ -1259,3 +1259,87 @@ fn a_block_larger_than_the_channel_re_arms_until_it_is_drained() {
         "and one completion at the end of the whole block"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The ARM9's divider and square-root unit.
+//
+// ARMv5TE has no divide instruction, so these registers are how a DS program divides. libnds runs
+// its whole fixed-point maths library through them, which means a machine without them returns
+// zero from every division a program makes — and builds every matrix out of those zeroes.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn an_arm9_program_can_divide_and_take_a_square_root() {
+    // The exact operands a libnds `divf32` produces: the numerator shifted up twelve places, in
+    // the 64-bit-over-32-bit mode that exists to give it the room.
+    let arm9 = [
+        // DIVCNT = 1, the 64/32 mode.
+        vec![mov_imm(0, 1)],
+        load(1, 0x0400_0280),
+        vec![str_word(0, 1)],
+        load(0, 0x0033_2000),
+        load(1, 0x0400_0290),
+        vec![str_word(0, 1)],
+        vec![mov_imm(0, 0)],
+        load(1, 0x0400_0294),
+        vec![str_word(0, 1)],
+        load(0, 0x2FB),
+        load(1, 0x0400_0298),
+        vec![str_word(0, 1)],
+        // SQRTCNT = 0, the 32-bit input.
+        vec![mov_imm(0, 0)],
+        load(1, 0x0400_02B0),
+        vec![str_word(0, 1)],
+        load(0, 10_000),
+        load(1, 0x0400_02B8),
+        vec![str_word(0, 1)],
+        // Read all three answers back out and park them in main RAM.
+        load(1, 0x0400_02A0),
+        vec![ldr_word(0, 1)],
+        load(1, 0x0202_0000),
+        vec![str_word(0, 1)],
+        load(1, 0x0400_02A8),
+        vec![ldr_word(0, 1)],
+        load(1, 0x0202_0004),
+        vec![str_word(0, 1)],
+        load(1, 0x0400_02B4),
+        vec![ldr_word(0, 1)],
+        load(1, 0x0202_0008),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&arm9, &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert_eq!(word_at(&nds, 0x0202_0000), 4391, "0x332000 / 0x2FB");
+    assert_eq!(word_at(&nds, 0x0202_0004), 195, "and its remainder");
+    assert_eq!(word_at(&nds, 0x0202_0008), 100, "sqrt(10000)");
+}
+
+#[test]
+fn the_arm7_has_neither_unit_and_sees_nothing_at_those_addresses() {
+    // They are ARM9-only, and answering them on the ARM7 would be inventing hardware. Its I/O
+    // space has nothing there, so a read comes back as the open bus every unclaimed address does.
+    let arm7 = [
+        load(0, 100),
+        load(1, 0x0400_0290),
+        vec![str_word(0, 1)],
+        load(0, 7),
+        load(1, 0x0400_0298),
+        vec![str_word(0, 1)],
+        load(1, 0x0400_02A0),
+        vec![ldr_word(0, 1)],
+        load(1, 0x0380_2000),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&[SPIN], &arm7);
+    nds.step_frame(InputState::default());
+    let answered = nds
+        .bus()
+        .memory
+        .read_wide_arm7(0x0380_2000, 4)
+        .expect("the ARM7's own work RAM");
+    assert_eq!(answered, 0, "no divider on this core");
+}
