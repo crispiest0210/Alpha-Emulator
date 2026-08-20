@@ -23,15 +23,21 @@
 //!
 //! # What a real ROM does with all this
 //!
-//! It boots and does not finish booting, and that is worth stating here rather than only in
-//! `README.md`. A libnds application loads both binaries, runs both cores, has every BIOS call it
-//! makes answered, and gets through libnds's startup far enough to configure VRAM, enable the sub
-//! engine, and set up a text console — and then the ARM9 pops a corrupted return address off its
-//! stack and runs away before printing anything. The accuracy suite runs that ROM and tracks it as
-//! a known failure; see `testing/harness`'s `NDS_ROMS`.
+//! It runs. A libnds application loads both binaries, runs both cores, has every BIOS call it
+//! makes answered, and draws its text on the sub screen to a frame that is byte-identical from
+//! frame 60 to frame 240. The accuracy suite runs it and checks the picture; see
+//! `testing/harness`'s `NDS_ROMS`.
 //!
-//! Every DS claim in this crate should be read against that. The units are built and tested; the
-//! machine they assemble into does not yet run somebody else's software.
+//! Worth knowing when reading the rest of this crate: getting there took five fixes, and **four of
+//! them were not in this crate**. Two were missing ARMv5 behaviours in `cpu-arm946e` — THUMB
+//! `BLX (register)` decoding as `BX`, and no interworking on a load into `R15` — and two were in
+//! direct boot, which handed the ARM7 a memory map its binary could not live in and gave the ARM9
+//! the ARM7's stack pointers. Every one of them was invisible to 376 passing unit tests, and every
+//! one presented identically: a machine running at full speed with nothing on screen.
+//!
+//! That is the argument for keeping a real program in the corpus. One homebrew binary is worth
+//! more than another hundred synthetic tests, because it exercises the joins rather than the
+//! parts.
 //!
 //! # Wifi is out of scope
 //!

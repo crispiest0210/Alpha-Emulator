@@ -29,10 +29,11 @@ There are no released builds yet, but all four systems run. The table below refl
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
-| Nintendo DS | ⚠️ | ❌ | ❌ | **Does not yet run real software, and this row said otherwise until it was measured.** The hardware is real and tested — both CPUs, both 2D engines, the 3D core, sound, saves — and a hand-written test program drives all of it. A libnds homebrew binary gets as far as initialising video and setting up a text console, and then its ARM9 runs away; see below. Treat every other DS claim here as "built and unit-tested", not as "a game works" |
+| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs a real libnds homebrew binary to a stable, correct picture** — it prints its text on the sub screen and the frame is identical from frame 60 to frame 240. That is one program, not a commercial game: no retail title has been tried. Both CPUs, both 2D engines, the 3D core, sound, and saves are built and unit-tested. See below |
 
-**Three systems boot with picture and sound and play commercial games at full speed. The fourth,
-the DS, does not yet run real software** — see its section below for exactly how far it gets. The Game Boy and Game Boy Color are the two held to a full accuracy bar; see the notes
+**All four systems boot with picture and sound, and three of them play commercial games at full
+speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game — see
+its section below. The Game Boy and Game Boy Color are the two held to a full accuracy bar; see the notes
 below each of the other two. The application has a
 ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
 a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
@@ -157,22 +158,25 @@ the cycle column said why.
 
 DS support is real but newer, and is the start of DS emulation here rather than the end of it. The
 bar it was built to is "runs good homebrew and simple commercial titles correctly", not parity with
-hardware. **It does not clear that bar yet**, and the paragraph below is the honest version of a
-claim this file used to make without checking.
+hardware. It clears the homebrew half of that bar; no commercial title has been tried.
 
-**Where a real ROM gets to.** `cargo xtask fetch-test-roms` now pulls a libnds application —
-`argvTest` out of devkitPro's `nds-hb-menu` release — and the accuracy suite runs it. It boots:
-both binaries load, both cores run, every BIOS call it makes is answered, the ARM7 settles into its
-vertical-blank wait, and the ARM9 gets through libnds's startup far enough to configure the VRAM
-banks, enable the sub engine, and set up a text console with the correct tiles, map, and palette.
-Then it prints nothing: part-way through startup the ARM9 pops a corrupted return address off its
-stack and runs away into memory. That is the next thing to fix, and it is tracked as a known
-failure in the suite rather than hidden. What it is *not* is a missing BIOS call — nothing logs as
-unimplemented on that path.
+**What a real ROM does.** `cargo xtask fetch-test-roms` pulls a libnds application — `argvTest` out
+of devkitPro's `nds-hb-menu` release — and the accuracy suite runs it. It boots and works: both
+binaries load, both cores run, every BIOS call is answered with nothing logged as unimplemented,
+and it draws `No arguments!` on the sub screen in libnds's own font — which is exactly what that
+program prints when launched with no argv. The picture is byte-identical at 60, 90, 120 and 240
+frames and reproduces exactly across runs, so it is a stable frame rather than a moment caught
+during startup.
 
-Getting that far took four fixes beyond the BIOS itself, each of which is worth knowing about
-because each one presented as "the machine runs at full speed and shows nothing":
+That one program found **five** bugs in a machine whose 376 unit tests all passed, and four of them
+were not in the DS crate at all. Each is worth knowing about, because each presented the same way:
+the machine running at full speed with nothing on screen.
 
+- **THUMB `BLX` (register) was decoding as `BX`.** One bit apart, and ARMv4T reads that bit as part
+  of a should-be-zero field — so the branch was taken and `LR` was never written, leaving the
+  callee to return to some earlier caller's address and unwind a stack frame that had gone. A
+  compiler emits `blx` for every indirect call, so a program survives exactly as long as it takes
+  to make its first one.
 - **ARMv5 interworking on a load into `R15`.** `pop {r4, pc}` takes its instruction set from bit 0
   of the loaded address on an ARM9 and does not on an ARM7. A compiler emits that for every THUMB
   function returning to an ARM caller, so a core that gets it wrong decodes ARM words as THUMB
@@ -290,7 +294,7 @@ Component status:
 | `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
 | `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
 | `system-nds` BIOS calls — two per-core tables, `IntrWait` against each core's flag word, decompressors | done and tested; **`BitUnPack`, `SoftReset`, `Sleep`, and the three ARM7 sound tables log and return rather than guessing** |
-| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop, BIOS interrupt wrapper | done; draws both screens and produces audio. **A real libnds binary reaches its console setup and then loses a return address off the ARM9's stack** — tracked as a known failure in the accuracy suite |
+| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop, BIOS interrupt wrapper | done; draws both screens and produces audio, and **runs a real libnds binary to a stable, correct picture** — validated in the accuracy suite against the text the program prints |
 | `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |
 | `system-nds` diagnostics — VRAM bank map, per-layer decode, dual-core state dump | done and tested; side-effect free, so a dump can be taken from anywhere |
 | `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |

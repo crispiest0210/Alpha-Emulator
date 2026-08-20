@@ -354,6 +354,27 @@ impl Arm946e {
             return Some(3);
         }
 
+        // BLX (register): `0100 0111 1 H2 Rm 000`.
+        //
+        // The one bit between this and ARMv4T's `BX` is bit 7, which ARMv4T reads as part of a
+        // should-be-zero field and ignores — so the shared core takes the branch and never writes
+        // `LR`. The callee then returns to whatever `LR` happened to hold, which is some earlier
+        // caller's return address, and the stack unwinds into a frame that is not there.
+        //
+        // That is not a rare encoding. A compiler emits it for every indirect call — through a
+        // function pointer, through a jump table, through anything it cannot resolve at link
+        // time — so a DS program survives exactly as long as it takes to make its first one. A
+        // libnds `hello world` reached its console setup and no further for precisely this reason.
+        if instr & 0xFF87 == 0x4780 {
+            // `regs.pc` already points past this instruction, and the low bit marks the return
+            // address as THUMB for the `BX` that will eventually consume it.
+            let return_address = self.core.regs.pc() | 1;
+            let target = self.core.reg(((instr >> 3) & 0xF) as usize);
+            self.core.set_reg(14, return_address);
+            self.core.branch_exchange(target);
+            return Some(3);
+        }
+
         // BKPT
         if instr & 0xFF00 == 0xBE00 {
             self.core.raise_prefetch_abort();

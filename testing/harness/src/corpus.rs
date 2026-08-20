@@ -456,6 +456,10 @@ pub const GB_ROMS: &[TestRom] = &[
 ///
 /// It came from `nds-hb-menu`'s release archive because that is where devkitPro publish a built
 /// libnds binary; nothing here is committed, same rule as every other ROM.
+///
+/// It found five bugs in a machine whose own 376 unit tests all passed, four of them outside the
+/// DS crate entirely — two missing ARMv5 behaviours in the shared CPU core among them. That is the
+/// argument for keeping a real program in the corpus rather than only synthetic tests.
 pub const NDS_ROMS: &[TestRom] = &[TestRom {
     name: "nds_libnds_argv_test",
     url: "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
@@ -464,16 +468,18 @@ pub const NDS_ROMS: &[TestRom] = &[TestRom {
     hardware: Hardware::Nds,
     // It has a picture within a few frames or it never will.
     max_frames: 60,
-    // Deliberately not recorded. Nothing here has been checked against hardware or against
-    // another emulator, and a hash of a wrong picture is worse than no hash: it freezes the
-    // wrong answer in place and makes fixing it look like a regression.
-    expected_hash: None,
-    expected_failure: Some(
-        "boots: both cores run, libnds initialises video and sets up the sub-screen console with \
-         the right tiles, map and palette — but the console prints nothing. The ARM9 pops a \
-         corrupted return address off its stack part-way through startup and runs away. Not a \
-         BIOS gap: every SWI it makes is answered, and no unimplemented call is logged",
-    ),
+    // **Validated by reading the picture**, which is possible here in a way it is not for a
+    // pattern of pixels: the sub screen renders the text `No arguments!`, which is exactly what
+    // `argvTest` prints when it is launched with no argv, in the font libnds ships. The top screen
+    // is white because `consoleDemoInit` only powers the sub engine, which is also correct.
+    //
+    // That is weaker than `dmg-acid2`'s pixel-exact comparison against a published reference and
+    // stronger than "something rendered": a machine that gets the console, the font, the palette,
+    // the interrupt path, and every BIOS call it makes wrong in any visible way does not spell a
+    // sentence. The picture is identical at 60, 90, 120 and 240 frames and reproduces exactly
+    // across runs, so the frame is genuinely stable rather than caught mid-startup.
+    expected_hash: Some("a9698c660a53ffd4"),
+    expected_failure: None,
     licence: "GPL-2.0 (devkitPro nds-hb-menu). Fetched from the upstream release, never committed.",
 }];
 

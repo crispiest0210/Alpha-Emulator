@@ -696,6 +696,69 @@ fn a_wide_access_inside_tcm_is_served_by_tcm_and_never_reaches_the_bus() {
     assert!(bus.widths.is_empty(), "{:?}", bus.widths);
 }
 
+/// A core in THUMB state at [`ORG`], with `halfwords` loaded there.
+fn thumb_setup(halfwords: &[u16]) -> (Arm946e, TestBus) {
+    let mut bus = TestBus::new();
+    for (index, half) in halfwords.iter().enumerate() {
+        let at = bus.index(ORG + index as u32 * 2);
+        bus.mem[at..at + 2].copy_from_slice(&half.to_le_bytes());
+    }
+    let cpu = Arm946e::new(BootState {
+        pc: ORG,
+        mode: Mode::System,
+        thumb: true,
+        sp: STACK,
+        irq_disabled: false,
+        fiq_disabled: false,
+    });
+    (cpu, bus)
+}
+
+#[test]
+fn thumb_blx_register_captures_a_return_address_where_bx_does_not() {
+    // `BX` and `BLX` differ by bit 7 alone, and ARMv4T reads that bit as part of a should-be-zero
+    // field — so a core that only implements `BX` takes this branch and silently leaves `LR`
+    // holding some earlier caller's return address. The callee then "returns" into a stack frame
+    // that was unwound long ago.
+    //
+    // A compiler emits `blx` for every indirect call, so this is not an exotic encoding: it is
+    // what stopped a libnds `hello world` a few hundred instructions into its startup.
+    let (mut cpu, mut bus) = thumb_setup(&[0x4788]); // blx r1
+    cpu.set_reg(1, 0x0200_1000); // an ARM target: bit 0 clear
+    let cycles = step(&mut cpu, &mut bus);
+
+    assert_eq!(
+        cpu.reg(14),
+        ORG + 2 + 1,
+        "the return address, with the low bit marking it as THUMB"
+    );
+    assert!(!cpu.is_thumb(), "and bit 0 of the target chose ARM state");
+    assert_eq!(cpu.program_counter(), 0x0200_1000);
+    assert_eq!(cycles, 3);
+
+    // The same encoding without bit 7 is `bx`, which must leave `LR` alone.
+    let (mut cpu, mut bus) = thumb_setup(&[0x4708]); // bx r1
+    cpu.set_reg(1, 0x0200_1001);
+    cpu.set_reg(14, 0xDEAD_BEEF);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.reg(14), 0xDEAD_BEEF, "bx does not link");
+    assert!(cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x0200_1000);
+}
+
+#[test]
+fn thumb_blx_register_reads_its_target_from_the_full_four_bit_field() {
+    // The register number spans bits 6-3, so `H2` is the high bit of `Rm` rather than a flag of
+    // its own. Masking it off reads the wrong register, which for a high register is usually a
+    // value that looks plausible enough to chase for a while.
+    let (mut cpu, mut bus) = thumb_setup(&[0x47C0]); // blx r8
+    cpu.set_reg(8, 0x0200_2001);
+    step(&mut cpu, &mut bus);
+    assert!(cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x0200_2000);
+    assert_eq!(cpu.reg(14), ORG + 2 + 1);
+}
+
 // ---------------------------------------------------------------------------
 // Interworking on a load into R15
 // ---------------------------------------------------------------------------
