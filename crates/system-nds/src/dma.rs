@@ -23,6 +23,14 @@
 //! what keeps this a unit with its own tests, and it is also the only arrangement that works —
 //! the two cores' DMA controllers move data through *different* address spaces.
 //!
+//! # Who arms a channel
+//!
+//! Nothing here decides *when* a transfer starts; [`crate::system`] calls the `on_*` triggers as
+//! the events they name happen. That split is easy to get half-right: every one of these timings
+//! is inert until something calls its trigger, and a channel whose trigger nobody calls waits
+//! silently rather than failing. [`DmaController::on_card_ready`] was exactly that for a while —
+//! decoded, tested at this crate's boundary, and armed by no caller in the machine.
+//!
 //! # What is not modelled
 //!
 //! Transfers are performed in one go rather than interleaved with CPU execution, so a game that

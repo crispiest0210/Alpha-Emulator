@@ -1005,3 +1005,243 @@ fn an_intr_wait_that_is_never_satisfied_still_hands_the_frame_loop_back() {
     let out = nds.step_frame(InputState::default());
     assert_eq!(out.cycles_elapsed.0, CYCLES_PER_FRAME as u64);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Cartridge streaming.
+//
+// The canonical DS asset load is three pieces of hardware cooperating: `ROMCTRL` starts a
+// transfer, a DMA channel with the card start-timing pulls the words out of `CARD_DATA`, and a
+// card interrupt says the block arrived. Testing them separately says nothing about whether they
+// are connected, and they were not — the channel was armed by nobody and the interrupt raised by
+// nobody, so a game reached its first asset load and stopped there.
+// ---------------------------------------------------------------------------------------------
+
+/// Where the test plants data for a card read to find, and how much.
+///
+/// Past both binaries in [`rom`]'s layout and inside the 32 KiB image, so the read is a plain
+/// linear one rather than the 4 KiB wrap a higher address would take.
+const CARD_DATA_AT: usize = 0x7000;
+const CARD_BYTES: usize = 512;
+
+/// The 512 bytes a card read should deliver, as words.
+fn card_payload() -> Vec<u32> {
+    (0..CARD_BYTES as u32 / 4)
+        .map(|index| 0xC0DE_0000 + index)
+        .collect()
+}
+
+/// An ARM9 program that reads [`CARD_BYTES`] bytes from the card into main RAM by DMA.
+///
+/// `auxspicnt` is written as given so a test can choose whether the completion interrupt is
+/// enabled; everything else is the sequence a driver actually issues, in the order it issues it.
+fn card_dma_program(auxspicnt: u32) -> Vec<u32> {
+    // Channel 0: enable, interrupt on completion, start timing 5 (the card slot), 32-bit units,
+    // source fixed on the data port, destination incrementing. Not repeating, so the channel
+    // disables itself after the one block — which is how the test can tell it ran exactly once.
+    const CONTROL: u32 = 0x8000 | 0x4000 | (5 << 11) | 0x0400 | 0x0100;
+    let words = (CARD_BYTES / 4) as u32;
+
+    [
+        // DMA0SAD = CARD_DATA.
+        load(0, 0x0410_0010),
+        load(1, 0x0400_00B0),
+        vec![str_word(0, 1)],
+        // DMA0DAD = main RAM.
+        load(0, 0x0202_0000),
+        load(1, 0x0400_00B4),
+        vec![str_word(0, 1)],
+        // DMA0CNT: the count and the control register really are one word here.
+        load(0, words | (CONTROL << 16)),
+        load(1, 0x0400_00B8),
+        vec![str_word(0, 1)],
+        // AUXSPICNT, whose bit 14 decides whether completion is an interrupt or a poll.
+        load(0, auxspicnt),
+        load(1, 0x0400_01A0),
+        vec![strh(0, 1)],
+        // The command: 0xB7 and a four-byte big-endian address, spread across two registers.
+        load(0, 0xB700_0000 | (CARD_DATA_AT as u32 >> 8)),
+        load(1, 0x0400_01A8),
+        vec![str_word(0, 1)],
+        load(0, ((CARD_DATA_AT as u32) & 0xFF) << 24),
+        load(1, 0x0400_01AC),
+        vec![str_word(0, 1)],
+        // ROMCTRL: block size 1 is 512 bytes — the field is an exponent over 0x100, not a byte
+        // count — and bit 31 starts the transfer.
+        load(0, 0x8100_0000),
+        load(1, 0x0400_01A4),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat()
+}
+
+/// Boot a machine whose cartridge has [`card_payload`] planted where the program will ask for it.
+fn booted_with_card_data(arm9: &[u32]) -> NdsSystem {
+    let mut image = rom(arm9, &[SPIN]);
+    for (index, word) in card_payload().iter().enumerate() {
+        let at = CARD_DATA_AT + index * 4;
+        image[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let mut nds = NdsSystem::default();
+    nds.load_cartridge(&image).unwrap();
+    nds
+}
+
+#[test]
+fn a_card_read_streams_into_main_ram_by_dma_and_raises_its_interrupt() {
+    let mut nds = booted_with_card_data(&card_dma_program(1 << 14));
+    nds.step_frame(InputState::default());
+
+    for (index, expected) in card_payload().iter().enumerate() {
+        assert_eq!(
+            word_at(&nds, 0x0202_0000 + index as u32 * 4),
+            *expected,
+            "word {index} of the block"
+        );
+    }
+    // And it stopped at the block boundary rather than running on into whatever followed.
+    assert_eq!(word_at(&nds, 0x0202_0000 + CARD_BYTES as u32), 0);
+
+    assert_ne!(
+        nds.bus().irq[Core::Arm9 as usize].flags() & sources::CARD_TRANSFER,
+        0,
+        "the card interrupt fires on the core that owns the slot"
+    );
+    assert_eq!(
+        nds.bus().irq[Core::Arm7 as usize].flags() & sources::CARD_TRANSFER,
+        0,
+        "and only on that core"
+    );
+}
+
+#[test]
+fn a_finished_card_transfer_clears_the_registers_a_polling_driver_watches() {
+    // The other half of the same event: a driver that does not use the interrupt watches
+    // `ROMCTRL`'s start bit and the channel's enable bit instead, and both have to come back down
+    // by themselves or it waits forever.
+    let mut nds = booted_with_card_data(&card_dma_program(1 << 14));
+    nds.step_frame(InputState::default());
+
+    let romctrl = nds.bus_mut().cart.read32(0x0400_01A4).unwrap();
+    assert_eq!(romctrl & (1 << 31), 0, "ROMCTRL start");
+    assert_eq!(romctrl & (1 << 23), 0, "ROMCTRL data ready");
+    let dmacnt = nds.bus().dma[Core::Arm9 as usize]
+        .read32(0x0400_00B8)
+        .unwrap();
+    assert_eq!(
+        dmacnt & (1 << 31),
+        0,
+        "the one-shot channel disabled itself"
+    );
+}
+
+#[test]
+fn the_card_interrupt_stays_quiet_when_auxspicnt_bit_14_is_clear() {
+    // Bit 14 is how a driver chooses polling over interrupts, and raising the interrupt anyway is
+    // not a harmless extra: `IF` gates the halt instruction, so a bit nobody acknowledges makes
+    // every later halt return immediately and the machine spins at full speed instead of idling.
+    let mut nds = booted_with_card_data(&card_dma_program(0));
+    nds.step_frame(InputState::default());
+
+    // The data still arrives — the enable is about the interrupt, not the transfer.
+    assert_eq!(word_at(&nds, 0x0202_0000), 0xC0DE_0000);
+    assert_eq!(
+        word_at(&nds, 0x0202_0000 + CARD_BYTES as u32 - 4),
+        0xC0DE_0000 + (CARD_BYTES as u32 / 4 - 1),
+        "the whole block, not just the first word"
+    );
+    assert_eq!(
+        nds.bus().irq[Core::Arm9 as usize].flags() & sources::CARD_TRANSFER,
+        0,
+        "but nothing is raised"
+    );
+}
+
+#[test]
+fn the_card_interrupt_is_raised_once_per_transfer_and_not_once_per_poll() {
+    // `ROMCTRL`'s start bit stays clear for as long as the card sits idle, so a completion test
+    // written as a level would re-raise on every quantum — thousands of times a frame. A driver
+    // that acknowledged it would be back inside its handler before it had returned from it.
+    let mut nds = booted_with_card_data(&card_dma_program(1 << 14));
+    nds.step_frame(InputState::default());
+    assert_ne!(
+        nds.bus().irq[Core::Arm9 as usize].flags() & sources::CARD_TRANSFER,
+        0
+    );
+
+    // Acknowledge it the way a handler does — ones clear `IF` — and run on. Nothing has started
+    // another transfer, so nothing should raise it again.
+    nds.bus_mut().irq[Core::Arm9 as usize].write32(0x0400_0214, sources::CARD_TRANSFER);
+    for _ in 0..3 {
+        nds.step_frame(InputState::default());
+    }
+    assert_eq!(
+        nds.bus().irq[Core::Arm9 as usize].flags() & sources::CARD_TRANSFER,
+        0,
+        "the interrupt belongs to the edge, not to the idle state after it"
+    );
+}
+
+#[test]
+fn the_card_channel_follows_the_slot_to_whichever_core_owns_it() {
+    // `EXMEMCNT` bit 11 hands the slot over, and a real boot does hand it over: the ARM7 loads the
+    // first blocks and then passes it to the ARM9. Everything about a transfer follows it, so a
+    // machine that assumed the ARM9 would arm the ARM9's channel for the ARM7's transfer.
+    let mut nds = booted_with_card_data(&[SPIN]);
+    assert_eq!(nds.bus().card_owner(), Core::Arm9);
+    nds.bus_mut().write16(Core::Arm9, 0x0400_0204, 1 << 11);
+    assert_eq!(nds.bus().card_owner(), Core::Arm7);
+}
+
+#[test]
+fn a_block_larger_than_the_channel_re_arms_until_it_is_drained() {
+    // Why `data_ready` is a level and not an edge. A driver reading a block larger than one
+    // channel's count sets the repeat bit and lets the channel re-arm for each further chunk, and
+    // the card holds its ready flag up until the last word leaves. An edge would arm once, move a
+    // quarter of the block, and leave the rest in the FIFO with the driver waiting on a completion
+    // that never comes.
+    const CHUNK: u32 = 32;
+    const CONTROL: u32 = 0x8000 | 0x4000 | (5 << 11) | 0x0400 | 0x0100 | 0x0200; // + repeat
+    let program = [
+        load(0, 0x0410_0010),
+        load(1, 0x0400_00B0),
+        vec![str_word(0, 1)],
+        load(0, 0x0202_0000),
+        load(1, 0x0400_00B4),
+        vec![str_word(0, 1)],
+        load(0, CHUNK | (CONTROL << 16)),
+        load(1, 0x0400_00B8),
+        vec![str_word(0, 1)],
+        load(0, 1 << 14),
+        load(1, 0x0400_01A0),
+        vec![strh(0, 1)],
+        load(0, 0xB700_0000 | (CARD_DATA_AT as u32 >> 8)),
+        load(1, 0x0400_01A8),
+        vec![str_word(0, 1)],
+        load(0, ((CARD_DATA_AT as u32) & 0xFF) << 24),
+        load(1, 0x0400_01AC),
+        vec![str_word(0, 1)],
+        load(0, 0x8100_0000),
+        load(1, 0x0400_01A4),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted_with_card_data(&program);
+    nds.step_frame(InputState::default());
+
+    // All four chunks, in order and end to end — the destination kept incrementing across the
+    // re-arms rather than restarting.
+    for (index, expected) in card_payload().iter().enumerate() {
+        assert_eq!(
+            word_at(&nds, 0x0202_0000 + index as u32 * 4),
+            *expected,
+            "word {index}, chunk {}",
+            index as u32 / CHUNK
+        );
+    }
+    assert_ne!(
+        nds.bus().irq[Core::Arm9 as usize].flags() & sources::CARD_TRANSFER,
+        0,
+        "and one completion at the end of the whole block"
+    );
+}

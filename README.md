@@ -215,6 +215,10 @@ the machine running at full speed with nothing on screen.
   place. No BIOS image is vendored and none is needed.
 - IPC (both FIFOs and `IPCSYNC`), both interrupt controllers, eight timers, eight DMA channels, the
   cartridge transfer interface, direct boot, and save states covering all of it.
+- **Cartridge streaming end to end**: a `ROMCTRL` transfer arms whichever core's DMA channel is set
+  to the card start-timing, the channel pulls the block out of the data port, and completion raises
+  the card interrupt when `AUXSPICNT` bit 14 asks for it. A block bigger than one channel's count
+  re-arms until it is drained, which is how a driver reads more than a channel can carry at once.
 
 **Not implemented, and visibly so rather than approximated:**
 
@@ -227,6 +231,11 @@ the machine running at full speed with nothing on screen.
   express a bus that blocks a CPU part-way through an instruction.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
   card present looks like.
+- **Cartridge streaming has not been driven by a real program.** The wiring is tested end to end by
+  a hand-written one — command `0xB7`, a card-timed DMA channel, 512 bytes into main RAM, the
+  completion interrupt — but none of the four libnds binaries to hand issue a single card command,
+  so nothing has exercised it through a real driver. Confirming that needs a homebrew that reads
+  its own cartridge (anything using NitroFS), and it is the next thing worth checking.
 - Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
   and the per-line sprite budget.
 - **Four BIOS calls that would have to be guessed at**: `BitUnPack`, `SoftReset`, the ARM7's
@@ -287,7 +296,7 @@ Component status:
 | `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
-| `system-nds` cartridge — header, direct boot, card transfers | done and tested; **no KEY1 encryption** |
+| `system-nds` cartridge — header, direct boot, card transfers, DMA streaming and the completion interrupt | done and tested end to end by a program that issues a card read and DMAs the block into main RAM; **no KEY1 encryption**, and no homebrew that reads its own cartridge has been run yet — see below |
 | `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; write timing is not modelled, and a cartridge that only ever writes partial pages cannot be identified |
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |

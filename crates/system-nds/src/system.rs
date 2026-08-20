@@ -740,17 +740,24 @@ impl NdsBus {
         }
     }
 
-    /// Whether this core currently owns the Slot-1 cartridge.
+    /// Which core currently owns the Slot-1 cartridge.
     ///
     /// `EXMEMCNT` bit 11 hands it to one core or the other, and a game moves it: the ARM7 loads
-    /// the first blocks during boot and then passes the slot to the ARM9.
-    fn owns_card(&self, core: Core) -> bool {
-        let owner = if self.exmemcnt & (1 << 11) != 0 {
+    /// the first blocks during boot and then passes the slot to the ARM9. Everything about a card
+    /// transfer follows the slot — which core's registers answer, which core's DMA channel pulls
+    /// the data, and which core's interrupt controller hears about it — so this is asked rather
+    /// than assumed in all three places.
+    pub(crate) fn card_owner(&self) -> Core {
+        if self.exmemcnt & (1 << 11) != 0 {
             Core::Arm7
         } else {
             Core::Arm9
-        };
-        core == owner
+        }
+    }
+
+    /// Whether this core currently owns the Slot-1 cartridge.
+    fn owns_card(&self, core: Core) -> bool {
+        core == self.card_owner()
     }
 }
 
@@ -1073,7 +1080,47 @@ impl NdsSystem {
             }
         }
         self.drain_events();
+        // Before the transfers, so a block that became ready during this quantum moves during it
+        // rather than waiting for the next one.
+        self.arm_card_dma();
         self.run_dma();
+        // And after, because the transfer that finishes a block is usually the one `run_dma` just
+        // performed. A driver that reads `CARD_DATA` with the CPU instead finishes it inside the
+        // stepping above, and this catches that too.
+        self.raise_card_interrupt();
+    }
+
+    /// Arm whichever DMA channel is waiting on the cartridge.
+    ///
+    /// This is the missing half of card streaming, and without it a card DMA is armed by nothing:
+    /// `step_frame` triggers DMA on horizontal and vertical blank and on nothing else, so a
+    /// channel set to start-timing "card slot" waits forever. The visible failure is not a crash —
+    /// a game boots, runs its startup, asks for its first asset, and sits in a loop waiting for a
+    /// transfer that has already put its data in the FIFO and has nobody to take it out.
+    fn arm_card_dma(&mut self) {
+        if !self.bus.cart.data_ready() {
+            return;
+        }
+        let owner = self.bus.card_owner();
+        self.bus.dma[owner as usize].on_card_ready();
+    }
+
+    /// Tell the owning core that a card transfer finished.
+    ///
+    /// Gated on `AUXSPICNT` bit 14, which is the enable a driver uses to choose between waiting on
+    /// an interrupt and polling `ROMCTRL`'s start bit. Raising it regardless would put a bit in
+    /// `IF` that a polling driver never acknowledges, and `IF` gates halt: the next `swiHalt`
+    /// would return immediately, every time, and the machine would spin at full speed instead of
+    /// idling.
+    fn raise_card_interrupt(&mut self) {
+        if !self.bus.cart.take_transfer_complete() {
+            return;
+        }
+        if !self.bus.cart.transfer_irq_enabled() {
+            return;
+        }
+        let owner = self.bus.card_owner();
+        self.bus.irq[owner as usize].raise(sources::CARD_TRANSFER);
     }
 
     /// Move what the IPC hardware, the video timing, and the keypad have latched into the two
@@ -1448,11 +1495,12 @@ impl System for NdsSystem {
         "Nintendo DS"
     }
 
-    /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag: a state written before
-    /// it does not carry that word, and loading one into this build would leave a core waiting
-    /// with no record of whether it had already discarded its flags.
+    /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag, and to 3 when the
+    /// cartridge gained its transfer-completion latch. Both are one bit that decides whether
+    /// something *will* happen, so a state written without them loads into a machine that is
+    /// waiting for an event nobody is going to deliver.
     fn state_version(&self) -> u32 {
-        2
+        3
     }
 
     fn set_input(&mut self, input: InputState) {

@@ -1049,3 +1049,39 @@ fn every_comparison_opcode_supports_the_p_form() {
         assert_eq!(cpu.mode(), Mode::System, "opcode {opcode:#06b}");
     }
 }
+
+#[test]
+fn a_load_into_pc_discards_bit_zero_on_this_core() {
+    // The ARMv4T half of the decision `Arm7Tdmi::interworking_loads` records. From ARMv5 on,
+    // `LDR pc`, `LDM {..., pc}` and `POP {..., pc}` all take their instruction set from bit 0 of
+    // the loaded address, exactly as `BX` does. This core predates that: the bit is discarded and
+    // the state does not change.
+    //
+    // Asserted here rather than only where the ARM9 turns it on, because this is the behaviour a
+    // GBA depends on — and the flag exists precisely so that adding the ARM9's behaviour could not
+    // quietly become the GBA's.
+    //
+    // `ldr pc, [r0]`, with the loaded address carrying the low bit set.
+    let (mut cpu, mut bus) = setup(&[0xE590_F000]);
+    bus.load_words(0x2000, &[0x0000_3001]);
+    cpu.set_reg(0, 0x2000);
+    step(&mut cpu, &mut bus);
+    assert!(!cpu.is_thumb(), "bit 0 does not select THUMB here");
+    assert_eq!(cpu.program_counter(), 0x3000, "and it is masked off the PC");
+
+    // `ldmia r0, {pc}`, same story.
+    let (mut cpu, mut bus) = setup(&[0xE890_8000]);
+    bus.load_words(0x2000, &[0x0000_3001]);
+    cpu.set_reg(0, 0x2000);
+    step(&mut cpu, &mut bus);
+    assert!(!cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x3000);
+
+    // And `bx`, which *is* an ARMv4T instruction, still interworks — so this is a property of the
+    // load rather than of the core being unable to enter THUMB at all.
+    let (mut cpu, mut bus) = setup(&[0xE12F_FF10]);
+    cpu.set_reg(0, 0x0000_3001);
+    step(&mut cpu, &mut bus);
+    assert!(cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x3000);
+}

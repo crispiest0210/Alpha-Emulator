@@ -13,6 +13,15 @@
 //! should start. Without it nothing runs, because this project vendors no BIOS or firmware image
 //! and never will.
 //!
+//! # A transfer is three pieces of hardware, not one
+//!
+//! This module only fills and drains the FIFO. Getting a block from the card into a game's memory
+//! takes two other things, and both live in [`crate::system`] because neither belongs to the card:
+//! a DMA channel set to the card start-timing, armed while [`NdsCartridge::data_ready`] holds, and
+//! the interrupt [`NdsCartridge::take_transfer_complete`] reports. Wiring one and not the others
+//! is not a partial feature — it is a game that asks for its first asset and waits forever, with
+//! the data sitting in this module's FIFO and nobody coming to take it out.
+//!
 //! # What is not implemented
 //!
 //! - **KEY1 encryption.** The secure area is encrypted with a key derived from the BIOS, which
@@ -133,6 +142,10 @@ pub struct NdsCartridge {
     spi_data: u8,
     romctrl: u32,
     command: [u8; 8],
+    /// Set when a transfer drains, and cleared by whoever reports it.
+    ///
+    /// The card interrupt is raised on the *edge*: see [`NdsCartridge::take_transfer_complete`].
+    completed: bool,
     /// Words still to be handed back through `CARD_DATA`.
     ///
     /// Materialised up front rather than streamed from an offset because two of the commands
@@ -156,6 +169,7 @@ impl NdsCartridge {
             command: [0; 8],
             pending: Vec::new(),
             read_index: 0,
+            completed: false,
             save: SaveChip::new(),
         })
     }
@@ -183,6 +197,7 @@ impl NdsCartridge {
             command: [0; 8],
             pending: Vec::new(),
             read_index: 0,
+            completed: false,
             save: SaveChip::new(),
         }
     }
@@ -269,8 +284,9 @@ impl NdsCartridge {
         if self.read_index < self.pending.len() {
             self.read_index += 1;
         }
-        if self.read_index >= self.pending.len() {
+        if self.read_index >= self.pending.len() && self.romctrl & romctrl::START != 0 {
             self.romctrl &= !(romctrl::DATA_READY | romctrl::START);
+            self.completed = true;
         }
         word
     }
@@ -385,7 +401,12 @@ impl NdsCartridge {
         self.pending.clear();
         self.read_index = 0;
         if words == 0 {
+            // A block size of zero moves no data but is still a transfer, and hardware still
+            // raises the interrupt for it. A driver uses one to send a command that has no reply
+            // — the encryption seeds, or the mode change out of the secure area — and waits on the
+            // interrupt exactly as it would for a real block.
             self.romctrl &= !(romctrl::DATA_READY | romctrl::START);
+            self.completed = true;
             return;
         }
 
@@ -435,14 +456,33 @@ impl NdsCartridge {
         0xC2 | ((megabytes - 1) << 8)
     }
 
-    /// Whether a transfer just finished, which is what raises the card interrupt.
-    pub fn transfer_complete(&self) -> bool {
-        self.romctrl & romctrl::START == 0 && !self.pending.is_empty()
+    /// Whether a transfer has finished since this was last asked.
+    ///
+    /// Consuming, rather than the plain predicate it looks like it should be. `ROMCTRL`'s start
+    /// bit stays clear from the moment a transfer ends until the next one begins, so a level test
+    /// would report "complete" on every poll for as long as the card sat idle — and since raising
+    /// an interrupt only sets a bit in `IF`, a driver that acknowledged it would be back inside
+    /// its own handler before it had finished returning from it. The interrupt belongs to the
+    /// edge, so the edge is what this reports.
+    pub fn take_transfer_complete(&mut self) -> bool {
+        std::mem::take(&mut self.completed)
     }
 
     /// Whether a word is waiting, which is what arms a card DMA.
+    ///
+    /// A level rather than an edge, and deliberately: a DMA channel whose word count is smaller
+    /// than the block re-arms for each further chunk, which is how a driver reads a block larger
+    /// than one channel's maximum.
     pub fn data_ready(&self) -> bool {
         self.romctrl & romctrl::DATA_READY != 0
+    }
+
+    /// `AUXSPICNT` bit 14: whether a completed transfer raises the card interrupt.
+    ///
+    /// Sharing a register with the save chip's chip-select is not a mistake in this code — the
+    /// two really do live in `AUXSPICNT` together on hardware.
+    pub fn transfer_irq_enabled(&self) -> bool {
+        self.auxspicnt & (1 << 14) != 0
     }
 
     pub fn reset(&mut self) {
@@ -455,6 +495,7 @@ impl NdsCartridge {
         self.command = [0; 8];
         self.pending.clear();
         self.read_index = 0;
+        self.completed = false;
     }
 }
 
@@ -472,6 +513,7 @@ impl Savable for NdsCartridge {
             w.write_u32(*word);
         }
         w.write_u64(self.read_index as u64);
+        w.write_bool(self.completed);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -493,6 +535,7 @@ impl Savable for NdsCartridge {
             self.pending.push(r.read_u32()?);
         }
         self.read_index = (r.read_u64()? as usize).min(self.pending.len());
+        self.completed = r.read_bool()?;
         Ok(())
     }
 }
