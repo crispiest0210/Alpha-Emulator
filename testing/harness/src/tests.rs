@@ -7,7 +7,7 @@
 use super::*;
 use crate::corpus::{
     Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
-    GB_DMG_SOUND_SINGLES, GB_ROMS,
+    GB_DMG_SOUND_SINGLES, GB_ROMS, NDS_ROMS,
 };
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
@@ -485,6 +485,13 @@ fn run_gb_rom(rom: &TestRom) -> Option<(TestOutcome, String)> {
             let system = system_gba::GbaSystem::new(bytes, None).expect("the ROM parses");
             run_on(rom, system)
         }
+        Hardware::Nds => {
+            // The only machine here built empty and then given a cartridge, because a DS boots
+            // from its header rather than from a fixed entry point.
+            let mut system = system_nds::NdsSystem::default();
+            system.load_cartridge(&bytes).expect("the ROM parses");
+            run_on(rom, system)
+        }
     }
 }
 
@@ -546,6 +553,7 @@ fn gb_accuracy_suite() {
         .chain(GB_DMG_SOUND_SINGLES)
         .chain(CGB_ROMS)
         .chain(GBA_ROMS)
+        .chain(NDS_ROMS)
     {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);

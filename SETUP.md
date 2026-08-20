@@ -190,7 +190,9 @@ cargo xtask bench             # performance measurements
 ```
 
 Without the fetch, the accuracy tests skip cleanly rather than failing, so a plain
-`cargo xtask test` works on a fresh clone with no network.
+`cargo xtask test` works on a fresh clone with no network. The fetch itself needs `curl`, and
+`unzip` for the one ROM its upstream publishes only inside a release archive; both ship with macOS
+and every Linux distribution worth supporting.
 
 Read `CONTRIBUTING.md` for the conventions and `AGENTS.md` for the architecture and the reasoning
 behind it.

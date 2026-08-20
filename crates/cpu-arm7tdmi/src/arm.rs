@@ -544,7 +544,8 @@ impl Arm7Tdmi {
                 self.set_reg(rn, offset_base);
             }
             if rd == 15 {
-                self.regs.set_pc(value & !3);
+                // `LDR pc` interworks from ARMv5 on; on the ARM7TDMI bit 0 is simply discarded.
+                self.set_pc_from_load(value);
                 cycles += 2;
             } else {
                 self.set_reg(rd, value);
@@ -689,10 +690,14 @@ impl Arm7Tdmi {
                     // return, `LDMFD SP!, {..., PC}^`.
                     if psr_or_user {
                         self.restore_cpsr_from_spsr();
+                        // The restored `CPSR` decides the instruction set here, not bit 0 of the
+                        // loaded address — even on ARMv5, where a plain `LDM {pc}` does interwork.
+                        let thumb = self.cpsr.thumb();
+                        self.regs
+                            .set_pc(if thumb { value & !1 } else { value & !3 });
+                    } else {
+                        self.set_pc_from_load(value);
                     }
-                    let thumb = self.cpsr.thumb();
-                    self.regs
-                        .set_pc(if thumb { value & !1 } else { value & !3 });
                     cycles += 2;
                 } else {
                     self.regs.write(mode, reg, value);

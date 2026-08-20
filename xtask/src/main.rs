@@ -397,6 +397,27 @@ fn fetch_test_roms(force: bool) -> Result<()> {
         }
     }
 
+    for (path, url, member) in ARCHIVED_TEST_ROMS {
+        let target = corpus.join(path);
+        if target.is_file() && !force {
+            skipped += 1;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        println!("fetching {path} (from an archive)");
+        match fetch_from_archive(&target, url, member) {
+            Ok(()) => fetched += 1,
+            Err(error) => {
+                println!("  {error:#}");
+                let _ = std::fs::remove_file(&target);
+                failed.push(*path);
+            }
+        }
+    }
+
     println!(
         "\n{fetched} fetched, {skipped} already present, {} failed",
         failed.len()
@@ -410,6 +431,61 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     println!("Run `cargo xtask test --accuracy` to use them.");
     Ok(())
 }
+
+/// Download a zip and write one member of it to `target`.
+///
+/// `unzip -p` streams a single member to standard output, which keeps this to two processes and
+/// no temporary directory. The same reasoning as `curl`: shelling out to a tool every supported
+/// platform already has beats adding a decompressor to the build for a step that runs once per
+/// checkout.
+fn fetch_from_archive(target: &std::path::Path, url: &str, member: &str) -> Result<()> {
+    let archive = target.with_extension("zip.part");
+    let status = Command::new("curl")
+        .args([
+            "--location",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "180",
+            "--output",
+        ])
+        .arg(&archive)
+        .arg(url)
+        .status()
+        .with_context(|| format!("running curl for {url}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&archive);
+        bail!("curl could not download {url}");
+    }
+
+    // No `have("unzip")` pre-check: Info-ZIP's `unzip` does not answer `--version` the way that
+    // helper asks, and reports "not installed" for a tool that is. Running it and reporting what
+    // happened is both simpler and honest about which of the two failures occurred.
+    let extracted = Command::new("unzip")
+        .arg("-p")
+        .arg(&archive)
+        .arg(member)
+        .output()
+        .context("running unzip; it is required to unpack this ROM and may not be installed")?;
+    let _ = std::fs::remove_file(&archive);
+    if !extracted.status.success() || extracted.stdout.is_empty() {
+        bail!("{member} is not in the archive at {url}");
+    }
+    std::fs::write(target, &extracted.stdout)
+        .with_context(|| format!("writing {}", target.display()))?;
+    Ok(())
+}
+
+/// ROMs upstream publishes only inside an archive.
+///
+/// A separate list rather than a third column on every row of [`TEST_ROMS`]: exactly one entry
+/// needs unpacking, and thirty-five `None`s is a worse way to say that than a second list.
+const ARCHIVED_TEST_ROMS: &[(&str, &str, &str)] = &[(
+    "nds/argv-test.nds",
+    "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
+    "hbmenu/nds/argvTest.nds",
+)];
 
 /// The corpus, mirroring `testing/harness`'s own list.
 ///

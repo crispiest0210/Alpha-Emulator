@@ -106,6 +106,22 @@ pub struct Arm7Tdmi {
     /// Zero on the ARM7TDMI, which has no high-vector option. `cpu-arm946e` sets it to
     /// `0xFFFF_0000` when CP15 selects high vectors, which is how the DS's ARM9 runs.
     pub(crate) exception_base: u32,
+
+    /// Whether a load into `R15` takes the instruction set from bit 0 of the loaded value.
+    ///
+    /// False on the ARM7TDMI, where `LDR pc`, `LDM {..., pc}` and `POP {..., pc}` all stay in the
+    /// state they were already in and bit 0 is discarded. True from ARMv5 on, where all three
+    /// interwork exactly as `BX` does — `cpu-arm946e` sets it.
+    ///
+    /// This is not a corner of the architecture. It is how a Thumb function compiled for an ARM9
+    /// returns to an ARM caller, so a compiler emits `pop {r4, pc}` for it constantly. A core that
+    /// stays in Thumb there carries on decoding ARM words as Thumb halfwords, and what that looks
+    /// like from outside is a program that reaches its startup code and then wanders off into
+    /// memory — which is exactly where a libnds `hello world` stopped before this existed.
+    ///
+    /// Deliberately not part of the save state: it is a property of which core this is, fixed when
+    /// the core is built, not something the running machine can change.
+    pub interworking_loads: bool,
 }
 
 impl Default for Arm7Tdmi {
@@ -124,6 +140,7 @@ impl Arm7Tdmi {
             halted: false,
             boot,
             exception_base: 0,
+            interworking_loads: false,
         };
         cpu.apply_boot_state();
         cpu
@@ -243,8 +260,24 @@ impl Arm7Tdmi {
             .set_pc(if thumb { target & !1 } else { target & !3 });
     }
 
-    /// Switch mode, keeping banked storage indexed rather than copied.
+    /// Write `R15` with a value that came off the bus, interworking if this core does.
+    ///
+    /// See [`Arm7Tdmi::interworking_loads`]. Shared by `LDR pc`, `LDM {..., pc}` and the THUMB
+    /// `POP {..., pc}`, because getting it right in two of the three is the same as getting it
+    /// wrong in all of them: the compiler picks whichever encoding is shortest.
     #[inline]
+    pub(crate) fn set_pc_from_load(&mut self, value: u32) {
+        if self.interworking_loads {
+            self.cpsr.set_thumb(value & 1 != 0);
+        }
+        let aligned = if self.cpsr.thumb() {
+            value & !1
+        } else {
+            value & !3
+        };
+        self.regs.set_pc(aligned);
+    }
+
     /// Leave an exception: restore `CPSR` from the current mode's `SPSR`, then jump.
     ///
     /// This is what `subs pc, lr, #4` and `movs pc, lr` do, and the restore is the part that
@@ -261,6 +294,8 @@ impl Arm7Tdmi {
         self.regs.set_pc(aligned);
     }
 
+    /// Switch mode, keeping banked storage indexed rather than copied.
+    #[inline]
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         self.cpsr.set_mode(mode);
     }

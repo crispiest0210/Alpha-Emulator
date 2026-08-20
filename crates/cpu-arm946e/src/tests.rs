@@ -695,3 +695,107 @@ fn a_wide_access_inside_tcm_is_served_by_tcm_and_never_reaches_the_bus() {
     assert_eq!(view.read32(0x0000_0100), 0xDEAD_BEEF);
     assert!(bus.widths.is_empty(), "{:?}", bus.widths);
 }
+
+// ---------------------------------------------------------------------------
+// Interworking on a load into R15
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pop_pc_takes_the_instruction_set_from_bit_zero() {
+    // The ARM7TDMI discards bit 0 here and stays in THUMB. ARMv5 treats it as `BX` does, and a
+    // compiler leans on that constantly: a THUMB function returning to an ARM caller does it with
+    // `pop {r4, pc}` and nothing else. A core that stays in THUMB carries on decoding the caller's
+    // ARM words as THUMB halfwords, which is a program that reaches its startup code and then
+    // wanders off into memory.
+    let mut bus = TestBus::new();
+    // `push {r4, lr}` is not needed; the stack is prepared directly.
+    bus.load_words(STACK, &[0x1234_5678, 0x0200_1000]);
+    let mut cpu = Arm946e::new(BootState {
+        pc: ORG,
+        mode: Mode::System,
+        thumb: true,
+        sp: STACK,
+        irq_disabled: false,
+        fiq_disabled: false,
+    });
+    // `pop {r4, pc}`
+    bus.mem[0x0000..0x0002].copy_from_slice(&0xBD10u16.to_le_bytes());
+    step(&mut cpu, &mut bus);
+
+    assert_eq!(cpu.reg(4), 0x1234_5678);
+    assert!(!cpu.is_thumb(), "bit 0 clear selects ARM state");
+    assert_eq!(cpu.program_counter(), 0x0200_1000);
+
+    // And the other way: an odd address stays in THUMB.
+    let mut bus = TestBus::new();
+    bus.load_words(STACK, &[0, 0x0200_1001]);
+    let mut cpu = Arm946e::new(BootState {
+        pc: ORG,
+        mode: Mode::System,
+        thumb: true,
+        sp: STACK,
+        irq_disabled: false,
+        fiq_disabled: false,
+    });
+    bus.mem[0x0000..0x0002].copy_from_slice(&0xBD10u16.to_le_bytes());
+    step(&mut cpu, &mut bus);
+    assert!(cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x0200_1000);
+}
+
+#[test]
+fn ldr_pc_and_ldm_pc_interwork_too() {
+    // All three encodings mean the same thing to a compiler, so getting one right and the others
+    // wrong is the same as getting all of them wrong.
+    //
+    // `ldr pc, [r1]` with a THUMB target.
+    let (mut cpu, mut bus) = setup(&[0xE591_F000]);
+    bus.load_words(0x0200_4000, &[0x0200_1001]);
+    cpu.set_reg(1, 0x0200_4000);
+    step(&mut cpu, &mut bus);
+    assert!(cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x0200_1000);
+
+    // `ldmia r1, {pc}` with an ARM target.
+    let mut bus = TestBus::new();
+    bus.load_words(ORG, &[0xE891_8000]);
+    bus.load_words(0x0200_4000, &[0x0200_2000]);
+    let mut cpu = Arm946e::new(boot());
+    cpu.set_reg(1, 0x0200_4000);
+    cpu.core.cpsr.set_thumb(false);
+    step(&mut cpu, &mut bus);
+    assert!(!cpu.is_thumb());
+    assert_eq!(cpu.program_counter(), 0x0200_2000);
+}
+
+#[test]
+fn an_exception_return_still_takes_its_state_from_the_saved_status_register() {
+    // `LDM {..., pc}^` restores CPSR, and the restored T bit decides the instruction set — bit 0
+    // of the loaded address does not get a second vote. Letting it have one would break every
+    // interrupt return out of THUMB code.
+    let mut bus = TestBus::new();
+    bus.load_words(ORG, &[0xE8D1_8000]); // ldmia r1, {pc}^
+    bus.load_words(0x0200_4000, &[0x0200_2000]);
+    let mut cpu = Arm946e::new(boot());
+    cpu.core.enter_exception(Exception::Irq, ORG + 4);
+    // The interrupted code was in THUMB, so the SPSR says so.
+    let mut saved = cpu.core.regs.spsr(Mode::Irq).expect("IRQ has an SPSR");
+    saved.set_thumb(true);
+    cpu.core.regs.set_spsr(Mode::Irq, saved);
+    cpu.core.regs.set_pc(ORG);
+    cpu.set_reg(1, 0x0200_4000);
+    step(&mut cpu, &mut bus);
+    assert!(
+        cpu.is_thumb(),
+        "the SPSR said THUMB even though the address is even"
+    );
+}
+
+#[test]
+fn the_arm7tdmi_does_not_interwork_on_a_load_which_is_why_this_is_a_flag() {
+    // The shared core keeps ARMv4T behaviour, which is what `system-gba` and the DS's own ARM7
+    // need. Asserting it here rather than only in `cpu-arm7tdmi` keeps the two halves of the
+    // decision in one place.
+    assert!(!Arm7Tdmi::default().interworking_loads);
+    assert!(Arm946e::default().core.interworking_loads);
+}

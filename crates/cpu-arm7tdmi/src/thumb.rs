@@ -520,9 +520,9 @@ impl Arm7Tdmi {
                 let v = bus.read32(sp & !3);
                 sp = sp.wrapping_add(4);
                 // POP {PC} on the ARM7TDMI stays in THUMB state: bit 0 is ignored rather than
-                // being interpreted as an instruction-set switch. That only becomes BX-like
-                // behavior on ARMv5.
-                self.regs.set_pc(v & !1);
+                // being interpreted as an instruction-set switch. On ARMv5 it is BX-like, which
+                // is what `interworking_loads` selects.
+                self.set_pc_from_load(v);
                 cycles += 2;
             }
             self.set_reg(13, sp);

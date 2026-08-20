@@ -6,7 +6,8 @@
 //! than its completion; what is here is built the way the GBA was, as tested units assembled
 //! last. See `README.md` for the authoritative status table.
 //!
-//! Implemented: the dual-CPU memory map ([`memory`]), VRAM bank mapping ([`vram`]), both 2D
+//! Implemented: the dual-CPU memory map ([`memory`]), the BIOS calls both cores make ([`bios`]),
+//! VRAM bank mapping ([`vram`]), both 2D
 //! engines ([`engine2d`]), the 3D core ([`gpu3d`]), the sixteen-channel sound hardware ([`apu`]),
 //! the inter-processor
 //! communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]), the two timer blocks
@@ -14,10 +15,23 @@
 //! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
 //! them ([`system`]). The in-app debugger works against it through [`debug`], on the ARM9.
 //!
-//! Not implemented: wifi, KEY1 cartridge encryption, and the 3D core's rarer effects — fog, edge
+//! Not implemented: wifi, KEY1 cartridge encryption, four BIOS calls whose answers would have to be
+//! guessed at (see [`bios`]), and the 3D core's rarer effects — fog, edge
 //! marking, anti-aliasing, shadow polygons, and the toon table. Prompt 13 explicitly ranks those
 //! below geometry and texturing correctness, which is the order they were built in. Each is
 //! documented where it is skipped rather than approximated into a picture that looks deliberate.
+//!
+//! # What a real ROM does with all this
+//!
+//! It boots and does not finish booting, and that is worth stating here rather than only in
+//! `README.md`. A libnds application loads both binaries, runs both cores, has every BIOS call it
+//! makes answered, and gets through libnds's startup far enough to configure VRAM, enable the sub
+//! engine, and set up a text console — and then the ARM9 pops a corrupted return address off its
+//! stack and runs away before printing anything. The accuracy suite runs that ROM and tracks it as
+//! a known failure; see `testing/harness`'s `NDS_ROMS`.
+//!
+//! Every DS claim in this crate should be read against that. The units are built and tested; the
+//! machine they assemble into does not yet run somebody else's software.
 //!
 //! # Wifi is out of scope
 //!
@@ -28,6 +42,7 @@
 #![deny(unsafe_code)]
 
 pub mod apu;
+pub mod bios;
 pub mod cartridge;
 pub mod debug;
 pub mod diagnostics;
@@ -45,6 +60,7 @@ pub mod video;
 pub mod vram;
 
 pub use apu::NdsApu;
+pub use bios::{BiosCall, BiosEffect};
 pub use cartridge::NdsCartridge;
 pub use dma::DmaController;
 pub use engine2d::{Engine, Engine2d};

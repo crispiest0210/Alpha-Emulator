@@ -18,6 +18,9 @@
 //! - CP15, the system control coprocessor (`cp15.rs`) — a *protection unit*, not an MMU.
 //! - Tightly-coupled memory (`tcm.rs`), which sits between the core and the bus.
 //! - High exception vectors at `0xFFFF_0000`, which is where the DS runs them.
+//! - Interworking on a load into `R15` — see [`Arm7Tdmi::interworking_loads`]. Not an instruction
+//!   of its own, which is exactly why it is easy to miss: it changes what three encodings the
+//!   shared core already implements *mean*, and a compiler leans on all three constantly.
 //!
 //! # Caches
 //!
@@ -75,8 +78,13 @@ impl Default for Arm946e {
 
 impl Arm946e {
     pub fn new(boot: BootState) -> Self {
+        let mut core = Arm7Tdmi::new(boot);
+        // ARMv5 interworks on a load into R15. See `Arm7Tdmi::interworking_loads` — it is the
+        // difference between `pop {r4, pc}` returning to an ARM caller and returning into the same
+        // instruction stream decoded as THUMB.
+        core.interworking_loads = true;
         Self {
-            core: Arm7Tdmi::new(boot),
+            core,
             cp15: Cp15::new(),
             itcm: Tcm::new(ITCM_SIZE),
             dtcm: Tcm::new(DTCM_SIZE),
@@ -274,6 +282,26 @@ impl<B: Bus + ?Sized> Savable for TcmBus<'_, B> {
 }
 
 impl Arm946e {
+    /// Run `f` with the TCMs spliced in front of `bus`, for callers outside this crate.
+    ///
+    /// The wrapper type is deliberately private — it is an implementation detail of how this core
+    /// reaches memory — so the closure receives it as a `&mut dyn Bus`. The dynamic dispatch is
+    /// paid once per call rather than once per access on the hot instruction path, which is why
+    /// this is not how [`Arm946e::step`] reaches memory.
+    ///
+    /// The caller that needs this is the DS's BIOS HLE. A `SWI` performed in place of the ROM
+    /// must see memory the way the core does: `IntrWait`'s flag word lives at `DTCM + 0x3FF8`,
+    /// and a `CpuSet` moving a libnds program's data is usually moving it to or from DTCM. Going
+    /// straight to the bus finds main RAM at those addresses instead, which reads as zero and
+    /// writes into nothing.
+    pub fn with_bus<B: Bus + ?Sized, R>(
+        &mut self,
+        bus: &mut B,
+        f: impl FnOnce(&mut Arm7Tdmi, &mut dyn Bus) -> R,
+    ) -> R {
+        self.with_tcm_bus(bus, |core, view| f(core, view))
+    }
+
     /// Run `f` with the TCMs spliced in front of `bus`.
     ///
     /// The fields are borrowed separately so the shared ARMv4T core can be driven while the

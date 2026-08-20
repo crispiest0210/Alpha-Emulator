@@ -92,6 +92,56 @@ fn strh(rd: u32, rn: u32) -> u32 {
     0xE1C0_00B0 | (rn << 16) | (rd << 12)
 }
 
+/// `ldr rd, [rn]`
+fn ldr_word(rd: u32, rn: u32) -> u32 {
+    0xE590_0000 | (rn << 16) | (rd << 12)
+}
+
+/// `add rd, rn, #imm`
+fn add_imm(rd: u32, rn: u32, value: u32) -> u32 {
+    0xE280_0000 | (rn << 16) | (rd << 12) | imm_field(value).expect("fits one immediate")
+}
+
+/// `and rd, rn, #imm`
+fn and_imm(rd: u32, rn: u32, value: u32) -> u32 {
+    0xE200_0000 | (rn << 16) | (rd << 12) | imm_field(value).expect("fits one immediate")
+}
+
+/// `orr rd, rn, rm`
+fn orr_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+    0xE180_0000 | (rn << 16) | (rd << 12) | rm
+}
+
+/// `bx rm`
+fn bx(rm: u32) -> u32 {
+    0xE12F_FF10 | rm
+}
+
+/// `swi #comment`, the ARM encoding.
+///
+/// The comment goes in bits 16-23, not in the low byte. That is not this helper being clever: the
+/// BIOS reads the comment as the *byte* at the instruction's address plus two, so ARM source that
+/// wants `Div` is written `swi 0x090000`. Assembling `swi 0x09` instead produces a call to
+/// `SoftReset`, which is one of the more confusing ways to lose an afternoon.
+fn swi(comment: u8) -> u32 {
+    0xEF00_0000 | ((comment as u32) << 16)
+}
+
+/// `b` from one word index in an image to another.
+fn b_to(from: usize, to: usize) -> u32 {
+    // The core reads `PC` two instructions ahead of the branch, which is where the -2 comes from.
+    let offset = to as i32 - from as i32 - 2;
+    0xEA00_0000 | (offset as u32 & 0x00FF_FFFF)
+}
+
+/// A word of main RAM, as the ARM9 sees it.
+fn word_at(nds: &NdsSystem, addr: u32) -> u32 {
+    nds.bus()
+        .memory
+        .read_wide_arm9(addr, 4)
+        .expect("an address this module owns")
+}
+
 #[test]
 fn the_system_reports_itself_the_way_the_frontend_expects() {
     let nds = NdsSystem::default();
@@ -669,4 +719,289 @@ fn a_reset_returns_the_machine_to_its_freshly_booted_state() {
     assert_eq!(nds.bus().cart.header().title, "NDSTEST");
     assert_eq!(nds.bus().cart.rom().len(), 0x8000);
     assert!(HEADER_SIZE <= nds.bus().cart.rom().len());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The BIOS calls, exercised through the real machine rather than through `bios::dispatch`.
+//
+// These are here rather than in `crate::bios` because what they check is the *wiring*: that a
+// `SWI` is intercepted before it reaches an exception vector that holds nothing, in both
+// instruction sets, on both cores, with the right core's call table and the right core's flag
+// word. A unit test against `dispatch` cannot see any of that go wrong.
+// ---------------------------------------------------------------------------------------------
+
+/// Where DTCM sits after direct boot, and therefore where the ARM9's BIOS words are.
+///
+/// Not a constant in `system.rs` because the ARM9's are an *offset* into DTCM — CP15 can move it,
+/// and a test that assumed it could not would pass for the wrong reason.
+const ARM9_DTCM: u32 = 0x027C_0000;
+const ARM9_FLAGS: u32 = ARM9_DTCM + 0x3FF8;
+const ARM9_HANDLER: u32 = ARM9_DTCM + 0x3FFC;
+
+#[test]
+fn a_program_that_divides_gets_all_three_documented_results() {
+    // `SWI 0x09`, which on a GBA would be an unused number and on a GBA-numbered table would be
+    // nothing at all. 1000000 / 7 is 142857 remainder 1.
+    let arm9 = [
+        load(0, 1_000_000),
+        load(1, 7),
+        vec![swi(0x09)],
+        // r0, r1 and r3 all carry results, so the destination pointer has to be a register the
+        // call does not touch.
+        load(2, 0x0202_0000),
+        vec![str_word(0, 2)],
+        load(2, 0x0202_0004),
+        vec![str_word(1, 2)],
+        load(2, 0x0202_0008),
+        vec![str_word(3, 2), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&arm9, &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert_eq!(word_at(&nds, 0x0202_0000), 142_857, "quotient");
+    assert_eq!(word_at(&nds, 0x0202_0004), 1, "remainder");
+    assert_eq!(word_at(&nds, 0x0202_0008), 142_857, "absolute quotient");
+}
+
+#[test]
+fn a_program_that_takes_a_square_root_gets_an_integer_one() {
+    // `SWI 0x0D`. The GBA's `Sqrt` is 0x08, which on the ARM9 is not a call at all — so a table
+    // carried over from `system-gba` fails this test by leaving r0 alone.
+    let arm9 = [
+        load(0, 10_001),
+        vec![swi(0x0D)],
+        load(1, 0x0202_0000),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&arm9, &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert_eq!(word_at(&nds, 0x0202_0000), 100, "sqrt(10001) truncated");
+}
+
+#[test]
+fn the_thumb_encoding_of_swi_is_answered_too() {
+    // Almost everything compiled for a DS above the startup stub is Thumb. A machine that only
+    // answers ARM `SWI`s answers almost none of the calls a real program makes, and the failure
+    // looks like a machine running at full speed with nothing on screen.
+    const THUMB_AT: usize = 0x20;
+    let mut image = [load(0, 1000), load(1, 7)].concat();
+    image.extend(load(2, 0x0200_0000 + THUMB_AT as u32 * 4 + 1));
+    image.push(bx(2));
+    assert!(image.len() <= THUMB_AT);
+    image.resize(THUMB_AT, SPIN);
+    // `swi 9` then `b .`, the two Thumb halfwords of a word. The Thumb comment *is* the low byte,
+    // unlike the ARM encoding.
+    image.push(0xE7FE_DF09);
+
+    let mut nds = booted(&image, &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert!(
+        nds.arm9().core.is_thumb(),
+        "it really did enter Thumb state"
+    );
+    assert_eq!(nds.arm9().reg(0), 142);
+    assert_eq!(nds.arm9().reg(1), 6);
+}
+
+#[test]
+fn an_unimplemented_call_returns_instead_of_running_off_into_the_empty_vector() {
+    // What this machine did with every `SWI` before the HLE existed: take the exception to
+    // `0xFFFF_0008`, read open bus, and execute the zero it found for the rest of the run. The
+    // store below is the proof that execution continued — if the exception were taken it would
+    // never happen and the word would stay zero.
+    let arm9 = [
+        load(0, 0x00C0_FFEE),
+        vec![swi(0x99)],
+        load(1, 0x0202_0000),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&arm9, &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert_eq!(
+        word_at(&nds, 0x0202_0000),
+        0x00C0_FFEE,
+        "the call did nothing, and left the registers alone doing it"
+    );
+}
+
+/// An ARM9 program that waits for vertical blank the way libnds does, counting the waits.
+///
+/// The handler is the interesting half. It acknowledges `IF`, ORs the source it saw into the BIOS
+/// flag word, and returns with `bx lr` — which is what libnds's `IntrMain` does, and which only
+/// works if something stands in for the BIOS's wrapper around it.
+fn vblank_counter_arm9() -> Vec<u32> {
+    const HANDLER_AT: usize = 0x40;
+    const LOOP_AT: usize = 0x60;
+
+    let mut image = [
+        // Install the handler pointer where the ARM9's BIOS reads one.
+        load(0, 0x0200_0000 + HANDLER_AT as u32 * 4),
+        load(1, ARM9_HANDLER),
+        vec![str_word(0, 1)],
+        // DISPSTAT: enable *both* the vertical-blank and horizontal-blank interrupts, and enable
+        // both in IE. The horizontal one fires 263 times a frame and is not what the wait is for,
+        // which is the whole point — see the test.
+        vec![mov_imm(0, (1 << 3) | (1 << 4))],
+        load(1, 0x0400_0004),
+        vec![strh(0, 1)],
+        vec![mov_imm(0, 3)],
+        load(1, 0x0400_0210),
+        vec![str_word(0, 1)],
+        vec![mov_imm(0, 1)],
+        load(1, 0x0400_0208),
+        vec![str_word(0, 1)],
+        vec![mov_imm(4, 0)],
+    ]
+    .concat();
+    // Over the handler, which sits at a fixed index so its address is known before the pointer
+    // above is emitted.
+    image.push(b_to(image.len(), LOOP_AT));
+    assert!(image.len() <= HANDLER_AT);
+    image.resize(HANDLER_AT, SPIN);
+
+    image.extend(
+        [
+            load(0, 0x0400_0214), // IF
+            // Acknowledge every flagged source by writing what was read — ones clear here — but
+            // record only vertical blank in the BIOS flag word, exactly as libnds's handler
+            // records only the sources it has a handler for.
+            vec![ldr_word(1, 0), str_word(1, 0), and_imm(1, 1, 1)],
+            load(0, ARM9_FLAGS),
+            vec![ldr_word(2, 0), orr_reg(2, 2, 1), str_word(2, 0)],
+            vec![bx(14)],
+        ]
+        .concat(),
+    );
+    assert!(image.len() <= LOOP_AT);
+    image.resize(LOOP_AT, SPIN);
+
+    // The loop: wait, count, store, again.
+    image.push(swi(0x05));
+    image.push(add_imm(4, 4, 1));
+    image.extend(load(5, 0x0202_0000));
+    image.push(str_word(4, 5));
+    image.push(b_to(image.len(), LOOP_AT));
+    image
+}
+
+#[test]
+fn vblank_intr_wait_on_the_arm9_returns_once_per_frame_and_not_once_per_interrupt() {
+    // The assertion that makes this worth writing: *exactly* one wait per frame, while a second
+    // interrupt the program is not waiting for fires 263 times in the same frame. A machine that
+    // answers `IntrWait` by halting once and returning — which is what `system-gba` does, and
+    // which is not good enough for a DS — comes back on every horizontal blank and counts in the
+    // hundreds. It is also the strongest available check that the interrupt wrapper is there: the
+    // handler returns with `bx lr`, so without a wrapper the second frame never arrives at all.
+    let mut nds = booted(&vblank_counter_arm9(), &[SPIN]);
+    for frame in 1..=4u32 {
+        nds.step_frame(InputState::default());
+        assert_eq!(
+            word_at(&nds, 0x0202_0000),
+            frame,
+            "after {frame} frames the program has been through its wait {frame} times"
+        );
+    }
+}
+
+#[test]
+fn the_arm9_flag_word_lives_in_dtcm_and_not_in_the_main_ram_underneath_it() {
+    // DTCM overlays main RAM, so a machine that answered `IntrWait` against the bus instead of
+    // through the TCMs would find zeroes forever and never return from a single wait. This looks
+    // at both places: the flag word is reachable through the ARM9's own view, and main RAM at the
+    // same address is untouched.
+    let mut nds = booted(&vblank_counter_arm9(), &[SPIN]);
+    nds.step_frame(InputState::default());
+    assert_eq!(word_at(&nds, 0x0202_0000), 1, "the wait completed");
+
+    // The handler set the bit and the wait consumed it, so it reads back clear — but through DTCM,
+    // where the bytes actually went.
+    let through_dtcm: Vec<u8> = (0..4)
+        .map(|i| nds.peek_arm9(ARM9_FLAGS + i).unwrap())
+        .collect();
+    assert_eq!(through_dtcm, vec![0; 4]);
+    assert_ne!(
+        nds.arm9().dtcm.base(),
+        0,
+        "and DTCM is where the boot state put it, not at address zero"
+    );
+}
+
+#[test]
+fn the_arm7_waits_against_its_own_flag_word_at_the_top_of_its_private_wram() {
+    // The same program on the other core, against `0x0380_FFF8` instead of DTCM. The two cores
+    // keep this word in genuinely different places, and using one core's address for both gives a
+    // machine where one core waits forever. The horizontal-blank interrupt is enabled here too,
+    // so a wait that returns on any interrupt counts in the hundreds rather than in frames.
+    const HANDLER_AT: usize = 0x40;
+    const LOOP_AT: usize = 0x60;
+    const FLAGS: u32 = 0x0380_FFF8;
+
+    let mut image = [
+        load(0, 0x0380_0000 + HANDLER_AT as u32 * 4),
+        load(1, 0x0380_FFFC),
+        vec![str_word(0, 1)],
+        vec![mov_imm(0, (1 << 3) | (1 << 4))],
+        load(1, 0x0400_0004),
+        vec![strh(0, 1)],
+        vec![mov_imm(0, 3)],
+        load(1, 0x0400_0210),
+        vec![str_word(0, 1)],
+        vec![mov_imm(0, 1)],
+        load(1, 0x0400_0208),
+        vec![str_word(0, 1)],
+        vec![mov_imm(4, 0)],
+    ]
+    .concat();
+    // Over the handler, which sits at a fixed index so its address is known before the pointer
+    // above is emitted.
+    image.push(b_to(image.len(), LOOP_AT));
+    assert!(image.len() <= HANDLER_AT);
+    image.resize(HANDLER_AT, SPIN);
+
+    image.extend(
+        [
+            load(0, 0x0400_0214),
+            vec![ldr_word(1, 0), str_word(1, 0), and_imm(1, 1, 1)],
+            load(0, FLAGS),
+            vec![ldr_word(2, 0), orr_reg(2, 2, 1), str_word(2, 0)],
+            vec![bx(14)],
+        ]
+        .concat(),
+    );
+    assert!(image.len() <= LOOP_AT);
+    image.resize(LOOP_AT, SPIN);
+
+    image.push(swi(0x05));
+    image.push(add_imm(4, 4, 1));
+    image.extend(load(5, 0x0380_2000));
+    image.push(str_word(4, 5));
+    image.push(b_to(image.len(), LOOP_AT));
+
+    let mut nds = booted(&[SPIN], &image);
+    for frame in 1..=4u32 {
+        nds.step_frame(InputState::default());
+        let counted = nds
+            .bus()
+            .memory
+            .read_wide_arm7(0x0380_2000, 4)
+            .expect("the ARM7's own work RAM");
+        assert_eq!(counted, frame, "after {frame} frames");
+    }
+}
+
+#[test]
+fn an_intr_wait_that_is_never_satisfied_still_hands_the_frame_loop_back() {
+    // A `SWI` answered for free would spin the slice forever and hang the emulator rather than the
+    // emulated program. This waits on a source nothing will ever raise, which is the shape of a
+    // game that has mis-set `IE` — a bug that has to present as a stuck game, not a stuck process.
+    let arm9 = [load(0, 1), load(1, 1 << 20), vec![swi(0x04), SPIN]].concat();
+
+    let mut nds = booted(&arm9, &[SPIN]);
+    let out = nds.step_frame(InputState::default());
+    assert_eq!(out.cycles_elapsed.0, CYCLES_PER_FRAME as u64);
 }

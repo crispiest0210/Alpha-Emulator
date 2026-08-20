@@ -44,6 +44,7 @@
 //! cores genuinely disagreeing about what an address means.
 
 use crate::apu::NdsApu;
+use crate::bios;
 use crate::cartridge::{NdsCartridge, HEADER_MIRROR};
 use crate::dma::{AddressStep, DmaController, Transfer};
 use crate::engine2d::{Engine, Engine2d};
@@ -72,6 +73,20 @@ const SP_SYSTEM: u32 = 0x0380_FD80;
 const SP_IRQ: u32 = 0x0380_FF80;
 const SP_SUPERVISOR: u32 = 0x0380_FFC0;
 
+/// The ARM9's, as offsets into DTCM.
+///
+/// The two cores' firmware stacks are not in the same memory, and giving the ARM9 the ARM7's
+/// addresses is not the harmless approximation it looks like: those addresses are the ARM7's
+/// private work RAM, which the ARM9 cannot see at all, and once the shared block has gone to the
+/// ARM7 — see [`NdsSystem::direct_boot`] — the ARM9's `0x0380_xxxx` reads as open bus. An
+/// interrupt taken before a game has installed its own stacks would then push into nothing.
+///
+/// DTCM is the memory the ARM9 owns outright at that point, which is why the firmware puts them
+/// there. The offsets are the ones a real machine leaves behind.
+const ARM9_SP_SYSTEM_OFFSET: u32 = 0x2F7C;
+const ARM9_SP_IRQ_OFFSET: u32 = 0x3F80;
+const ARM9_SP_SUPERVISOR_OFFSET: u32 = 0x3FC0;
+
 /// Where each core's BIOS interrupt handler reads the address of the game's handler.
 ///
 /// The ARM7's is at the top of its work RAM; the ARM9's is at the top of DTCM, wherever CP15 has
@@ -80,6 +95,22 @@ const SP_SUPERVISOR: u32 = 0x0380_FFC0;
 /// BIOS.
 const ARM7_HANDLER_POINTER: u32 = 0x0380_FFFC;
 const ARM9_HANDLER_OFFSET: u32 = 0x3FFC;
+
+/// Where each core's BIOS keeps the word `IntrWait` tests, one word below the handler pointer.
+///
+/// libnds calls it `__irq_flags`, and its interrupt handler ORs every source it acknowledges into
+/// it. `IntrWait` is answered against this rather than by halting once — see [`bios::Context`].
+const ARM7_IRQ_FLAGS: u32 = 0x0380_FFF8;
+const ARM9_IRQ_FLAGS_OFFSET: u32 = 0x3FF8;
+
+/// Where each core's HLE interrupt wrapper returns to.
+///
+/// Both sit inside a BIOS region, which is unmapped when no BIOS is supplied — so no software can
+/// reach either except through the `LR` [`NdsSystem::service_interrupt`] plants. The ARM9's is in
+/// its high-vector BIOS window and the ARM7's in the 16 KiB at address zero, which is the same
+/// difference that puts the two interrupt vectors 4 GiB apart.
+const ARM9_IRQ_RETURN: u32 = 0xFFFF_0290;
+const ARM7_IRQ_RETURN: u32 = 0x0000_0290;
 
 /// Everything both cores share.
 pub struct NdsBus {
@@ -108,6 +139,9 @@ pub struct NdsBus {
     exmemcnt: u16,
     /// Set while a core has executed a halt instruction and is waiting for an interrupt.
     halted: [bool; 2],
+    /// Set while a core is part-way through an `IntrWait`, which is answered by re-running the
+    /// `SWI` after each wake rather than by returning from the first one. See [`bios::Context`].
+    intr_wait: [bool; 2],
     /// The debugger's access recorder. Records nothing until a watchpoint arms it.
     ///
     /// Only the ARM9's accesses reach it, because the debugger shows the ARM9: an ARM7 access
@@ -142,6 +176,7 @@ impl NdsBus {
             powcnt1: 0x0203,
             exmemcnt: 0,
             halted: [false; 2],
+            intr_wait: [false; 2],
             watch: AccessLog::new(),
         }
     }
@@ -719,6 +754,89 @@ impl NdsBus {
     }
 }
 
+/// What an intercepted BIOS call costs, in the calling core's own cycles.
+///
+/// A guess, and deliberately a small one: the real cost is whatever the BIOS routine takes, which
+/// varies from a handful of cycles for `Div` to thousands for a decompression. What matters here
+/// is only that it is not zero — a core sitting in an `IntrWait` that is never satisfied re-runs
+/// the `SWI` on every wake, and a free call would spin the slice forever.
+const HLE_CYCLES: i64 = 3;
+
+/// The comment field of the `SWI` at `addr`.
+///
+/// The two encodings do not keep it in the same place. Thumb's `1101 1111 imm8` carries it in the
+/// low byte, while ARM's `cond 1111 imm24` carries it in bits 16-23 — which is why ARM source that
+/// wants `Div` is written `swi 0x090000`, and why assembling `swi 0x09` there calls `SoftReset`.
+fn swi_comment<B: Bus + ?Sized>(bus: &mut B, addr: u32, thumb: bool) -> u8 {
+    if thumb {
+        bus.read16(addr) as u8
+    } else {
+        (bus.read32(addr) >> 16) as u8
+    }
+}
+
+/// Enter a game's interrupt handler the way the BIOS does.
+///
+/// A real BIOS does not jump to the handler and hope. It pushes the registers the ARM procedure
+/// standard lets a callee clobber, calls the handler with `LR` pointing at its own epilogue, and
+/// on return restores them and leaves the exception with `subs pc, lr, #4` — which is the step
+/// that puts `CPSR` back and unmasks interrupts.
+///
+/// Skipping the wrapper is not a small inaccuracy. libnds's `IntrMain` ends in `bx lr`, so without
+/// it the handler returns into the *interrupted code* while still in IRQ mode with interrupts
+/// masked: the machine takes exactly one interrupt, never another, and every `IntrWait` after that
+/// waits forever. `system-gba` learned this the same way and does the same thing.
+fn enter_irq_handler<B: Bus + ?Sized>(
+    cpu: &mut Arm7Tdmi,
+    bus: &mut B,
+    lr: u32,
+    handler: u32,
+    ret: u32,
+) {
+    cpu.enter_exception(Exception::Irq, lr);
+    let mut sp = cpu.regs.read(Mode::Irq, 13);
+    for value in [
+        cpu.reg(0),
+        cpu.reg(1),
+        cpu.reg(2),
+        cpu.reg(3),
+        cpu.reg(12),
+        lr,
+    ]
+    .into_iter()
+    .rev()
+    {
+        sp = sp.wrapping_sub(4);
+        bus.write32(sp, value);
+    }
+    cpu.regs.write(Mode::Irq, 13, sp);
+    // `LR` is the epilogue's address rather than the return address, which is what makes the
+    // handler's `bx lr` come back to the wrapper instead of into the interrupted code.
+    cpu.regs.write(Mode::Irq, 14, ret);
+    cpu.regs.set_pc(handler);
+}
+
+/// The wrapper's epilogue: restore what it pushed and leave the exception.
+fn leave_irq_handler<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
+    let mut sp = cpu.regs.read(Mode::Irq, 13);
+    let mut popped = [0u32; 6];
+    for slot in &mut popped {
+        *slot = bus.read32(sp);
+        sp = sp.wrapping_add(4);
+    }
+    let [r0, r1, r2, r3, r12, lr] = popped;
+    cpu.regs.write(Mode::Irq, 13, sp);
+    cpu.set_reg(0, r0);
+    cpu.set_reg(1, r1);
+    cpu.set_reg(2, r2);
+    cpu.set_reg(3, r3);
+    cpu.set_reg(12, r12);
+    // `subs pc, lr, #4`: restore the saved status register and resume where the interrupt struck.
+    // Restoring `CPSR` is the step that unmasks interrupts again, so leaving it out is what makes
+    // a machine take exactly one interrupt and then no more.
+    cpu.exception_return(lr.wrapping_sub(4));
+}
+
 /// The Nintendo DS.
 pub struct NdsSystem {
     arm9: Arm946e,
@@ -802,11 +920,26 @@ impl NdsSystem {
             pc: nine.entry,
             mode: Mode::System,
             thumb: false,
-            sp: SP_SYSTEM,
+            // Replaced below, once `post_boot_nds` has put DTCM where the ARM9's stacks live.
+            sp: 0,
             irq_disabled: false,
             fiq_disabled: true,
         });
         self.arm9.post_boot_nds();
+        let dtcm = self.arm9.dtcm.base();
+        self.arm9
+            .core
+            .regs
+            .write(Mode::System, 13, dtcm + ARM9_SP_SYSTEM_OFFSET);
+        self.arm9
+            .core
+            .regs
+            .write(Mode::Irq, 13, dtcm + ARM9_SP_IRQ_OFFSET);
+        self.arm9
+            .core
+            .regs
+            .write(Mode::Supervisor, 13, dtcm + ARM9_SP_SUPERVISOR_OFFSET);
+
         self.arm7 = Arm7Tdmi::new(BootState {
             pc: seven.entry,
             mode: Mode::System,
@@ -815,10 +948,21 @@ impl NdsSystem {
             irq_disabled: false,
             fiq_disabled: true,
         });
-        for cpu in [&mut self.arm9.core, &mut self.arm7] {
-            cpu.regs.write(Mode::Irq, 13, SP_IRQ);
-            cpu.regs.write(Mode::Supervisor, 13, SP_SUPERVISOR);
-        }
+        self.arm7.regs.write(Mode::Irq, 13, SP_IRQ);
+        self.arm7.regs.write(Mode::Supervisor, 13, SP_SUPERVISOR);
+
+        // The ARM9 owns the card slot after boot, and the firmware has already split the shared
+        // WRAM the way a booting game expects to find it.
+        //
+        // The split has to be set *before* the binaries are copied, because it decides where the
+        // ARM7's own address for its binary lands. A libnds ARM7 links at `0x037F8000`, and that
+        // address is only its work RAM when the ARM7 owns all 32 KiB of the shared block: the
+        // shared WRAM then sits at `0x037F_8000`-`0x037F_FFFF` immediately below the private
+        // 64 KiB at `0x0380_0000`, giving the 96 KiB contiguous window `ds_arm7.ld` describes.
+        // With any other split that address is a 16 KiB window instead, and a 62 KiB ARM7 binary
+        // copied into it wraps four times over itself.
+        self.bus.exmemcnt = 0;
+        self.bus.memory.set_split(WramSplit::Arm7All);
 
         // Both binaries go through the plain bus. A header's ARM9 load address is always in
         // main RAM — software that wants code in ITCM copies it there itself once running — so
@@ -838,10 +982,6 @@ impl NdsSystem {
         }
         self.write_user_settings();
 
-        // The ARM9 owns the card slot after boot, and the firmware has already split the shared
-        // WRAM the way a booting game expects to find it.
-        self.bus.exmemcnt = 0;
-        self.bus.memory.set_split(WramSplit::Arm9Second);
         // What the firmware leaves POWCNT1 holding: both engines and both LCDs powered, with
         // engine A sent to the *upper* screen. Bit 15 is clear at power-on, so a machine that
         // never ran the firmware draws the main engine on the bottom screen — which looks like
@@ -886,6 +1026,13 @@ impl NdsSystem {
                 }
             }
             self.service_interrupt(Core::Arm9);
+            // Both stand in for BIOS code, so both cost time rather than being free: a wait that
+            // is never satisfied must still run the slice down and hand the frame loop back.
+            if self.at_bios_entry(Core::Arm9) {
+                self.run_bios_hle(Core::Arm9);
+                budget9 -= HLE_CYCLES;
+                continue;
+            }
             let mut view = Arm9View(&mut self.bus);
             budget9 -= self.arm9.step(&mut view).0 as i64;
         }
@@ -902,6 +1049,11 @@ impl NdsSystem {
                 }
             }
             self.service_interrupt(Core::Arm7);
+            if self.at_bios_entry(Core::Arm7) {
+                self.run_bios_hle(Core::Arm7);
+                budget7 -= HLE_CYCLES;
+                continue;
+            }
             let mut view = Arm7View(&mut self.bus);
             budget7 -= self.arm7.step(&mut view).0 as i64;
         }
@@ -965,15 +1117,25 @@ impl NdsSystem {
     /// no more: enter the exception properly, then redirect to the handler address the game left
     /// at the pointer its BIOS reads. Exactly the arrangement `system-gba` uses, with two
     /// pointers instead of one because the two cores keep theirs in different places.
+    #[inline]
     fn service_interrupt(&mut self, core: Core) {
         let pending = self.bus.irq[core as usize].pending();
         match core {
             Core::Arm9 => self.arm9.set_irq_line(pending),
             Core::Arm7 => self.arm7.set_irq_line(pending),
         }
-        if !pending {
-            return;
+        if pending {
+            self.enter_interrupt(core);
         }
+    }
+
+    /// The rest of [`Self::service_interrupt`], split off and never inlined.
+    ///
+    /// The caller runs before every instruction on both cores; this runs a few thousand times a
+    /// frame. Keeping them in one function put the whole of it — two handler-pointer reads, the
+    /// register frame, and the mode change — inside the frame loop's hot path.
+    #[inline(never)]
+    fn enter_interrupt(&mut self, core: Core) {
         let has_bios = match core {
             Core::Arm9 => self.bus.memory.has_arm9_bios(),
             Core::Arm7 => self.bus.memory.has_arm7_bios(),
@@ -996,8 +1158,14 @@ impl NdsSystem {
                     return;
                 }
                 let lr = self.arm9.core.regs.pc().wrapping_add(4);
-                self.arm9.core.enter_exception(Exception::Irq, lr);
-                self.arm9.core.regs.set_pc(handler);
+                let Self { arm9, bus, .. } = self;
+                let mut view = Arm9View(bus);
+                // Through the TCM view: after libnds's startup code runs, the ARM9's IRQ stack is
+                // in DTCM, and pushing to the bus instead would scribble on main RAM and pop back
+                // whatever was there.
+                arm9.with_bus(&mut view, |cpu, memory| {
+                    enter_irq_handler(cpu, memory, lr, handler, ARM9_IRQ_RETURN);
+                });
                 self.arm9.set_irq_line(false);
             }
             Core::Arm7 => {
@@ -1009,11 +1177,193 @@ impl NdsSystem {
                     return;
                 }
                 let lr = self.arm7.regs.pc().wrapping_add(4);
-                self.arm7.enter_exception(Exception::Irq, lr);
-                self.arm7.regs.set_pc(handler);
+                let Self { arm7, bus, .. } = self;
+                let mut view = Arm7View(bus);
+                enter_irq_handler(arm7, &mut view, lr, handler, ARM7_IRQ_RETURN);
                 self.arm7.set_irq_line(false);
             }
         }
+    }
+
+    /// Whether this core's program counter is at an address only the BIOS HLE can put it at.
+    ///
+    /// This is the whole of what the frame loop pays per instruction, and it has to stay that
+    /// cheap: two register comparisons that almost always fail. Both addresses are inside a BIOS
+    /// region that is unmapped when no image is supplied, so software cannot reach either by
+    /// accident, and the `has_*_bios` check is last because it is the one that touches memory.
+    ///
+    /// Written as one function taking the core rather than two, and inlined so the `match` folds
+    /// away at each of its two call sites — where the core is a literal.
+    #[inline(always)]
+    fn at_bios_entry(&self, core: Core) -> bool {
+        let swi = Exception::SoftwareInterrupt.vector();
+        match core {
+            Core::Arm9 => {
+                let pc = self.arm9.core.regs.pc();
+                (pc == ARM9_IRQ_RETURN || pc == self.arm9.core.exception_base().wrapping_add(swi))
+                    && !self.bus.memory.has_arm9_bios()
+            }
+            Core::Arm7 => {
+                let pc = self.arm7.regs.pc();
+                (pc == ARM7_IRQ_RETURN || pc == self.arm7.exception_base().wrapping_add(swi))
+                    && !self.bus.memory.has_arm7_bios()
+            }
+        }
+    }
+
+    /// Do whatever the BIOS would do at the address [`Self::at_bios_entry`] just recognised.
+    ///
+    /// Split from the gate and never inlined, so the frame loop's inner loop stays small: this
+    /// runs a few thousand times a frame at most, against several hundred thousand instructions.
+    #[inline(never)]
+    fn run_bios_hle(&mut self, core: Core) {
+        if !self.intercept_bios_irq_return(core) {
+            self.intercept_bios_call(core);
+        }
+    }
+
+    /// The other half of the wrapper: unwind and leave the exception.
+    ///
+    /// Recognised by the program counter reaching the core's [`ARM9_IRQ_RETURN`] or
+    /// [`ARM7_IRQ_RETURN`], which are addresses inside a BIOS that is not there — so the only way
+    /// to arrive at one is the `LR` [`Self::service_interrupt`] planted.
+    fn intercept_bios_irq_return(&mut self, core: Core) -> bool {
+        let (has_bios, pc, expected) = match core {
+            Core::Arm9 => (
+                self.bus.memory.has_arm9_bios(),
+                self.arm9.core.regs.pc(),
+                ARM9_IRQ_RETURN,
+            ),
+            Core::Arm7 => (
+                self.bus.memory.has_arm7_bios(),
+                self.arm7.regs.pc(),
+                ARM7_IRQ_RETURN,
+            ),
+        };
+        if has_bios || pc != expected {
+            return false;
+        }
+        match core {
+            Core::Arm9 => {
+                let Self { arm9, bus, .. } = self;
+                let mut view = Arm9View(bus);
+                arm9.with_bus(&mut view, |cpu, memory| leave_irq_handler(cpu, memory));
+            }
+            Core::Arm7 => {
+                let Self { arm7, bus, .. } = self;
+                let mut view = Arm7View(bus);
+                leave_irq_handler(arm7, &mut view);
+            }
+        }
+        true
+    }
+
+    /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
+    ///
+    /// Recognised by the program counter reaching the core's `SWI` vector — `0xFFFF_0008` on the
+    /// ARM9 with its high vectors, `0x0000_0008` on the ARM7 — which is where the core has just
+    /// taken the exception to and which holds nothing at all with no BIOS supplied. What the
+    /// machine did before this existed: read open bus there, decode the zero it found as
+    /// `andeq r0, r0, r0`, and execute that for the rest of the run.
+    ///
+    /// With a BIOS image supplied for this core, this does nothing and the exception runs on into
+    /// the real vector.
+    ///
+    /// # Why the vector rather than the instruction
+    ///
+    /// `system-gba` catches its `SWI`s one step earlier, by peeking the opcode ahead of *every*
+    /// instruction and stepping over the ones that turn out to be calls. That is a question asked
+    /// tens of millions of times a second whose answer is almost always no, and on a DS it is
+    /// asked on two cores: measured at +80% on a frame of the DS rendering benchmark, which took
+    /// the machine past its own frame budget and would have made this change a regression rather
+    /// than a feature.
+    ///
+    /// Trapping at the vector is one comparison per instruction instead, and reads the comment
+    /// byte once per call rather than once per instruction. It also answers a *conditional* `SWI`
+    /// correctly, which the peek could not without duplicating the flag check.
+    fn intercept_bios_call(&mut self, core: Core) -> bool {
+        let vector = Exception::SoftwareInterrupt.vector();
+        let (has_bios, pc, expected) = match core {
+            Core::Arm9 => (
+                self.bus.memory.has_arm9_bios(),
+                self.arm9.core.regs.pc(),
+                self.arm9.core.exception_base().wrapping_add(vector),
+            ),
+            Core::Arm7 => (
+                self.bus.memory.has_arm7_bios(),
+                self.arm7.regs.pc(),
+                self.arm7.exception_base().wrapping_add(vector),
+            ),
+        };
+        if has_bios || pc != expected {
+            return false;
+        }
+
+        // `R14_svc` holds the address of the instruction *after* the `SWI`, so the call itself is
+        // one instruction back — and how far back depends on the state the exception saved, not on
+        // the state the core is in now, because entering an exception always enters ARM.
+        let (lr, thumb) = match core {
+            Core::Arm9 => (
+                self.arm9.core.regs.read(Mode::Supervisor, 14),
+                self.arm9.core.regs.spsr(Mode::Supervisor),
+            ),
+            Core::Arm7 => (
+                self.arm7.regs.read(Mode::Supervisor, 14),
+                self.arm7.regs.spsr(Mode::Supervisor),
+            ),
+        };
+        let thumb = thumb.is_some_and(|saved| saved.thumb());
+        let call_at = lr.wrapping_sub(if thumb { 2 } else { 4 });
+
+        // The ARM9's flag word moves with DTCM, so it is computed per call rather than being a
+        // constant like the ARM7's.
+        let flags = match core {
+            Core::Arm9 => self.arm9.dtcm.base() + ARM9_IRQ_FLAGS_OFFSET,
+            Core::Arm7 => ARM7_IRQ_FLAGS,
+        };
+        // Copied out and written back, because the bus view the call runs against borrows the
+        // structure this flag lives in.
+        let mut waiting = self.bus.intr_wait[core as usize];
+        let effect = {
+            let context = bios::Context {
+                core,
+                flags,
+                waiting: &mut waiting,
+            };
+            match core {
+                Core::Arm9 => {
+                    let Self { arm9, bus, .. } = self;
+                    let mut view = Arm9View(bus);
+                    // Through the TCM view, because a libnds program's code, stack, and data are
+                    // routinely in a TCM — including the word `IntrWait` tests.
+                    arm9.with_bus(&mut view, |cpu, memory| {
+                        let comment = swi_comment(memory, call_at, thumb);
+                        bios::dispatch(cpu, memory, comment, context)
+                    })
+                }
+                Core::Arm7 => {
+                    let Self { arm7, bus, .. } = self;
+                    let mut view = Arm7View(bus);
+                    let comment = swi_comment(&mut view, call_at, thumb);
+                    bios::dispatch(arm7, &mut view, comment, context)
+                }
+            }
+        };
+        self.bus.intr_wait[core as usize] = waiting;
+
+        if effect.halt {
+            self.bus.halted[core as usize] = true;
+        }
+        // Leaving the exception restores the caller's mode, instruction set, and interrupt mask.
+        // An `IntrWait` whose condition is still unmet returns to the `SWI` itself rather than
+        // past it, so waking runs the test again — and it must leave the exception to do that, or
+        // the interrupt it is waiting for could never be taken.
+        let resume = if effect.repeat { call_at } else { lr };
+        match core {
+            Core::Arm9 => self.arm9.core.exception_return(resume),
+            Core::Arm7 => self.arm7.exception_return(resume),
+        }
+        true
     }
 
     /// Perform every DMA transfer that is ready, on both cores.
@@ -1098,8 +1448,11 @@ impl System for NdsSystem {
         "Nintendo DS"
     }
 
+    /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag: a state written before
+    /// it does not carry that word, and loading one into this build would leave a core waiting
+    /// with no record of whether it had already discarded its flags.
     fn state_version(&self) -> u32 {
-        1
+        2
     }
 
     fn set_input(&mut self, input: InputState) {
@@ -1162,6 +1515,15 @@ impl System for NdsSystem {
 
     fn step_instruction(&mut self) -> Cycles {
         self.service_interrupt(Core::Arm9);
+        // Single-stepping has to see the same machine the frame loop does, or a `SWI` stepped over
+        // in the debugger would take the exception the frame loop never lets it take.
+        if self.at_bios_entry(Core::Arm9) {
+            self.run_bios_hle(Core::Arm9);
+            self.run_cores(0);
+            let system_cycles = (HLE_CYCLES as u64).div_ceil(2);
+            self.frame_cycles += system_cycles;
+            return Cycles(system_cycles);
+        }
         let mut view = Arm9View(&mut self.bus);
         let cycles = self.arm9.step(&mut view);
         // One ARM9 instruction is half as many system cycles, rounded up so a single-step always
@@ -1196,6 +1558,7 @@ impl System for NdsSystem {
         ];
         self.bus.cart.reset();
         self.bus.halted = [false; 2];
+        self.bus.intr_wait = [false; 2];
         self.bus.postflg = [0; 2];
         self.bus.powcnt1 = 0x0203;
         self.arm9_debt = 0;
@@ -1268,6 +1631,8 @@ impl Savable for NdsSystem {
         w.write_u16(self.bus.exmemcnt);
         w.write_bool(self.bus.halted[0]);
         w.write_bool(self.bus.halted[1]);
+        w.write_bool(self.bus.intr_wait[0]);
+        w.write_bool(self.bus.intr_wait[1]);
         w.write_i64(self.arm9_debt);
         w.write_i64(self.arm7_debt);
         w.write_u64(self.frame_cycles);
@@ -1303,6 +1668,8 @@ impl Savable for NdsSystem {
         self.bus.exmemcnt = r.read_u16()?;
         self.bus.halted[0] = r.read_bool()?;
         self.bus.halted[1] = r.read_bool()?;
+        self.bus.intr_wait[0] = r.read_bool()?;
+        self.bus.intr_wait[1] = r.read_bool()?;
         self.arm9_debt = r.read_i64()?;
         self.arm7_debt = r.read_i64()?;
         self.frame_cycles = r.read_u64()?;

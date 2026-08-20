@@ -655,6 +655,56 @@ impl TestableSystem for system_gba::GbaSystem {
     }
 }
 
+/// The DS, seen through its ARM9.
+///
+/// The ARM7 is deliberately not reported here, for the same reason the debugger only shows the
+/// ARM9: a register dump that silently mixes two cores is worse than one that names which core it
+/// is. [`TestableSystem::debug_state`] carries an ARM7 program counter alongside, because when a
+/// DS ROM stops, *which* core stopped is the first thing worth knowing.
+impl TestableSystem for system_nds::NdsSystem {
+    fn serial_output(&self) -> &[u8] {
+        // No DS software reports through a serial port; there is not one to report through.
+        &[]
+    }
+
+    fn cpu_registers(&self) -> Vec<RegisterValue> {
+        let cpu = self.arm9();
+        let mut out: Vec<RegisterValue> = (0..15)
+            .map(|index| RegisterValue {
+                name: REGISTER_NAMES[index],
+                value: cpu.reg(index) as u64,
+                width_bits: 32,
+            })
+            .collect();
+        out.push(RegisterValue {
+            name: "PC",
+            value: cpu.core.regs.pc() as u64,
+            width_bits: 32,
+        });
+        out
+    }
+
+    fn debug_state(&self) -> String {
+        let nine = self.arm9();
+        let seven = self.arm7();
+        format!(
+            "arm9 pc={:#010X} mode={:?} thumb={} | arm7 pc={:#010X} mode={:?} thumb={}",
+            nine.core.regs.pc(),
+            nine.core.mode(),
+            nine.is_thumb(),
+            seven.regs.pc(),
+            seven.mode(),
+            seven.is_thumb(),
+        )
+    }
+
+    fn read_byte(&mut self, addr: u32) -> u8 {
+        // Through the ARM9's view including its TCMs, which is where a DS program's stack and much
+        // of its data live — the plain bus would answer with the main RAM underneath them.
+        self.peek_arm9(addr).unwrap_or(0)
+    }
+}
+
 /// `R0` through `R14`, for the register dump above.
 const REGISTER_NAMES: [&str; 15] = [
     "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14",

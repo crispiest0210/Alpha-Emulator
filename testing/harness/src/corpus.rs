@@ -39,6 +39,8 @@ pub enum Hardware {
     Cgb,
     /// Game Boy Advance.
     Gba,
+    /// Nintendo DS.
+    Nds,
 }
 
 pub struct TestRom {
@@ -439,6 +441,41 @@ pub const GB_ROMS: &[TestRom] = &[
         licence: "MIT (Matt Currie).",
     },
 ];
+
+/// The Nintendo DS.
+///
+/// # Why a homebrew application rather than a test suite
+///
+/// There is no DS equivalent of `gba-suite` in this corpus, and the question this entry exists to
+/// answer is not "is instruction X right" — it is the blunter one the DS actually needed answering:
+/// **does a program built by the toolchain everyone uses get anywhere at all.** `argvTest` is a
+/// libnds application in the ordinary sense — devkitARM's ARM9 and ARM7 startup code, the standard
+/// interrupt handler, `swiWaitForVBlank`, a text console on the sub screen — so a machine that runs
+/// it has a working BIOS, a working interrupt path, and a working memory map, and a machine that
+/// does not has a specific place where it stopped.
+///
+/// It came from `nds-hb-menu`'s release archive because that is where devkitPro publish a built
+/// libnds binary; nothing here is committed, same rule as every other ROM.
+pub const NDS_ROMS: &[TestRom] = &[TestRom {
+    name: "nds_libnds_argv_test",
+    url: "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
+    path: "nds/argv-test.nds",
+    convention: Convention::Framebuffer,
+    hardware: Hardware::Nds,
+    // It has a picture within a few frames or it never will.
+    max_frames: 60,
+    // Deliberately not recorded. Nothing here has been checked against hardware or against
+    // another emulator, and a hash of a wrong picture is worse than no hash: it freezes the
+    // wrong answer in place and makes fixing it look like a regression.
+    expected_hash: None,
+    expected_failure: Some(
+        "boots: both cores run, libnds initialises video and sets up the sub-screen console with \
+         the right tiles, map and palette — but the console prints nothing. The ARM9 pops a \
+         corrupted return address off its stack part-way through startup and runs away. Not a \
+         BIOS gap: every SWI it makes is answered, and no unimplemented call is logged",
+    ),
+    licence: "GPL-2.0 (devkitPro nds-hb-menu). Fetched from the upstream release, never committed.",
+}];
 
 /// The corpus directory, resolved relative to the workspace root.
 ///
