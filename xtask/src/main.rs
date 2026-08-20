@@ -557,6 +557,11 @@ const TEST_ROMS: &[(&str, &str)] = &[
         "gba/gba-suite/memory.gba",
         "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
     ),
+    // Nintendo DS. The other DS ROM needs unpacking; see `ARCHIVED_TEST_ROMS`.
+    (
+        "nds/nitrofs-normalmap.nds",
+        "https://raw.githubusercontent.com/rmn20/NormalmappingDS/master/dist/nmap.nds",
+    ),
 ];
 
 /// The workspace root, found from this crate rather than the current directory.

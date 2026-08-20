@@ -25,8 +25,13 @@
 //!
 //! It runs. A libnds application loads both binaries, runs both cores, has every BIOS call it
 //! makes answered, and draws its text on the sub screen to a frame that is byte-identical from
-//! frame 60 to frame 240. The accuracy suite runs it and checks the picture; see
-//! `testing/harness`'s `NDS_ROMS`.
+//! frame 60 to frame 240. A second one reads its own cartridge: 72 `0xB7` commands streaming its
+//! NitroFS filesystem out of the ROM by card DMA, finished inside ten frames, and its whole
+//! interface on screen. The accuracy suite runs both; see `testing/harness`'s `NDS_ROMS`.
+//!
+//! What the second one does *not* do is draw its 3D scene, though it enables the layer and submits
+//! geometry every frame. That is the largest open question about this crate, and it is tracked in
+//! the suite rather than left to be found.
 //!
 //! Worth knowing when reading the rest of this crate: getting there took five fixes, and **four of
 //! them were not in this crate**. Two were missing ARMv5 behaviours in `cpu-arm946e` — THUMB

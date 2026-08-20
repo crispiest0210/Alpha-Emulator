@@ -30,13 +30,15 @@ fn cart() -> NdsCartridge {
 
 /// Kick a transfer of `words` words with the given command.
 fn transfer(c: &mut NdsCartridge, command: [u8; 8], block: u32) {
+    // The command is a byte string and `command[0]` is its first byte, which lives at the register's
+    // own address — so a 32-bit write carries it in the *low* byte, as any little-endian store does.
     c.write32(
         reg::CARD_COMMAND,
-        u32::from_be_bytes(command[0..4].try_into().unwrap()),
+        u32::from_le_bytes(command[0..4].try_into().unwrap()),
     );
     c.write32(
         0x0400_01AC,
-        u32::from_be_bytes(command[4..8].try_into().unwrap()),
+        u32::from_le_bytes(command[4..8].try_into().unwrap()),
     );
     c.write32(reg::ROMCTRL, romctrl::START | (block << 24));
 }
@@ -180,18 +182,41 @@ fn a_read_above_the_secure_area_wraps_inside_its_four_kilobyte_block() {
 }
 
 #[test]
-fn the_command_register_is_big_endian() {
-    // Card commands are byte strings, not little-endian words, and reading them the usual way
-    // turns every command into a different one.
+fn the_command_is_eight_bytes_at_eight_addresses() {
+    // The property that matters is not the width of the access but *which address holds which byte
+    // of the command*: the first byte — the opcode — is at the register's own address, and the four
+    // that name the ROM offset follow it upwards. A 32-bit write therefore carries the opcode in
+    // its low byte, because that is the byte an ARM store puts at the lowest address.
+    //
+    // Modelled the other way round, as one big-endian word, this test still passes when written as
+    // a round trip and every *byte* write silently lands at the mirror of its own position. libnds
+    // writes the command a byte at a time, so what it actually got was the fourth byte of its
+    // command read back as the opcode.
     let mut c = cart();
-    c.write32(reg::CARD_COMMAND, 0xB700_0040);
-    assert_eq!(c.read32(reg::CARD_COMMAND), Some(0xB700_0040));
+    // `B7 00 00 40 00 ...`: the opcode, then 0x4000 as four bytes, most significant first.
+    c.write32(
+        reg::CARD_COMMAND,
+        u32::from_le_bytes([0xB7, 0x00, 0x00, 0x40]),
+    );
+    c.write32(0x0400_01AC, u32::from_le_bytes([0x00, 0x00, 0x00, 0x00]));
     c.write32(reg::ROMCTRL, romctrl::START | (1 << 24));
     assert_eq!(
         c.read32(reg::CARD_DATA),
         Some(0xAAAA_AAAA),
-        "0xB7 at 0x4000"
+        "0xB7 reading from 0x4000"
     );
+
+    // The same command assembled one byte at a time, the way libnds assembles it, has to mean the
+    // same thing.
+    let mut c = cart();
+    for (offset, byte) in [0xB7u8, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00]
+        .into_iter()
+        .enumerate()
+    {
+        c.write8(reg::CARD_COMMAND + offset as u32, byte);
+    }
+    c.write32(reg::ROMCTRL, romctrl::START | (1 << 24));
+    assert_eq!(c.read32(reg::CARD_DATA), Some(0xAAAA_AAAA));
 }
 
 #[test]
@@ -218,8 +243,12 @@ fn narrow_accesses_reach_the_registers() {
     let mut c = cart();
     c.write16(reg::AUXSPICNT, 0x8040);
     assert_eq!(c.read16(reg::AUXSPICNT), Some(0x8040));
-    c.write8(reg::CARD_COMMAND + 3, 0xB7);
-    assert_eq!(c.read8(reg::CARD_COMMAND + 3), Some(0xB7));
+    // Byte zero of the command is at byte zero of the register, which is where a driver writing
+    // the command one byte at a time puts the opcode.
+    c.write8(reg::CARD_COMMAND, 0xB7);
+    assert_eq!(c.read8(reg::CARD_COMMAND), Some(0xB7));
+    c.write8(reg::CARD_COMMAND + 7, 0x5A);
+    assert_eq!(c.read8(reg::CARD_COMMAND + 7), Some(0x5A));
 }
 
 #[test]

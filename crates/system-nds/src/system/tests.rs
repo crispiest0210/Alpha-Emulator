@@ -1023,6 +1023,19 @@ fn an_intr_wait_that_is_never_satisfied_still_hands_the_frame_loop_back() {
 const CARD_DATA_AT: usize = 0x7000;
 const CARD_BYTES: usize = 512;
 
+/// One word of the eight-byte `0xB7` command that reads [`CARD_DATA_AT`].
+///
+/// `offset` is the byte offset into the command. The command's bytes go up in address order —
+/// opcode first, then the ROM offset most significant byte first — so a word write carries them
+/// reversed, which is what makes this worth a helper rather than a literal.
+fn card_command_word(offset: usize) -> u32 {
+    let address = (CARD_DATA_AT as u32).to_be_bytes();
+    let command = [
+        0xB7, address[0], address[1], address[2], address[3], 0, 0, 0,
+    ];
+    u32::from_le_bytes(command[offset..offset + 4].try_into().unwrap())
+}
+
 /// The 512 bytes a card read should deliver, as words.
 fn card_payload() -> Vec<u32> {
     (0..CARD_BYTES as u32 / 4)
@@ -1058,11 +1071,12 @@ fn card_dma_program(auxspicnt: u32) -> Vec<u32> {
         load(0, auxspicnt),
         load(1, 0x0400_01A0),
         vec![strh(0, 1)],
-        // The command: 0xB7 and a four-byte big-endian address, spread across two registers.
-        load(0, 0xB700_0000 | (CARD_DATA_AT as u32 >> 8)),
+        // The command: 0xB7 at the register's first byte, then the ROM offset above it, most
+        // significant byte first. Written as two words, each carrying its bytes reversed.
+        load(0, card_command_word(0)),
         load(1, 0x0400_01A8),
         vec![str_word(0, 1)],
-        load(0, ((CARD_DATA_AT as u32) & 0xFF) << 24),
+        load(0, card_command_word(4)),
         load(1, 0x0400_01AC),
         vec![str_word(0, 1)],
         // ROMCTRL: block size 1 is 512 bytes — the field is an exponent over 0x100, not a byte
@@ -1214,10 +1228,10 @@ fn a_block_larger_than_the_channel_re_arms_until_it_is_drained() {
         load(0, 1 << 14),
         load(1, 0x0400_01A0),
         vec![strh(0, 1)],
-        load(0, 0xB700_0000 | (CARD_DATA_AT as u32 >> 8)),
+        load(0, card_command_word(0)),
         load(1, 0x0400_01A8),
         vec![str_word(0, 1)],
-        load(0, ((CARD_DATA_AT as u32) & 0xFF) << 24),
+        load(0, card_command_word(4)),
         load(1, 0x0400_01AC),
         vec![str_word(0, 1)],
         load(0, 0x8100_0000),

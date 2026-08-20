@@ -168,9 +168,9 @@ program prints when launched with no argv. The picture is byte-identical at 60, 
 frames and reproduces exactly across runs, so it is a stable frame rather than a moment caught
 during startup.
 
-That one program found **five** bugs in a machine whose 376 unit tests all passed, and four of them
-were not in the DS crate at all. Each is worth knowing about, because each presented the same way:
-the machine running at full speed with nothing on screen.
+Two real programs have now found **six** bugs in a machine whose unit tests all passed, and four of
+them were not in the DS crate at all. Each is worth knowing about, because each presented the same
+way: the machine running at full speed with nothing on screen, or nearly nothing.
 
 - **THUMB `BLX` (register) was decoding as `BX`.** One bit apart, and ARMv4T reads that bit as part
   of a should-be-zero field — so the branch was taken and `LR` was never written, leaving the
@@ -188,6 +188,14 @@ the machine running at full speed with nothing on screen.
   its work RAM when the ARM7 owns all 32 KiB of the shared block. With any other split a 62 KiB
   binary is copied into a 16 KiB window and wraps four times over itself.
 - **The ARM9's boot stacks**, which were the ARM7's addresses — memory the ARM9 cannot see.
+- **`CARD_COMMAND` was one big-endian word rather than eight bytes at eight addresses.** That reads
+  a 32-bit command write correctly and puts every *byte* write at the mirror of its own position —
+  and libnds writes the command a byte at a time, so a real driver's `0xB7` arrived as `0x68`.
+
+A second homebrew, this one reading its own cartridge, found the last of those and confirmed the
+rest of the card path: it streams about 36 KiB of NitroFS out of its ROM by card DMA in the first
+ten frames and draws its whole interface. Its 3D scene does not appear, which is the next thing to
+look at and is tracked as a known failure rather than hidden.
 
 **Implemented:**
 
@@ -231,11 +239,11 @@ the machine running at full speed with nothing on screen.
   express a bus that blocks a CPU part-way through an instruction.
 - **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
   card present looks like.
-- **Cartridge streaming has not been driven by a real program.** The wiring is tested end to end by
-  a hand-written one — command `0xB7`, a card-timed DMA channel, 512 bytes into main RAM, the
-  completion interrupt — but none of the four libnds binaries to hand issue a single card command,
-  so nothing has exercised it through a real driver. Confirming that needs a homebrew that reads
-  its own cartridge (anything using NitroFS), and it is the next thing worth checking.
+- **3D geometry that is submitted but never appears**, in at least one real program. The NitroFS
+  homebrew in the corpus enables the 3D layer and queues 39 polygons a frame, and the top screen
+  stays at the clear colour. Its 2D half is correct, so this is a rendering gap rather than a
+  broken machine — but it is the DS's largest open question, and it is tracked in the accuracy
+  suite rather than left to be discovered.
 - Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
   and the per-line sprite budget.
 - **Four BIOS calls that would have to be guessed at**: `BitUnPack`, `SoftReset`, the ARM7's
@@ -296,7 +304,7 @@ Component status:
 | `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
-| `system-nds` cartridge — header, direct boot, card transfers, DMA streaming and the completion interrupt | done and tested end to end by a program that issues a card read and DMAs the block into main RAM; **no KEY1 encryption**, and no homebrew that reads its own cartridge has been run yet — see below |
+| `system-nds` cartridge — header, direct boot, card transfers, DMA streaming and the completion interrupt | done and tested end to end, by a hand-written program and by a real NitroFS homebrew that streams 36 KiB out of its own ROM; **no KEY1 encryption** |
 | `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; write timing is not modelled, and a cartridge that only ever writes partial pages cannot be identified |
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |

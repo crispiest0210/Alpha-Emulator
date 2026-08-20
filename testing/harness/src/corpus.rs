@@ -442,9 +442,13 @@ pub const GB_ROMS: &[TestRom] = &[
     },
 ];
 
-/// The Nintendo DS.
+/// The Nintendo DS, as two homebrew applications.
 ///
-/// # Why a homebrew application rather than a test suite
+/// The first checks that a program *runs*; the second checks that it can read its own cartridge,
+/// which is a different machine entirely — `ROMCTRL`, a DMA channel on the card start-timing, and
+/// the completion interrupt, none of which the first one touches.
+///
+/// # Why homebrew applications rather than a test suite
 ///
 /// There is no DS equivalent of `gba-suite` in this corpus, and the question this entry exists to
 /// answer is not "is instruction X right" — it is the blunter one the DS actually needed answering:
@@ -457,31 +461,56 @@ pub const GB_ROMS: &[TestRom] = &[
 /// It came from `nds-hb-menu`'s release archive because that is where devkitPro publish a built
 /// libnds binary; nothing here is committed, same rule as every other ROM.
 ///
-/// It found five bugs in a machine whose own 376 unit tests all passed, four of them outside the
-/// DS crate entirely — two missing ARMv5 behaviours in the shared CPU core among them. That is the
-/// argument for keeping a real program in the corpus rather than only synthetic tests.
-pub const NDS_ROMS: &[TestRom] = &[TestRom {
-    name: "nds_libnds_argv_test",
-    url: "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
-    path: "nds/argv-test.nds",
-    convention: Convention::Framebuffer,
-    hardware: Hardware::Nds,
-    // It has a picture within a few frames or it never will.
-    max_frames: 60,
-    // **Validated by reading the picture**, which is possible here in a way it is not for a
-    // pattern of pixels: the sub screen renders the text `No arguments!`, which is exactly what
-    // `argvTest` prints when it is launched with no argv, in the font libnds ships. The top screen
-    // is white because `consoleDemoInit` only powers the sub engine, which is also correct.
-    //
-    // That is weaker than `dmg-acid2`'s pixel-exact comparison against a published reference and
-    // stronger than "something rendered": a machine that gets the console, the font, the palette,
-    // the interrupt path, and every BIOS call it makes wrong in any visible way does not spell a
-    // sentence. The picture is identical at 60, 90, 120 and 240 frames and reproduces exactly
-    // across runs, so the frame is genuinely stable rather than caught mid-startup.
-    expected_hash: Some("a9698c660a53ffd4"),
-    expected_failure: None,
-    licence: "GPL-2.0 (devkitPro nds-hb-menu). Fetched from the upstream release, never committed.",
-}];
+/// Between them these two found six bugs in a machine whose own unit tests all passed, and four of
+/// those were outside the DS crate entirely — two missing ARMv5 behaviours in the shared CPU core
+/// among them. That is the argument for keeping real programs in the corpus rather than only
+/// synthetic tests: they exercise the joins, and the joins are where a machine assembled from
+/// separately-tested parts goes wrong.
+pub const NDS_ROMS: &[TestRom] = &[
+    TestRom {
+        name: "nds_libnds_argv_test",
+        url: "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
+        path: "nds/argv-test.nds",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Nds,
+        // It has a picture within a few frames or it never will.
+        max_frames: 60,
+        // **Validated by reading the picture**, which is possible here in a way it is not for a
+        // pattern of pixels: the sub screen renders the text `No arguments!`, which is exactly what
+        // `argvTest` prints when it is launched with no argv, in the font libnds ships. The top screen
+        // is white because `consoleDemoInit` only powers the sub engine, which is also correct.
+        //
+        // That is weaker than `dmg-acid2`'s pixel-exact comparison against a published reference and
+        // stronger than "something rendered": a machine that gets the console, the font, the palette,
+        // the interrupt path, and every BIOS call it makes wrong in any visible way does not spell a
+        // sentence. The picture is identical at 60, 90, 120 and 240 frames and reproduces exactly
+        // across runs, so the frame is genuinely stable rather than caught mid-startup.
+        expected_hash: Some("a9698c660a53ffd4"),
+        expected_failure: None,
+        licence:
+            "GPL-2.0 (devkitPro nds-hb-menu). Fetched from the upstream release, never committed.",
+    },
+    TestRom {
+        name: "nds_nitrofs_normalmap",
+        url: "https://raw.githubusercontent.com/rmn20/NormalmappingDS/master/dist/nmap.nds",
+        path: "nds/nitrofs-normalmap.nds",
+        convention: Convention::Framebuffer,
+        hardware: Hardware::Nds,
+        max_frames: 120,
+        // Not recorded, because half of this picture is wrong — see below. A hash would freeze that
+        // half in place and make fixing it look like a regression.
+        expected_hash: None,
+        expected_failure: Some(
+            "reads its cartridge and does not draw its scene. The cartridge half works: 72 `0xB7` \
+         commands stream about 36 KiB of NitroFS out of the ROM by card DMA inside the first ten \
+         frames and then stop, and the program draws its whole interface on the sub screen in \
+         readable text. The 3D half does not appear — the layer is enabled and geometry is being \
+         submitted, 39 polygons of it, but the top screen stays at the clear colour. A 3D gap \
+         rather than a cartridge one, and the reason no hash is recorded",
+        ),
+        licence: "CC0-1.0 (rmn20). Fetched from the repository, never committed.",
+    },
+];
 
 /// The corpus directory, resolved relative to the workspace root.
 ///

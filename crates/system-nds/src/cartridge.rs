@@ -42,6 +42,18 @@ pub const HEADER_MIRROR: u32 = 0x027F_FE00;
 
 /// Register addresses, in both cores' I/O space. Which core actually owns the slot is decided by
 /// `EXMEMCNT`, which the system assembly holds.
+///
+/// # `CARD_COMMAND` is eight bytes at eight addresses
+///
+/// The command a card is sent is a byte string, most significant byte first, and the first byte of
+/// it lives at [`reg::CARD_COMMAND`] itself. Everything follows from that: byte address `+0` is the
+/// opcode, `+1` through `+4` are the address it names, and a 32-bit write puts its *low* byte at
+/// `+0` like every other write an ARM makes.
+///
+/// This was modelled the other way round for a while — as one big-endian word — which reads a
+/// 32-bit command write correctly and puts every *byte* write at the mirror of its own position.
+/// libnds writes the command a byte at a time, so what a real program got was the fourth byte of
+/// its command interpreted as the opcode: `0x68` where it meant `0xB7`.
 pub mod reg {
     pub const AUXSPICNT: u32 = 0x0400_01A0;
     pub const AUXSPIDATA: u32 = 0x0400_01A2;
@@ -264,8 +276,8 @@ impl NdsCartridge {
         match addr & !3 {
             reg::AUXSPICNT => Some(self.auxspicnt as u32),
             reg::ROMCTRL => Some(self.romctrl),
-            reg::CARD_COMMAND => Some(u32::from_be_bytes(self.command[0..4].try_into().unwrap())),
-            0x0400_01AC => Some(u32::from_be_bytes(self.command[4..8].try_into().unwrap())),
+            reg::CARD_COMMAND => Some(u32::from_le_bytes(self.command[0..4].try_into().unwrap())),
+            0x0400_01AC => Some(u32::from_le_bytes(self.command[4..8].try_into().unwrap())),
             reg::CARD_DATA => Some(self.take_word()),
             _ => None,
         }
@@ -295,8 +307,8 @@ impl NdsCartridge {
         match addr & !3 {
             reg::AUXSPICNT => self.auxspicnt = value as u16,
             reg::ROMCTRL => self.set_romctrl(value),
-            reg::CARD_COMMAND => self.command[0..4].copy_from_slice(&value.to_be_bytes()),
-            0x0400_01AC => self.command[4..8].copy_from_slice(&value.to_be_bytes()),
+            reg::CARD_COMMAND => self.command[0..4].copy_from_slice(&value.to_le_bytes()),
+            0x0400_01AC => self.command[4..8].copy_from_slice(&value.to_le_bytes()),
             // `CARD_DATA` is read-only; a write to it is a driver bug, not a register.
             reg::CARD_DATA => {}
             _ => return false,
@@ -355,8 +367,8 @@ impl NdsCartridge {
         match addr & !3 {
             reg::AUXSPICNT => Some(self.auxspicnt as u32),
             reg::ROMCTRL => Some(self.romctrl),
-            reg::CARD_COMMAND => Some(u32::from_be_bytes(self.command[0..4].try_into().unwrap())),
-            0x0400_01AC => Some(u32::from_be_bytes(self.command[4..8].try_into().unwrap())),
+            reg::CARD_COMMAND => Some(u32::from_le_bytes(self.command[0..4].try_into().unwrap())),
+            0x0400_01AC => Some(u32::from_le_bytes(self.command[4..8].try_into().unwrap())),
             reg::CARD_DATA => Some(0),
             _ => None,
         }
