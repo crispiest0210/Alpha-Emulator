@@ -348,14 +348,33 @@ impl Savable for Gpu3d {
         for value in self.edge_color {
             w.write_u16(value);
         }
-        // The half-received command is not saved, for the same reason the half-assembled strip is
-        // not: a state taken between two words of one command's parameters is not a state a frame
-        // boundary can occur at, and restoring one would be restoring the emulator rather than
-        // the machine.
-        //
-        // The rendered framebuffer is not saved either — it is regenerated at the next swap, and
-        // a state that carried it would put 96 KiB into every rewind frame for one frame of
-        // picture the very next vblank replaces.
+        // The half-received command: opcodes already popped off `GXFIFO` but still waiting on
+        // parameters, and a command being fed through its own port instead of the FIFO. Dropping
+        // this used to be excused as "the emulator's state, not the machine's" — but the machine
+        // really does hold it: hardware's FIFO is the same 256-entry queue whether it is read
+        // through the packed port or the per-command ones, and a game that has written the first
+        // half of `MTX_MULT_4X4`'s sixteen words has committed those words to hardware already.
+        // Restoring without them means the second half of that matrix arrives with no first half
+        // to complete, and is silently interpreted as a new, wrong command instead.
+        w.write_u64(self.pending.len() as u64);
+        for opcode in &self.pending {
+            w.write_u8(*opcode);
+        }
+        w.write_u64(self.params.len() as u64);
+        for param in &self.params {
+            w.write_u32(*param);
+        }
+        w.write_bool(self.port.is_some());
+        if let Some((opcode, params)) = &self.port {
+            w.write_u8(*opcode);
+            w.write_u64(params.len() as u64);
+            for param in params {
+                w.write_u32(*param);
+            }
+        }
+        // The rendered framebuffer. See `Framebuffer3d`'s own doc comment for why this is not the
+        // "regenerated every frame" case it looks like at first.
+        self.framebuffer.save(w);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -372,9 +391,51 @@ impl Savable for Gpu3d {
         for value in &mut self.edge_color {
             *value = r.read_u16()?;
         }
+
+        let pending_count = r.read_u64()? as usize;
+        // Hardware's own FIFO holds 256 entries; a claim well past that is a corrupt blob, not a
+        // machine mid-way through an enormous burst.
+        if pending_count > 0x400 {
+            return Err(StateError::Malformed(format!(
+                "the geometry FIFO claims {pending_count} queued opcodes"
+            )));
+        }
         self.pending.clear();
+        for _ in 0..pending_count {
+            self.pending.push_back(r.read_u8()?);
+        }
+
+        let params_count = r.read_u64()? as usize;
+        if params_count > 0x400 {
+            return Err(StateError::Malformed(format!(
+                "the geometry FIFO claims {params_count} queued parameters"
+            )));
+        }
         self.params.clear();
-        self.port = None;
+        for _ in 0..params_count {
+            self.params.push(r.read_u32()?);
+        }
+
+        self.port = if r.read_bool()? {
+            let opcode = r.read_u8()?;
+            let count = r.read_u64()? as usize;
+            // 32 is the largest parameter count any command takes (`SHININESS`'s table), so more
+            // than that is a corrupt blob rather than a real in-progress command.
+            if count > 32 {
+                return Err(StateError::Malformed(format!(
+                    "a port command claims {count} parameters, more than any command takes"
+                )));
+            }
+            let mut params = Vec::with_capacity(count);
+            for _ in 0..count {
+                params.push(r.read_u32()?);
+            }
+            Some((opcode, params))
+        } else {
+            None
+        };
+
+        self.framebuffer.load(r)?;
         Ok(())
     }
 }

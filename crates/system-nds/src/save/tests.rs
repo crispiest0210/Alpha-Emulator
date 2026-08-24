@@ -127,6 +127,103 @@ fn holding_is_bounded_rather_than_growing_forever() {
 }
 
 #[test]
+fn a_cartridge_whose_type_never_settles_produces_a_visible_signal_rather_than_a_silent_drop() {
+    // Before this, the only trace of a cartridge detection could never resolve was a
+    // `tracing::warn!` line — invisible to anyone actually playing the game, who just watched
+    // their save silently stop growing. `status()` is what a frontend can poll instead.
+    let mut chip = SaveChip::new();
+
+    // Every one of these is a five-byte transaction — one byte of address, one of data — which is
+    // ambiguous on all three address widths and never settles anything.
+    for i in 0..HELD_WRITE_LIMIT {
+        write(&mut chip, 1, i, &[i as u8]);
+        assert_eq!(
+            chip.status(),
+            SaveStatus::Undetermined {
+                held_writes: i + 1,
+                gave_up: false,
+            },
+            "still within the limit after {} writes",
+            i + 1
+        );
+    }
+
+    // One more pushes past the limit: held stops growing, and `gave_up` flips — sticky, because
+    // detection has genuinely failed and nothing later changes that fact for this chip.
+    write(&mut chip, 1, 9999, &[0xFF]);
+    assert_eq!(
+        chip.status(),
+        SaveStatus::Undetermined {
+            held_writes: HELD_WRITE_LIMIT,
+            gave_up: true,
+        }
+    );
+
+    // And the core guarantee this whole module exists for is intact regardless: nothing of the
+    // wrong shape ever reached the disk, gave-up or not.
+    assert!(chip.kind().is_none());
+    assert!(chip.save_ram().is_none());
+
+    // A save state carries the signal too, so a frontend polling after a load sees it.
+    use savestate::{decode_state, encode_state};
+    let blob = encode_state("nds", 1, &chip);
+    let mut restored = SaveChip::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+    assert_eq!(restored.status(), chip.status());
+}
+
+#[test]
+fn a_known_chip_resolves_the_131_byte_ambiguity_for_both_colliding_chip_types() {
+    // 131 bytes is reachable two ways the write stream alone cannot tell apart: a full 128-byte
+    // page at two address bytes (1 + 2 + 128), and a 127-byte partial page at three (1 + 3 + 127).
+    // `from_write_length` — see its own doc comment — resolves the first because it is exactly a
+    // whole page, and cannot resolve the second at all; a chip already known from outside the
+    // write stream, which `new_known` models, resolves both correctly because it never has to
+    // guess from the length in the first place.
+    let mut eeprom = SaveChip::new_known(Eeprom64K);
+    write(&mut eeprom, 2, 0, &[0xAB; 128]);
+    assert_eq!(eeprom.kind(), Some(Eeprom64K));
+    assert_eq!(&eeprom.save_ram().unwrap()[0..128], &[0xAB; 128][..]);
+
+    let mut flash = SaveChip::new_known(Flash256K);
+    write(&mut flash, 3, 0, &[0xCD; 127]);
+    assert_eq!(flash.kind(), Some(Flash256K));
+    assert_eq!(&flash.save_ram().unwrap()[0..127], &[0xCD; 127][..]);
+
+    // The point made concrete: the heuristic alone gets the second one wrong. Left to
+    // `from_write_length`, a fresh chip sees the same 131-byte FLASH partial-page write and
+    // misreads it as a full EEPROM64K page — which is exactly the bug `new_known` exists to avoid
+    // whenever the chip can be known in advance.
+    let mut undetected = SaveChip::new();
+    write(&mut undetected, 3, 0, &[0xCD; 127]);
+    assert_eq!(
+        undetected.kind(),
+        Some(Eeprom64K),
+        "confirming the collision this test's first half is the fix for"
+    );
+}
+
+#[test]
+fn the_game_code_lookup_matches_only_an_exact_listed_code() {
+    // Tested against a synthetic table rather than the shipped one, which is empty — see the
+    // module docs — so this proves the matching mechanism rather than any real title's chip.
+    let table: &[(&str, ChipKind)] = &[("ABCJ", Flash512K), ("XYZW", Eeprom64K)];
+    assert_eq!(ChipKind::lookup(table, "ABCJ"), Some(Flash512K));
+    assert_eq!(ChipKind::lookup(table, "XYZW"), Some(Eeprom64K));
+    assert_eq!(ChipKind::lookup(table, "ABCX"), None, "no partial match");
+    assert_eq!(ChipKind::lookup(table, ""), None);
+}
+
+#[test]
+fn the_shipped_game_code_table_is_empty_until_a_verified_entry_is_added() {
+    // Not a tautology: this is the guarantee that shipping this mechanism today changes nothing
+    // for any real cartridge — every title still goes through the heuristic exactly as before,
+    // right up until someone adds a sourced entry.
+    assert_eq!(ChipKind::from_game_code("ATST"), None);
+    assert_eq!(ChipKind::from_game_code(""), None);
+}
+
+#[test]
 fn a_large_eeprom_is_told_from_a_small_one_by_its_page() {
     let mut chip = SaveChip::new();
     write(&mut chip, 2, 0, &[0x11; 128]);

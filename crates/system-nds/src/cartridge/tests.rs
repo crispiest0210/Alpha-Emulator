@@ -239,6 +239,23 @@ fn there_is_no_save_chip_and_it_says_so() {
 }
 
 #[test]
+fn a_cartridges_save_chip_still_falls_through_to_the_heuristic_when_its_code_is_unlisted() {
+    // Every real title today, since the shipped game-code table is empty — see `save`'s module
+    // docs. This is the regression test that the lookup added to `NdsCartridge::new` is a no-op
+    // for the general case rather than something that only compiles.
+    let c = cart();
+    assert_eq!(c.header().game_code, "ATST");
+    assert_eq!(
+        c.save.status(),
+        SaveStatus::Undetermined {
+            held_writes: 0,
+            gave_up: false
+        },
+        "unlisted, so detection starts exactly where it always has"
+    );
+}
+
+#[test]
 fn narrow_accesses_reach_the_registers() {
     let mut c = cart();
     c.write16(reg::AUXSPICNT, 0x8040);

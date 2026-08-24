@@ -197,6 +197,7 @@ way: the machine running at full speed with nothing on screen, or nearly nothing
   zero, every matrix built from one was a matrix of zeros, and every vertex multiplied by it
   collapsed to the origin. A 3D program submitted its geometry perfectly and drew nothing, which
   looks exactly like a rasteriser bug and is not one.
+
 A second homebrew, this one reading its own cartridge and drawing in three dimensions, found the
 last two: it streams about 36 KiB of NitroFS out of its ROM by card DMA in the first ten frames,
 draws its whole interface, and renders its normal-mapped scene. That scene is checked against the
@@ -219,9 +220,12 @@ pixels within 24.
   layers through the ordinary blend unit.
 - **Sixteen-channel sound** — PCM8, PCM16, IMA-ADPCM, six square-wave channels and two noise
   channels, with per-channel rate, volume, panning, and loop modes.
-- **The cartridge save chip.** Which chip a cartridge has is not in its header, so it is worked out
-  from how the game talks to it — and nothing is written to disk until that is certain, because a
-  save file of the wrong shape is worse than none.
+- **The cartridge save chip.** Which chip a cartridge has is not in its header. A verified
+  per-title table is tried first — empty today, since a wrong entry would be a confident wrong
+  answer rather than an honest unknown one — and falls back to working it out from how the game
+  talks to it. Nothing is written to disk until the type is certain, because a save file of the
+  wrong shape is worse than none; a cartridge that never settles it says so through a queryable
+  status rather than dropping writes with only a log line to show for it.
 - **Input**: the keypad, the two extra buttons only the ARM7 can see, and the touchscreen.
 - **The BIOS calls both cores make**, with a separate table per core because the two do not have
   the same ones — `Div`, `Sqrt`, `CpuSet`, `CpuFastSet`, `GetCRC16`, the five decompressors, and
@@ -230,7 +234,10 @@ pixels within 24.
 - **The hardware divider and square-root unit**, which is how an ARM9 divides at all — three
   division widths, an integer root over 32 or 64 bits, and the divide-by-zero flag software checks.
 - IPC (both FIFOs and `IPCSYNC`), both interrupt controllers, eight timers, eight DMA channels, the
-  cartridge transfer interface, direct boot, and save states covering all of it.
+  cartridge transfer interface, direct boot, and save states covering all of it — including, for
+  the 3D core, the display list a frame is still assembling, the last `POS_TEST`/`VEC_TEST`
+  results, a `GXFIFO` command caught between parameters, and the picture actually on screen, none
+  of which used to survive a save taken mid-frame.
 - **Cartridge streaming end to end**: a `ROMCTRL` transfer arms whichever core's DMA channel is set
   to the card start-timing, the channel pulls the block out of the data port, and completion raises
   the card interrupt when `AUXSPICNT` bit 14 asks for it. A block bigger than one channel's count
@@ -253,6 +260,15 @@ pixels within 24.
   `Sleep`, and its three sound-table getters, whose contents live in a BIOS ROM this project does
   not ship. Each logs a warning and returns with the caller's registers untouched, because a
   visibly missing result is far easier to chase than a plausible wrong one.
+- **A save state taken between `BEGIN_VTXS` and a primitive's last vertex** loses the vertices
+  already popped off `GXFIFO` for it — the *finished* polygons a frame has built do survive, and so
+  does everything else about a save taken mid-frame; only this one narrow window does not. Accepted
+  because it is rare (a handful of instructions out of a whole frame) and small (at most three or
+  four vertices), unlike the display list itself, which is neither.
+- **A save-chip game-code table with no entries in it.** The mechanism a verified table would use
+  is built and tested; the table itself needs a source for each entry that is not "trust the
+  author", and none has been added yet. Every real cartridge goes through the write-pattern
+  heuristic exactly as before.
 
 Component status:
 
@@ -309,10 +325,10 @@ Component status:
 | `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
 | `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
 | `system-nds` cartridge — header, direct boot, card transfers, DMA streaming and the completion interrupt | done and tested end to end, by a hand-written program and by a real NitroFS homebrew that streams 36 KiB out of its own ROM; **no KEY1 encryption** |
-| `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; write timing is not modelled, and a cartridge that only ever writes partial pages cannot be identified |
+| `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; a verified per-title table (currently empty) is tried before the write-pattern heuristic, which is the only thing that can tell apart two chips whose write lengths happen to coincide; write timing is not modelled, and an unlisted cartridge that only ever writes partial pages still cannot be identified — but now reports that through a queryable status instead of dropping writes silently |
 | `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
 | `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
-| `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested; shininess table and `BOX_TEST` deferred |
+| `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested, including a save state taken mid-frame — the display list under construction, the last `POS_TEST`/`VEC_TEST` results, a `GXFIFO` command caught between parameters, and the rendered picture all survive; shininess table, `BOX_TEST`, and a vertex still mid-primitive at save time are deferred |
 | `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested, and **validated against a real program's own reference screenshot**; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
 | `system-nds` BIOS calls — two per-core tables, `IntrWait` against each core's flag word, decompressors | done and tested; **`BitUnPack`, `SoftReset`, `Sleep`, and the three ARM7 sound tables log and return rather than guessing** |
 | `system-nds` assembly — `System` impl, two bus views, dual-core frame loop, BIOS interrupt wrapper | done; draws both screens and produces audio, and **runs a real libnds binary to a stable, correct picture** — validated in the accuracy suite against the text the program prints |

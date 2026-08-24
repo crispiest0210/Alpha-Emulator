@@ -28,6 +28,32 @@
 //! [`SaveChip::load_file`] takes the type straight from the file's length. The heuristic therefore only
 //! ever runs on a cartridge's first save, and every session after that is certain.
 //!
+//! # The heuristic has one genuine blind spot, and a table is the way out of it
+//!
+//! Total transaction length is not always decisive. A 131-byte write is a full 128-byte page on
+//! the two-address-byte EEPROM (1 command + 2 address + 128 data) *and* a 127-byte partial page on
+//! the three-address-byte FLASH (1 + 3 + 127) — the same total, two different chips, and no
+//! further byte in the transaction says which, because both use the same `WRITE` opcode. No amount
+//! of cleverness inside the write stream resolves that; it needs information from outside it.
+//! [`ChipKind::from_game_code`] is that information — a title's chip is fixed in silicon and
+//! knowable in advance, so a verified per-title table is a strictly better source than any
+//! heuristic and is tried first. [`SaveChip::new_known`] is how a cartridge whose title matches
+//! adopts a chip immediately, before a single write has to be classified at all.
+//!
+//! The table shipped here is empty. Populating it with real titles needs a verified source — the
+//! same rule this project applies to everything else that could silently corrupt a player's data
+//! if guessed wrong — and guessing at entries would be worse than not having the table, because a
+//! wrong table entry is confident and permanent where the heuristic's "still holding" is at least
+//! honest about not knowing. The mechanism is real and tested; the data is left for whoever can
+//! cite where each entry came from.
+//!
+//! # A cartridge that never settles is not silent about it
+//!
+//! [`SaveChip::status`] distinguishes "still holding writes, more may yet arrive" from "gave up
+//! at the holding limit", and the frontend has the second case to poll for and surface — a title
+//! whose save can never be identified should tell the player that, rather than losing writes with
+//! nothing but a log line to explain why the save never grew.
+//!
 //! # What is not modelled
 //!
 //! Write timing. Hardware holds the write-in-progress flag for milliseconds after a page write and
@@ -139,7 +165,41 @@ impl ChipKind {
         }
         None
     }
+
+    /// The chip a verified per-title table says a cartridge has, keyed by its four-character game
+    /// code.
+    ///
+    /// This is the *primary* source — tried before a single byte has to be classified — because it
+    /// is strictly more reliable than any heuristic: the chip is fixed in silicon per title, so a
+    /// verified entry cannot be wrong the way an inference from write lengths sometimes can be
+    /// (see the module docs for the 131-byte collision this exists to resolve). Falls through to
+    /// [`from_write_length`] when a code is not listed, which is every code today — see
+    /// [`GAME_CODE_TABLE`].
+    pub fn from_game_code(code: &str) -> Option<Self> {
+        Self::lookup(GAME_CODE_TABLE, code)
+    }
+
+    /// The lookup itself, taking the table as a parameter so it can be exercised against a
+    /// synthetic one in tests without the production table needing a single entry to prove the
+    /// matching logic works.
+    fn lookup(table: &[(&str, ChipKind)], code: &str) -> Option<Self> {
+        table
+            .iter()
+            .find(|(entry, _)| *entry == code)
+            .map(|(_, kind)| *kind)
+    }
 }
+
+/// Verified game-code-to-chip mappings.
+///
+/// Empty. See the module docs' "The heuristic has one genuine blind spot" section for why an
+/// empty, honest table is the right state for this to ship in rather than a guessed-at one — a
+/// wrong entry here writes a save file of the wrong shape with *more* confidence than the
+/// heuristic it would replace, not less.
+///
+/// The shape a real entry takes, so adding one is a one-line change once it is sourced:
+/// `("ABCE", ChipKind::Flash512K), // <title> — <how this was verified>`
+const GAME_CODE_TABLE: &[(&str, ChipKind)] = &[];
 
 mod command {
     pub const WRITE_ENABLE: u8 = 0x06;
@@ -170,6 +230,22 @@ const STATUS_WRITE_ENABLED: u8 = 1 << 1;
 /// detection has genuinely failed rather than merely not finished.
 const HELD_WRITE_LIMIT: usize = 64;
 
+/// What [`SaveChip::status`] reports, for a frontend to show a player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveStatus {
+    /// The chip type is known — from the game-code table, a probe, a decisive write length, or a
+    /// loaded save file. Writes reach the backing store and `save_ram` has something to flush.
+    Determined(ChipKind),
+    /// Still guessing. `held_writes` is how many ambiguous writes are queued waiting for something
+    /// decisive to arrive; none of them has reached the backing store yet.
+    ///
+    /// `gave_up` is set once that queue hit [`HELD_WRITE_LIMIT`] and further writes started being
+    /// dropped rather than held — the point at which this cartridge's save is genuinely at risk,
+    /// and the signal a frontend should poll for and tell the player about. It was previously only
+    /// a `tracing::warn!` line nobody playing the game would ever see.
+    Undetermined { held_writes: usize, gave_up: bool },
+}
+
 /// The save chip and the transaction currently in flight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveChip {
@@ -185,6 +261,9 @@ pub struct SaveChip {
     /// ambiguous write is to wait — and a write nobody can place yet is one nobody can read back
     /// yet either, so holding it is invisible to the game.
     held: Vec<Vec<u8>>,
+    /// Set once [`HELD_WRITE_LIMIT`] was reached and a write was dropped rather than held. Sticky
+    /// for the life of this chip: detection genuinely failed, and nothing later changes that.
+    gave_up: bool,
     /// Set by any write that changed the data, and cleared by the frontend after a flush.
     dirty: bool,
 }
@@ -203,12 +282,38 @@ impl SaveChip {
             status: 0,
             transaction: Vec::new(),
             held: Vec::new(),
+            gave_up: false,
             dirty: false,
         }
     }
 
+    /// A chip whose type is already known, from outside the write stream — the game-code table
+    /// today, potentially a firmware NVRAM record or a user override later. Adopts immediately, so
+    /// the very first write is placed correctly rather than the first one merely being enough to
+    /// classify the chip by.
+    ///
+    /// This is also what resolves the collision [`ChipKind::from_write_length`] cannot: two chips
+    /// that produce the same total transaction length are only distinguishable by something that
+    /// is not in the transaction, and a caller that already knows the answer is exactly that.
+    pub fn new_known(kind: ChipKind) -> Self {
+        let mut chip = Self::new();
+        chip.adopt(kind);
+        chip
+    }
+
     pub fn kind(&self) -> Option<ChipKind> {
         self.kind
+    }
+
+    /// Whether the chip type is known yet, and — while it is not — how stuck detection is.
+    pub fn status(&self) -> SaveStatus {
+        match self.kind {
+            Some(kind) => SaveStatus::Determined(kind),
+            None => SaveStatus::Undetermined {
+                held_writes: self.held.len(),
+                gave_up: self.gave_up,
+            },
+        }
     }
 
     /// The save data, or `None` while the chip type is still unknown.
@@ -424,6 +529,9 @@ impl SaveChip {
                     if self.held.len() < HELD_WRITE_LIMIT {
                         self.held.push(std::mem::take(&mut self.transaction));
                     } else {
+                        // `gave_up` is the durable, queryable form of this failure — see
+                        // `SaveStatus`. The log line stays too, for whoever is looking at one.
+                        self.gave_up = true;
                         tracing::warn!(
                             "dropping a save write: {} writes held and none has identified the \
                              chip. The cartridge writes only partial pages and never probes, \
@@ -508,6 +616,7 @@ impl Savable for SaveChip {
         for transaction in &self.held {
             w.write_blob(transaction);
         }
+        w.write_bool(self.gave_up);
         // The in-flight transaction is not saved. A save state is taken between instructions and
         // a SPI transaction spans several, but restoring one would restore the emulator's idea of
         // a bus rather than the machine — and an abandoned transaction is what a reset produces
@@ -547,6 +656,7 @@ impl Savable for SaveChip {
         for _ in 0..held {
             self.held.push(r.read_blob()?.to_vec());
         }
+        self.gave_up = r.read_bool()?;
         self.transaction.clear();
         Ok(())
     }

@@ -844,6 +844,218 @@ fn the_core_round_trips_through_a_save_state() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Save states taken mid-frame: the gaps the previous test's engineered scenario did not reach,
+// because it always saved between primitives with nothing yet assembled into `building`. Real
+// play does not arrange that — a rewind buffer or an autosave lands wherever the CPU happens to
+// be, which is usually somewhere in the middle of a frame's geometry.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_save_state_mid_display_list_renders_the_same_next_frame_as_an_uninterrupted_run() {
+    use savestate::{decode_state, encode_state};
+
+    // The first of two triangles is assembled and left sitting in `building`, unswapped — this is
+    // exactly the state a save taken between two `SWAP_BUFFERS` calls finds a game in, and exactly
+    // what used to vanish on restore.
+    let mut original = fresh();
+    original.geometry.execute(POLYGON_ATTR, &[ATTR_BOTH_FACES]);
+    original.geometry.execute(BEGIN_VTXS, &[0]);
+    for (x, y) in [(-0.9f32, -0.9f32), (-0.1, -0.9), (-0.5, -0.1)] {
+        original.geometry.execute(VTX_16, &vtx16(x, y, 0.0));
+    }
+    original.geometry.execute(END_VTXS, &[]);
+    assert_eq!(original.geometry.polygon_count(), 1);
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+    assert_eq!(
+        restored.geometry.polygon_count(),
+        1,
+        "the triangle already built survived the round trip"
+    );
+
+    // Both engines now run the identical remainder of the frame: a second triangle, then the
+    // swap that hardware performs at the next VBlank.
+    for engine in [&mut original, &mut restored] {
+        engine.geometry.execute(BEGIN_VTXS, &[0]);
+        for (x, y) in [(0.1f32, -0.9f32), (0.9, -0.9), (0.5, -0.1)] {
+            engine.geometry.execute(VTX_16, &vtx16(x, y, 0.0));
+        }
+        engine.geometry.execute(END_VTXS, &[]);
+        engine.geometry.execute(SWAP_BUFFERS, &[0]);
+    }
+    let vram = Vram::new();
+    original.on_vblank(&vram);
+    restored.on_vblank(&vram);
+
+    assert_eq!(
+        restored.framebuffer.color, original.framebuffer.color,
+        "the picture the restored engine drew must match the uninterrupted run pixel for pixel"
+    );
+    assert_eq!(restored.framebuffer.alpha, original.framebuffer.alpha);
+    // Not a blank-matches-blank pass: both triangles are actually on screen.
+    assert_ne!(
+        restored.framebuffer.alpha_at(64, 160),
+        0,
+        "the first triangle drew"
+    );
+    assert_ne!(
+        restored.framebuffer.alpha_at(192, 160),
+        0,
+        "the second triangle drew"
+    );
+}
+
+#[test]
+fn a_save_state_after_swap_buffers_but_before_vblank_still_swaps_in_the_picture() {
+    use savestate::{decode_state, encode_state};
+
+    // The literal failure this fixes: `SWAP_BUFFERS` has run, so `swap_pending` is set and the
+    // finished list is sitting in `building` waiting for `on_vblank` to take it. A save landing
+    // in that one-instruction-wide window used to restore `swap_pending` faithfully and `building`
+    // as empty, so the next `VBlank` swapped in nothing at all.
+    let mut original = fresh();
+    original.geometry.execute(COLOR, &[color(31, 0, 0)]);
+    original.geometry.execute(POLYGON_ATTR, &[ATTR_BOTH_FACES]);
+    original.geometry.execute(BEGIN_VTXS, &[0]);
+    for (x, y) in [(-0.5f32, 0.5f32), (0.5, 0.5), (0.0, -0.5)] {
+        original.geometry.execute(VTX_16, &vtx16(x, y, 0.0));
+    }
+    original.geometry.execute(END_VTXS, &[]);
+    original.geometry.execute(SWAP_BUFFERS, &[0]);
+    assert!(original.geometry.swap_pending);
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+    assert!(restored.geometry.swap_pending, "the pending swap survived");
+    assert_eq!(
+        restored.geometry.polygon_count(),
+        1,
+        "and so did the polygon it is waiting to swap in"
+    );
+
+    let vram = Vram::new();
+    restored.on_vblank(&vram);
+    assert_ne!(
+        restored.framebuffer.alpha_at(128, 110),
+        0,
+        "the triangle actually reached the screen rather than being swapped in as nothing"
+    );
+    let pixel = restored.framebuffer.color_at(128, 110);
+    assert_eq!(pixel & 0x1F, 31, "and it kept its colour: {pixel:#06X}");
+}
+
+#[test]
+fn a_save_state_preserves_the_framebuffer_when_no_swap_is_pending() {
+    use savestate::{decode_state, encode_state};
+
+    // A game that has not called `SWAP_BUFFERS` since its last one has no pending swap, so
+    // `on_vblank` is a no-op and the picture on screen is whatever the *previous* swap produced.
+    // Nothing else in this engine's state remembers what that picture was — it is not
+    // reconstructible from `building`, which by then may hold a different, half-assembled frame
+    // entirely — so a save taken here has to carry the rendered pixels themselves.
+    let vram = Vram::new();
+    let mut original = fresh();
+    original.geometry.execute(COLOR, &[color(0, 31, 0)]);
+    draw_triangle(&mut original, &vram, ATTR_BOTH_FACES);
+    assert!(!original.geometry.swap_pending, "the swap already happened");
+    let expected = original.framebuffer.alpha_at(128, 110);
+    assert_ne!(expected, 0);
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+
+    // No further geometry, no further swap — exactly a game sitting idle after loading.
+    restored.on_vblank(&vram);
+    assert_eq!(
+        restored.framebuffer.alpha_at(128, 110),
+        expected,
+        "the picture from before the save is still on screen, not regenerated as blank"
+    );
+    assert_eq!(restored.framebuffer.color, original.framebuffer.color);
+}
+
+#[test]
+fn a_save_state_preserves_the_last_pos_and_vec_test_results() {
+    use savestate::{decode_state, encode_state};
+
+    let mut original = fresh();
+    original.geometry.pos_result = [11, 22, 33, 44];
+    original.geometry.vec_result = [55, 66, 77];
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+
+    assert_eq!(restored.geometry.pos_result, [11, 22, 33, 44]);
+    assert_eq!(restored.geometry.vec_result, [55, 66, 77]);
+}
+
+#[test]
+fn a_save_state_preserves_a_half_received_port_command() {
+    use savestate::{decode_state, encode_state};
+    let port = |opcode: u8| GXFIFO + opcode as u32 * 4;
+
+    // MTX_TRANS takes three parameters; only two have arrived through its own port, so the command
+    // has not fired yet. Those two words are already off the bus and gone from the CPU's future —
+    // losing them here is not a state a resumed run could ever reconstruct.
+    let mut original = fresh();
+    original.write32(port(MTX_MODE), 1); // the position matrix, so `translate` lands where we look
+    original.write32(port(MTX_TRANS), (3 * ONE) as u32);
+    original.write32(port(MTX_TRANS), 0);
+    assert_eq!(original.geometry.matrices.position, Matrix::identity());
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+    assert_eq!(
+        restored.geometry.matrices.position,
+        Matrix::identity(),
+        "still waiting on its third parameter"
+    );
+
+    restored.write32(port(MTX_TRANS), 0);
+    assert_eq!(
+        restored.geometry.matrices.position.transform(0, 0, 0, ONE)[0],
+        3 * ONE,
+        "the third parameter completed the command the first two were already holding"
+    );
+}
+
+#[test]
+fn a_save_state_preserves_a_half_received_fifo_command() {
+    use savestate::{decode_state, encode_state};
+
+    // The packed-word path: MTX_MODE has fully executed, and MTX_TRANS is one parameter into its
+    // three, queued behind it in the FIFO's own `pending`/`params` buffers rather than a port's.
+    let mut original = fresh();
+    original.write32(GXFIFO, MTX_MODE as u32 | ((MTX_TRANS as u32) << 8));
+    original.write32(GXFIFO, 1); // MTX_MODE's parameter
+    original.write32(GXFIFO, (5 * ONE) as u32); // MTX_TRANS's first of three
+
+    let blob = encode_state("nds", 1, &original);
+    let mut restored = Gpu3d::new();
+    decode_state("nds", 1, &blob, &mut restored).unwrap();
+    assert_eq!(restored.geometry.matrices.mode, MatrixMode::Position);
+    assert_eq!(
+        restored.geometry.matrices.position,
+        Matrix::identity(),
+        "MTX_TRANS still hasn't fired"
+    );
+
+    restored.write32(GXFIFO, 0);
+    restored.write32(GXFIFO, 0);
+    assert_eq!(
+        restored.geometry.matrices.position.transform(0, 0, 0, ONE)[0],
+        5 * ONE,
+        "the parameter queued before the save completed the command"
+    );
+}
+
 #[test]
 fn rendering_is_deterministic_across_identical_runs() {
     // The rasteriser is integer throughout, so two runs must agree byte for byte. Floats here

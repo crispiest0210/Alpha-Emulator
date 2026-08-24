@@ -26,6 +26,7 @@
 use super::geometry::{DisplayList, Polygon, ScreenVertex};
 use crate::video::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::vram::{Vram, VramSpace};
+use core_common::{Savable, StateError, StateReader, StateWriter};
 
 pub const PIXELS: usize = (SCREEN_WIDTH * SCREEN_HEIGHT) as usize;
 
@@ -81,6 +82,52 @@ impl Framebuffer3d {
         self.alpha.fill(alpha);
         self.depth.fill(depth);
         self.polygon_id.fill(id);
+    }
+}
+
+/// The picture engine A composites from, saved in full.
+///
+/// Unlike the 2D backgrounds and sprites, this is not something a fresh render regenerates every
+/// frame: [`super::Gpu3d::on_vblank`] only rewrites it when a swap is pending, so a game that goes
+/// several frames — or several minutes, sitting on a menu — without submitting new geometry keeps
+/// showing exactly this buffer. A save state taken during that stretch has to carry the picture
+/// itself, or reloading it shows whatever pixels happened to be in memory rather than what the
+/// screen actually held.
+///
+/// That costs roughly 384 KiB per save — more than any other single piece of this crate's state —
+/// but the alternative is a save-state format that answers "what is on screen right now" wrong.
+/// `crates/system-nds/src/vram.rs` already carries a comparable amount of raw framebuffer-adjacent
+/// data for the same reason: a value nothing else can reconstruct has to be written down.
+impl Savable for Framebuffer3d {
+    fn save(&self, w: &mut StateWriter) {
+        for value in self.color.iter() {
+            w.write_u16(*value);
+        }
+        for value in self.alpha.iter() {
+            w.write_u8(*value);
+        }
+        for value in self.depth.iter() {
+            w.write_u32(*value);
+        }
+        for value in self.polygon_id.iter() {
+            w.write_u8(*value);
+        }
+    }
+
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        for value in self.color.iter_mut() {
+            *value = r.read_u16()?;
+        }
+        for value in self.alpha.iter_mut() {
+            *value = r.read_u8()?;
+        }
+        for value in self.depth.iter_mut() {
+            *value = r.read_u32()?;
+        }
+        for value in self.polygon_id.iter_mut() {
+            *value = r.read_u8()?;
+        }
+        Ok(())
     }
 }
 

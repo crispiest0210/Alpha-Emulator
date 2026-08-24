@@ -738,9 +738,15 @@ fn interpolate(a: &ClipVertex, b: &ClipVertex, axis: usize, side: i32) -> ClipVe
 impl Savable for Geometry {
     fn save(&self, w: &mut StateWriter) {
         self.matrices.save(w);
-        // The half-assembled primitive is not saved. A save state taken mid-strip is
-        // indistinguishable from one taken between primitives once the list is swapped, and
-        // carrying the strip would make the format depend on the assembly order.
+        // The half-assembled primitive — the vertices already popped off `GXFIFO` into `strip`,
+        // waiting for enough of them to complete a triangle or quad — is still not saved. Those
+        // vertices are gone from the command stream: the CPU has already executed the writes that
+        // produced them and will not repeat them on resume, so losing `strip` here is a real,
+        // narrow gap in a save taken between `BEGIN_VTXS` and the primitive's last vertex. It is
+        // accepted for now because it is rare (a save lands on a specific handful of instructions
+        // out of a whole frame's worth) and small (at most three or four vertices), unlike
+        // `building` below, which is not narrow at all — it is every polygon the current frame has
+        // assembled, and losing it silently swaps in a blank picture on the next `VBlank`.
         for value in self.current_color {
             w.write_u8(value);
         }
@@ -779,6 +785,20 @@ impl Savable for Geometry {
         }
         w.write_bool(self.overflow);
         w.write_bool(self.swap_pending);
+        // `POS_RESULT` and `VEC_RESULT`: the answers to the last `POS_TEST`/`VEC_TEST`, which a
+        // game reads back well after issuing the command that produced them.
+        for value in self.pos_result {
+            w.write_i32(value);
+        }
+        for value in self.vec_result {
+            w.write_i32(value);
+        }
+        // The list under construction. This is the fix for the bug this comment used to excuse:
+        // a save taken after some polygons were assembled but before `SWAP_BUFFERS` restored with
+        // `building` empty, and a save taken after `SWAP_BUFFERS` but before the next `VBlank`
+        // restored with `swap_pending` true and nothing to swap — either way, the next frame drew
+        // a blank picture instead of the one the game had already built.
+        self.building.save(w);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -826,9 +846,115 @@ impl Savable for Geometry {
         }
         self.overflow = r.read_bool()?;
         self.swap_pending = r.read_bool()?;
+        for value in &mut self.pos_result {
+            *value = r.read_i32()?;
+        }
+        for value in &mut self.vec_result {
+            *value = r.read_i32()?;
+        }
+        self.building.load(r)?;
         self.primitive = None;
         self.strip.clear();
         self.strip_count = 0;
+        Ok(())
+    }
+}
+
+/// A vertex ready to rasterise, as [`DisplayList::save`] writes it.
+fn save_screen_vertex(v: &ScreenVertex, w: &mut StateWriter) {
+    w.write_i32(v.x);
+    w.write_i32(v.y);
+    w.write_u32(v.depth);
+    w.write_i32(v.w);
+    for value in v.color {
+        w.write_u8(value);
+    }
+    for value in v.texcoord {
+        w.write_i32(value);
+    }
+}
+
+fn load_screen_vertex(r: &mut StateReader) -> Result<ScreenVertex, StateError> {
+    Ok(ScreenVertex {
+        x: r.read_i32()?,
+        y: r.read_i32()?,
+        depth: r.read_u32()?,
+        w: r.read_i32()?,
+        color: [r.read_u8()?, r.read_u8()?, r.read_u8()?],
+        texcoord: [r.read_i32()?, r.read_i32()?],
+    })
+}
+
+fn save_polygon(p: &Polygon, w: &mut StateWriter) {
+    w.write_u64(p.vertices.len() as u64);
+    for index in &p.vertices {
+        w.write_u32(*index as u32);
+    }
+    w.write_u32(p.attr);
+    w.write_u32(p.tex_param);
+    w.write_u32(p.palette_base);
+    w.write_bool(p.front_facing);
+}
+
+fn load_polygon(r: &mut StateReader) -> Result<Polygon, StateError> {
+    let count = r.read_u64()? as usize;
+    // A polygon's vertex indices point into the list's own `vertices`, so it can never legitimately
+    // name more of them than the whole list is allowed to hold.
+    if count > MAX_VERTICES {
+        return Err(StateError::Malformed(format!(
+            "a polygon claims {count} vertices; the whole list holds at most {MAX_VERTICES}"
+        )));
+    }
+    let mut vertices = Vec::with_capacity(count);
+    for _ in 0..count {
+        vertices.push(r.read_u32()? as usize);
+    }
+    Ok(Polygon {
+        vertices,
+        attr: r.read_u32()?,
+        tex_param: r.read_u32()?,
+        palette_base: r.read_u32()?,
+        front_facing: r.read_bool()?,
+    })
+}
+
+impl Savable for DisplayList {
+    fn save(&self, w: &mut StateWriter) {
+        w.write_u64(self.vertices.len() as u64);
+        for vertex in &self.vertices {
+            save_screen_vertex(vertex, w);
+        }
+        w.write_u64(self.polygons.len() as u64);
+        for polygon in &self.polygons {
+            save_polygon(polygon, w);
+        }
+        w.write_bool(self.rear_plane_bitmap);
+    }
+
+    fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
+        let vertex_count = r.read_u64()? as usize;
+        if vertex_count > MAX_VERTICES {
+            return Err(StateError::Malformed(format!(
+                "a display list claims {vertex_count} vertices; hardware allows at most {MAX_VERTICES}"
+            )));
+        }
+        self.vertices = Vec::with_capacity(vertex_count);
+        for _ in 0..vertex_count {
+            self.vertices.push(load_screen_vertex(r)?);
+        }
+
+        let polygon_count = r.read_u64()? as usize;
+        if polygon_count > MAX_POLYGONS {
+            return Err(StateError::Malformed(format!(
+                "a display list claims {polygon_count} polygons; hardware allows at most {MAX_POLYGONS}"
+            )));
+        }
+        self.polygons = Vec::with_capacity(polygon_count);
+        for _ in 0..polygon_count {
+            self.polygons.push(load_polygon(r)?);
+        }
+
+        self.rear_plane_bitmap = r.read_bool()?;
         Ok(())
     }
 }

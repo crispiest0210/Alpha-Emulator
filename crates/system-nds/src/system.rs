@@ -1522,12 +1522,14 @@ impl System for NdsSystem {
     }
 
     /// Raised to 2 when the BIOS HLE added the per-core `IntrWait` flag, to 3 when the cartridge
-    /// gained its transfer-completion latch, and to 4 when the ARM9's divider and square-root unit
-    /// arrived. The first two are one bit that decides whether something *will* happen, so a state
-    /// written without them loads into a machine waiting for an event nobody will deliver; the
-    /// third is a block of operands a game may be part-way through writing.
+    /// gained its transfer-completion latch, to 4 when the ARM9's divider and square-root unit
+    /// arrived, and to 5 for two changes that landed together: the 3D core's save state grew to
+    /// cover the display list under construction, the last `POS_TEST`/`VEC_TEST` results, the
+    /// half-received `GXFIFO` command, and the rendered framebuffer — a state saved mid-frame used
+    /// to restore with a swapped-in *empty* picture rather than the one the game had actually
+    /// built — and the save chip gained its `gave_up` flag, part of `SaveStatus`.
     fn state_version(&self) -> u32 {
-        4
+        5
     }
 
     fn set_input(&mut self, input: InputState) {

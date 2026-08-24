@@ -32,7 +32,9 @@
 //! module owns. Which chip a cartridge has is not in the header and is worked out from how the
 //! game talks to it; see that module for how, and for what it refuses to guess.
 
-use crate::save::SaveChip;
+#[cfg(test)]
+use crate::save::SaveStatus;
+use crate::save::{ChipKind, SaveChip};
 use core_common::{CartridgeError, Savable, StateError, StateReader, StateWriter};
 
 /// The header is 512 bytes; the part with fields in it is the first 0x170.
@@ -172,6 +174,13 @@ pub struct NdsCartridge {
 impl NdsCartridge {
     pub fn new(rom: Vec<u8>) -> Result<Self, CartridgeError> {
         let header = Header::parse(&rom)?;
+        // The game-code table, tried before a single byte of the save chip's write stream has to
+        // be classified — see `save`'s module docs for why this is the primary source and the
+        // heuristic only a fallback for titles it does not (yet) name.
+        let save = match ChipKind::from_game_code(&header.game_code) {
+            Some(kind) => SaveChip::new_known(kind),
+            None => SaveChip::new(),
+        };
         Ok(Self {
             rom,
             header,
@@ -182,7 +191,7 @@ impl NdsCartridge {
             pending: Vec::new(),
             read_index: 0,
             completed: false,
-            save: SaveChip::new(),
+            save,
         })
     }
 
