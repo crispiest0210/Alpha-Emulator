@@ -23,14 +23,15 @@ controls, per-OS packages, where saves go, and what to do when something goes wr
 
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests |
+| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, 9 of 12 `dmg_sound` sub-tests, all 4 mooneye `oam_dma` tests, and 6 of 12 mooneye PPU tests. **Mode 3's length is computed per scanline** from fine scroll, window and objects, so `HBlank` lands where hardware puts it; a register rewritten *within* a line still does not split it |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ⚠️ | Passes `gba-suite`'s ARM, Thumb, memory, and BIOS ROMs. **A commercial game plays at a measured 100% speed** with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are mixed alongside direct sound.** The `save/` ROMs found two real save-chip bugs, tracked as known failures; no cartridge clock or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene. Two programs, not a commercial game: no retail title has been tried |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
 speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game. The
-Game Boy and Game Boy Color are held to a full accuracy bar; see each system's notes for specifics.
+Game Boy and Game Boy Color are held to the strictest accuracy bar here — 41 corpus ROMs pass and
+every one that does not carries a written diagnosis of why. See each system's notes for specifics.
 
 The application has a ROM library, video, audio, keyboard and touchscreen input, quicksave and
 quickload, rewind, an HUD, a rebindable keymap, screenshots, and an in-app debugger with registers,
@@ -41,9 +42,11 @@ disassembly, a memory viewer, breakpoints, and watchpoints.
 For each system's implementation status, gaps worth noting, and the bugs worth knowing about before
 debugging timing or graphics, see:
 
-- **Game Boy / Game Boy Color**: The core is complete and holds a full accuracy bar against
-  Blargg's test ROMs. Minor known gaps are listed in `README.md`'s accuracy suite section and in
-  `system-gb`'s crate docs.
+- **Game Boy / Game Boy Color**: The CPU is complete — every Blargg `cpu_instrs` sub-test,
+  `instr_timing` and `mem_timing` pass, and both acid2 ROMs are pixel-exact. Two gaps remain and
+  both are architectural rather than bugs: the APU is stepped once per machine cycle where three
+  `dmg_sound` sub-tests resolve single t-cycles, and the PPU draws each line whole where the
+  remaining mooneye PPU tests want a per-dot fetcher. See `system-gb`'s crate docs.
 - **Game Boy Advance**: `gba-suite`'s ARM, Thumb, memory, and BIOS ROMs pass, and a commercial game
   plays at full speed with sound. Seven rendering bugs surfaced and were fixed; see
   **[AGENTS.md](AGENTS.md)** under "Gotchas" for what they looked like and how they were found.

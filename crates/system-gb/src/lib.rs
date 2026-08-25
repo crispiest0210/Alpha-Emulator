@@ -28,8 +28,8 @@
 //! Each line is *drawn* once, when mode 3 ends, from the registers as they stand at that moment.
 //! So a register rewritten **partway along a line** applies to all of it or none of it, where
 //! hardware would split the line. Getting that too means a per-dot fetcher and a pixel FIFO,
-//! which is a different renderer, not a refinement of this one. The `mealybug-tearoom-tests`
-//! ROMs measure exactly that gap.
+//! which is a different renderer, not a refinement of this one. `mealybug-tearoom-tests` is the
+//! suite that measures exactly that gap, and adding it to the corpus is open work.
 //!
 //! # The CPU cannot reach all of memory all of the time
 //!

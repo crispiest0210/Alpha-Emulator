@@ -33,11 +33,17 @@ produces a framebuffer and a sample buffer, and the frontend decides what to do 
 This is enforced by `cargo deny check bans` in CI (see `deny.toml`), not by review alone. If your
 PR fails that job, do not add your crate to the `wrappers` allowlist — fix the dependency.
 
+Between system crates the rule is narrower than "never": a system that is a *variant* of another
+may depend on the one it varies, and unrelated systems may not. `system-gbc` depends on
+`system-gb` today, because a Game Boy Color is a Game Boy with more hardware rather than a
+different machine. Neither the GBA nor the DS may reach for either of them.
+
 Allowed direction:
 
 ```
 frontend-native / frontend-headless  ->  frontend-core, library, debugger, system-*
 system-*                             ->  cpu-*, ppu-tile2d, apu-shared, cart-common, core-common
+system-gbc                           ->  system-gb   (a variant may depend on its base system)
 cpu-* / ppu-* / apu-* / cart-common  ->  core-common, savestate
 ```
 
@@ -93,6 +99,18 @@ this path, at this frame — and never waits on a lock, because it has a 16.7 ms
   test time and never committed to this repository** — see `testing/harness/`.
 - Adding a new accuracy test ROM: register it with the harness rather than adding a bespoke test
   binary, so it participates in the CI suite and per-system status reporting automatically.
+
+**Before editing any status table or accuracy claim, run the suite:**
+
+```sh
+cargo xtask fetch-test-roms
+cargo xtask test --accuracy
+```
+
+`cargo xtask test` skips the accuracy suite unless asked, so it is entirely possible to edit a
+status row, watch the tests go green, and commit a claim that is false. Every statement about what
+passes or fails comes from a run, not from memory — this repository has already shipped
+documentation describing gaps that had been closed and features that had not.
 
 ### Every compositor test needs at least two layers drawing
 

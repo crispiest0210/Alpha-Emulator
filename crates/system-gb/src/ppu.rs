@@ -19,8 +19,9 @@
 //! opens, how the line's objects fall — and that is this module's knowledge.
 //!
 //! The limit of drawing a line all at once is a register rewritten *within* the line: hardware
-//! splits the line, this draws it whole. That is what the `mealybug-tearoom-tests` entries in
-//! the corpus measure, and closing it means a per-dot fetcher rather than a better number.
+//! splits the line, this draws it whole. `mealybug-tearoom-tests` is the suite that measures
+//! that gap; it is not in the corpus yet, and closing the gap means a per-dot fetcher rather
+//! than a better number.
 //!
 //! # Register ownership
 //!
@@ -565,8 +566,8 @@ impl GbPpu {
     /// The penalties are computed from the registers as they stand when mode 3 *begins*, which
     /// is when hardware latches `SCX` and decides the window's fate for the line. A game that
     /// rewrites `SCX` during mode 3 shifts the picture on hardware and changes the length here
-    /// not at all. Modelling that needs a per-dot fetcher, which this scanline renderer is not —
-    /// the `mealybug_*` entries in the test corpus carry the measured size of that gap.
+    /// not at all. Modelling that needs a per-dot fetcher, which this scanline renderer is not;
+    /// `mealybug-tearoom-tests` is what would measure the size of that gap.
     pub fn mode3_cycles(&self, line: u8, oam: &[u8]) -> u64 {
         let mut cycles = MODE3_MIN_CYCLES + self.fine_scroll_penalty();
         if self.window_visible() {

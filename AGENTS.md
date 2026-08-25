@@ -506,8 +506,13 @@ Advance are **playable** — window, audio, input, save states, rewind — with 
 and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
 and draws both screens with sound and 3D**.
 
-- **Complete:** prompts 11 (GB/GBC), 12 (GBA), 14 (frontend), 16 (savestate and rewind),
-  17 (testing).
+- **Complete:** prompts 12 (GBA), 14 (frontend), 16 (savestate and rewind), 17 (testing).
+- **Mostly done:** prompt 11 (GB/GBC). All eleven Blargg `cpu_instrs` sub-tests, `instr_timing`,
+  `mem_timing`, and both acid2 ROMs pass pixel-exact, and commercial games play with picture and
+  sound. What is not done is audible and visible: 9 of 12 `dmg_sound` sub-tests and 11 of 12
+  `cgb_sound`, all needing the APU stepped finer than one machine cycle; and 6 of 12 mooneye PPU
+  acceptance ROMs, the rest needing the LCD-on frame modelled and a per-dot fetcher. Calling this
+  "complete" was overstating it.
 - **Mostly done:** prompt 15. The in-app `egui` debugger works — registers, disassembly with the
   program counter highlighted and click-to-toggle breakpoints, a hex viewer with a region jump list,
   instruction stepping, execution breakpoints, and read/write/range watchpoints, all of which halt.
@@ -519,10 +524,10 @@ and draws both screens with sound and 3D**.
   breakpoints exist and a detached session pays nothing at all. Watchpoints cannot work that way —
   only the bus sees accesses — so each bus owns a `core_common::AccessLog` that records when armed,
   and the session drains it after each instruction. That costs one branch per bus access whether or
-  not anything is watching — **+1.7% of a Game Boy frame, +4.5% of a GBA one, and +3.7% of a DS one**, measured under
-  prompt 18, and **+3.7% of a Nintendo DS one**. See "Performance" below: the cost is kept
-  deliberately and recorded as a deviation from prompt 15's "zero measurable overhead" constraint
-  rather than reported as compliance.
+  not anything is watching — **+1.7% of a Game Boy frame, +4.5% of a GBA one, and +3.7% of a DS
+  one**, measured under prompt 18. See [`docs/performance.md`](docs/performance.md): the cost is
+  kept deliberately and recorded as a deviation from prompt 15's "zero measurable overhead"
+  constraint rather than reported as compliance.
 - **Mostly done:** prompt 18. The profiling workflow exists (`cargo xtask bench`, `cargo xtask
   profile`), every implemented system is measured, and the dynarec go/no-go is recorded with the data
   behind it: **no**, for both CPU cores, because the worst workload on each already runs at 46x and
@@ -581,8 +586,10 @@ the module that made it.
   of triangles. Nothing needs it today.
 
 One more, not foreseen and worth knowing: **the timer block is duplicated from `system-gba`** rather
-than shared. `system-*` crates may not depend on each other and `core-common` is closed to
-platform-specific behaviour, so sharing needs a new crate. This was filed as the same question the
+than shared. *Unrelated* `system-*` crates may not depend on each other — a variant may depend on
+the system it varies, which is why `system-gbc` depends on `system-gb`, but the GBA and the DS are
+not variants of anything here — and `core-common` is closed to platform-specific behaviour, so
+sharing needs a new crate. This was filed as the same question the
 GBA's PSG register layer was stuck on; that one turned out not to be a placement question at all
 (see "The biggest gap"), so this is the only live instance. It is also the weaker case: the two
 timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
@@ -746,6 +753,27 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 ### Smaller, well-defined items
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
+
+- **Four things were reviewed onto a branch and deliberately left off `main`.** They are not lost
+  and they are not rejected; each was weighed against what it would cost the core to take it now.
+  `worktree-gba-harness-fixes` is where all four live:
+  - **A GBA PPU debugger** — layer isolation, palette/tile/OAM viewers. Its compositor hooks are
+    written against the bitmap path that has since been replaced (bitmaps composite as background
+    2 through the shared buffer now, which is what makes rotation, windows and blending work over
+    one). Taking it as written would undo that. It needs its `LayerOverrides` reimplemented
+    against the current compositor, which is real work, not a merge.
+  - **A rendering golden manifest** — committed per-ROM framebuffer hashes with mandatory
+    provenance, and a PNG artifact on mismatch. Genuinely wanted, especially now that a lot of
+    rendering has moved. Coupled to the corpus-crate split below.
+  - **Extracting `testing/corpus` into its own zero-dependency crate.** Better than what `main`
+    does today: `xtask` depends on `harness`, so building the fetcher builds every engine crate.
+    The corpus is a list of URLs and expectations and needs none of them. This is the one worth
+    porting first; the cost today is build time, not behaviour.
+  - **Mealybug-tearoom-tests in the corpus.** Five DMG ROMs measuring what a scanline renderer
+    cannot do — a register rewritten partway along a line. All five would be expected failures,
+    which is why they were not urgent, but they are exactly the evidence that the per-dot gap is
+    a known limit rather than an untested guess. They ship in the `game-boy-test-roms` bundle, a
+    different archive from the mooneye one, so they need a second `url#member` source.
 
 - **`SOUNDBIAS`'s bit-depth and sample-rate effect on the GBA** is stored and round-trips but not
   applied to final output — this machine's mix has no PWM stage for it to bias, and most games
