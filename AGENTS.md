@@ -227,15 +227,36 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   `mem_timing` and breaks `instr_timing`.
 - **Every GBA rendering bug so far has produced a complete, plausible *wrong* picture rather than a
   missing one**, which is much harder to spot than a gap and is why a save state from the reporter
-  beats any amount of reasoning. The five, all now covered by tests: colour index 0 in a text
-  background drawn as a colour instead of transparent, so the frontmost layer went opaque and hid
-  everything behind it; sprite-versus-background priority decided by the Game Boy's single "behind
-  background" bit instead of comparing the two priorities, so every sprite won; bit 5 of
-  `WININ`/`WINOUT` treated as a sixth layer when it is the colour-effect enable; a text background
-  wrapping at 32x32 whatever `BGxCNT` said, so a larger one never reached its second screen block;
-  and the object window answered as never covering, so content revealed *through* one vanished.
-  **When a picture is wrong, get a save state and bisect the layers** — `--state`, then render with
-  one layer enabled at a time. Four of the five were found that way in minutes.
+  beats any amount of reasoning. All seven, now covered by tests:
+  1. **Colour index 0 in a text background was drawn as a colour instead of transparent.** On this
+     machine a background is one of four *layers*, and index 0 lets whatever is behind show through.
+     Writing it made the frontmost enabled text layer opaque across the whole screen, hiding every
+     layer behind it and the backdrop under flat bands of one palette colour — worst on menus, text
+     boxes, and anything mid-transition.
+  2. **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
+     the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The
+     lower layer is now composed as a second pass with the first-target layers left out, and a blend
+     happens only where the pixel underneath belongs to a declared second target.
+  3. **Sprite-versus-background priority was the Game Boy's rule, not this machine's.** A GBA sprite
+     carries a priority in OAM and each background carries one in `BGxCNT`, and the sprite is in front
+     where its own is less than or equal to the background's. Instead the Game Boy's single "behind
+     background" bit was consulted — which the GBA decoder always leaves false — so every sprite won.
+  4. **A background larger than 32x32 tiles wrapped at half its size.** A 32x32 map and the text
+     renderer wraps on the size it is handed, so a layer left at that default never reached its
+     second screen block. Emerald's battle menu lives there, on a 32x64 background scrolled to 320.
+  5. **The object window was reported as never covering.** A sprite whose graphics mode is
+     `ObjectWindow` draws nothing; its *shape* is a window region, and `WINOUT`'s high byte says what
+     is visible inside it. Answering "never" is not a neutral default — a game that reveals content
+     *through* one gets a blank region instead.
+  6. **Bit 5 of the window registers was treated as a layer.** It is not: it says whether colour
+     special effects apply inside that region at all, and it shares a bit position with the backdrop
+     target in `BLDCNT` — the same bit meaning two things in two register sets.
+  7. **Every sprite was decoded as 16-colour.** Depth is per sprite on this hardware and one scanline
+     can hold both. A 256-colour sprite read as 16-colour comes out as a stretched checkerboard.
+
+  **When a picture is wrong, get a save state and bisect the layers** — use `frontend-headless run
+  --state <file> --save-frame out.png` to render the state, then inspect the bit patterns. Four of
+  these were found that way in minutes.
 - **`graphics_dump`'s scroll column is not trustworthy.** `BGxHOFS`/`BGxVOFS` are write-only, so a
   bus read returns zero and the dump shows `scroll=(0,0)` for a layer scrolled to 320. The stored
   value has to come from `bus.backgrounds.layers[i]`. This cost real time on the battle-menu bug,

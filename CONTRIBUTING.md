@@ -124,6 +124,30 @@ cartridge RAM. Picking the wrong one makes a ROM look like it hangs when it has 
 finished and reported. `cargo test -p harness --release -- --ignored --nocapture
 dmg_sound_results` prints what the memory-protocol ROMs actually said.
 
+## Reporting a bug
+
+When graphics are wrong or the emulator behaves unexpectedly, the most helpful thing is a save
+state from the moment the bug appears. The steps are fast:
+
+1. Run the game, get to the frame where the bug is visible
+2. Press `F2` (quicksave by default) to save to slot 0
+3. From the command line, render that state:
+   ```sh
+   cargo run -p frontend-headless -- run path/to/rom.gba \
+     --state ~/.local/share/alpha-emulator/states/slot0.ast \
+     --frames 1 --save-frame out.png
+   ```
+4. Attach the `.ast` (save state) file and the `out.png` to the bug report
+
+A save state resumes byte-exactly, so rendering five frames from a loaded state produces the same
+framebuffer hash as running the whole way from a reset. This means a picture that is wrong only
+after an hour of play becomes a two-minute diagnosis — no need to recreate the setup, no guessing
+about what started it.
+
+State files can also be named on the command line when running — `~/.local/share/alpha-emulator/states/`
+is the default on macOS and Linux; use `--data-dir <path>` to use a different location. Files are
+saved alongside the ROM by default in `frontend-native`, but for bug reports the CLI tool is faster.
+
 ## Licensing
 
 Dual-licensed under MIT or Apache-2.0, at the user's option — `LICENSE-MIT` and `LICENSE-APACHE`.

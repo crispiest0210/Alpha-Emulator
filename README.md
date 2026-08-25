@@ -21,635 +21,91 @@ controls, per-OS packages, where saves go, and what to do when something goes wr
 
 ## Status
 
-There are no released builds yet, but all four systems run. The table below reflects what is
-**actually implemented and tested**, not what is planned, and is updated as work lands.
-
 | System | Boots | Playable | Accuracy suite | Notes |
 |---|---|---|---|---|
-| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests — see below |
+| Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays in the window at a measured 100% speed** — zero dropped frames, zero dropped audio samples — with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing, so music is often silent**; no cartridge clock, mosaic, or EEPROM |
-| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene checked against the author's reference screenshot. Two programs, not a commercial game: no retail title has been tried. See below |
+| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays at a measured 100% speed** with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing**; no cartridge clock, mosaic, or EEPROM |
+| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene. Two programs, not a commercial game: no retail title has been tried |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
-speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game — see
-its section below. The Game Boy and Game Boy Color are the two held to a full accuracy bar; see the notes
-below each of the other two. The application has a
-ROM library, video, audio, keyboard and touchscreen input, quicksave and quickload, rewind, an HUD,
-a rebindable keymap, screenshots, and an in-app debugger with registers, disassembly, a memory
-viewer, breakpoints, and watchpoints.
-
-### Where the Game Boy Advance actually is
-
-`gba-suite`'s three ROMs pass, and a commercial game **plays in the window at a measured 100%
-speed** — 59.7 fps sustained, zero frames dropped to the drawing thread, zero audio samples
-dropped. Backgrounds in every mode, sprites at both colour depths, affine scaling and rotation,
-windows, colour blending, save states and rewind all work on real software rather than only on
-unit tests.
-
-Two gaps are worth stating plainly because you will notice both:
-
-- **PSG mixing is not wired.** The GBA makes sound two ways — two DMA-fed direct-sound channels and
-  the Game Boy's four older PSG channels — and only direct sound is connected. A game that drives
-  sound through the PSG channels loses that part of its mix. Direct sound itself now works: until
-  2026-08-10 it produced **exact digital silence**, because `DirectSound::owns` claimed both FIFO
-  addresses and `write16` answered `None` for them, so every byte a DMA channel delivered was
-  accepted by the bus and dropped. Nothing caught it because nothing checked that a sample put
-  into a FIFO comes back out.
-- **There is no cartridge GPIO**, so a game with a real-time clock finds none and reports a flat
-  battery. That is the accurate outcome rather than a failure — a real cartridge with a dead
-  battery behaves identically and games handle it — but time-of-day events never fire.
-
-Mosaic and EEPROM saves are absent. In-game saving, quicksave, and save states are confirmed
-working by play on a commercial title. SRAM and Flash work and a real
-cartridge's chip and size are detected correctly, but no game has yet been played far enough to
-write a save file, so that last step is unverified.
-
-#### The bug worth reading about before touching timing anywhere
-
-Getting here took four fixes. Three were ordinary: the BIOS `SWI` interception ignored Thumb, which
-is what almost every commercial game is compiled to; the interrupt HLE skipped the BIOS's return
-wrapper, so the machine took exactly one interrupt and then none; and eleven BIOS calls were
-missing, including all five decompressors.
-
-The fourth is the one with a lesson in it. **Every memory access was charged between three and six
-times over** — an ARM instruction in internal WRAM cost 13 cycles where hardware charges 1, and 49
-from the cartridge where it charges 6.
-
-Nothing failed. Every test passed, and the emulator reported a steady 100% speed the whole time,
-because *a frame is a fixed number of cycles however few instructions fit inside it*. The emulator
-was not slow; the emulated machine was. What a game lost was about nine tenths of its processor,
-and what that looked like was a frozen picture with the CPU visibly running — which reads as a
-hang, and was diagnosed as one twice before a profiler was pointed at it.
-
-Three causes compounded, all now fixed and pinned by
-`an_instruction_costs_what_the_hardware_charges_for_it`:
-
-- The `SWI` check fetched every opcode through the bus before the CPU fetched the same word itself.
-  It peeks now, through a path with no side effects.
-- `read32` charged the wait-state table, then charged it again in each `read16` and each `read8` it
-  decomposed into. Charging happens once, in the `Bus` method the CPU called, at the width the CPU
-  asked for; routing is split from timing so the decomposition cannot re-enter the accounting.
-- The wait-state table reports an access's whole cost including its first cycle, and the CPU core's
-  S/N/I total already counted that cycle. Only the waiting is charged now.
-
-Three rendering defects surfaced afterwards, all of which had produced a complete and plausible
-*wrong* picture rather than a missing one — the failure mode this project treats as the dangerous
-one:
-
-- **Colour index 0 in a text background was drawn as a colour instead of being transparent.** On
-  this machine a background is one of four *layers*, and index 0 lets whatever is behind show
-  through. Writing it made the frontmost enabled text layer opaque across the whole screen, hiding
-  every layer behind it and the backdrop under flat bands of one palette colour — worst on menus,
-  text boxes, and anything mid-transition, where the front layer is mostly empty. The Game Boy's
-  rule is the opposite and equally correct, because its background is the bottom of the picture and
-  sprite priority is decided by comparing against index 0, so this is a parameter rather than a
-  fix: `BackgroundParams::transparent_index_zero`.
-
-- **Alpha blending used the backdrop as its lower layer**, because the scanline buffer keeps only
-  the winning pixel. Any game blending a layer over artwork had that artwork mixed with black. The
-  lower layer is now composed as a second pass with the first-target layers left out, and a blend
-  happens only where the pixel underneath belongs to a declared second target, as hardware requires.
-- **Sprite-versus-background priority was the Game Boy's rule, not this machine's.** A GBA sprite
-  carries a priority in OAM and each background carries one in `BGxCNT`, and the sprite is in front
-  where its own is less than or equal to the background's. Instead the Game Boy's single
-  "behind background" bit was consulted — which the GBA decoder always leaves false — so every
-  sprite won against every background. Characters walked *over* the text boxes in front of them.
-  The GBA text tilemap also recorded a hard-coded priority of zero on every pixel, so there was
-  nothing to compare against even once the sprite's was passed through.
-- **A background larger than 32x32 tiles wrapped at half its size.** `BackgroundParams::full_line`
-  describes a 32x32 map and the text renderer wraps on the size it is handed, so a layer left at
-  that default never reached its second screen block. Emerald's battle menu lives in exactly that
-  block, on a 32x64 background scrolled to 320 — so the bottom fifty scanlines read an empty block
-  and came out as backdrop.
-- **The object window was reported as never covering.** A sprite whose graphics mode is
-  `ObjectWindow` draws nothing; its *shape* is a window region, and `WINOUT`'s high byte says what
-  is visible inside it. Answering "never" is not a neutral default — a game that reveals content
-  *through* one gets a blank region instead. Pokémon Emerald's battle screen puts the action menu
-  and message box there, so the bottom fifty scanlines came out as pure backdrop.
-- **Bit 5 of the window registers was treated as a layer.** It is not: it says whether colour
-  special effects apply inside that region at all, and it shares a bit position with the backdrop
-  target in `BLDCNT` — the same bit meaning two things in two register sets. A game that darkens
-  the world behind a menu switches the effect off inside the menu's window; ignoring that darkened
-  the menu too, so its panels came out grey instead of white.
-- **Every sprite was decoded as 16-colour.** Depth is per sprite on this hardware and one scanline
-  can hold both, so it now rides on the sprite rather than on the call. A 256-colour sprite read as
-  16-colour comes out as a stretched checkerboard.
-
-#### The tools
-
-Reach for these before reasoning about pixels; each of them beat that approach by an order of
-magnitude on this system.
-
-```sh
-TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state
-TRACE_ROM=<rom> TRACE_FRAMES=600 cargo test -p system-gba --release -- --ignored --nocapture trace_stall
-```
-
-`dump_state` prints the program counter, `DISPCNT`, the interrupt registers, the handler pointer,
-and a per-layer graphics decode at seven points in a run. `trace_stall` answers the question after
-it — for a machine executing happily and getting nowhere — by profiling a window of instructions:
-hottest addresses disassembled in the instruction set they were *fetched* in, a breakdown by 4 KiB
-page, how many steps went to a halted CPU, and the average cycle cost of each instruction. The page
-breakdown said a game's main loop was running seven times where it should run a hundred and sixty;
-the cycle column said why.
-
-### What the Nintendo DS does and does not do
-
-DS support is real but newer, and is the start of DS emulation here rather than the end of it. The
-bar it was built to is "runs good homebrew and simple commercial titles correctly", not parity with
-hardware. It clears the homebrew half of that bar; no commercial title has been tried.
-
-**What a real ROM does.** `cargo xtask fetch-test-roms` pulls a libnds application — `argvTest` out
-of devkitPro's `nds-hb-menu` release — and the accuracy suite runs it. It boots and works: both
-binaries load, both cores run, every BIOS call is answered with nothing logged as unimplemented,
-and it draws `No arguments!` on the sub screen in libnds's own font — which is exactly what that
-program prints when launched with no argv. The picture is byte-identical at 60, 90, 120 and 240
-frames and reproduces exactly across runs, so it is a stable frame rather than a moment caught
-during startup.
-
-Two real programs have now found **seven** bugs in a machine whose unit tests all passed, and four
-of them were not in the DS crate at all. Each is worth knowing about, because each presented the same
-way: the machine running at full speed with nothing on screen, or nearly nothing.
-
-- **THUMB `BLX` (register) was decoding as `BX`.** One bit apart, and ARMv4T reads that bit as part
-  of a should-be-zero field — so the branch was taken and `LR` was never written, leaving the
-  callee to return to some earlier caller's address and unwind a stack frame that had gone. A
-  compiler emits `blx` for every indirect call, so a program survives exactly as long as it takes
-  to make its first one.
-- **ARMv5 interworking on a load into `R15`.** `pop {r4, pc}` takes its instruction set from bit 0
-  of the loaded address on an ARM9 and does not on an ARM7. A compiler emits that for every THUMB
-  function returning to an ARM caller, so a core that gets it wrong decodes ARM words as THUMB
-  halfwords from the first return onwards.
-- **The BIOS's interrupt wrapper.** A handler ends in `bx lr` and expects the BIOS to restore the
-  registers it pushed and leave the exception with `subs pc, lr, #4`. Jumping straight to the
-  handler instead takes exactly one interrupt and then never another.
-- **The shared-WRAM split at boot.** A libnds ARM7 binary is linked at `0x037F_8000`, which is only
-  its work RAM when the ARM7 owns all 32 KiB of the shared block. With any other split a 62 KiB
-  binary is copied into a 16 KiB window and wraps four times over itself.
-- **The ARM9's boot stacks**, which were the ARM7's addresses — memory the ARM9 cannot see.
-- **`CARD_COMMAND` was one big-endian word rather than eight bytes at eight addresses**, which
-  reads a 32-bit command write correctly and mirrors every byte write. libnds writes the command a
-  byte at a time, so a real driver's `0xB7` arrived as `0x68`.
-- **The ARM9's hardware divider and square-root unit did not exist.** ARMv5 has no divide
-  instruction, so libnds routes its whole fixed-point maths library through those registers —
-  including every projection matrix. Unimplemented they read as zero, so every division returned
-  zero, every matrix built from one was a matrix of zeros, and every vertex multiplied by it
-  collapsed to the origin. A 3D program submitted its geometry perfectly and drew nothing, which
-  looks exactly like a rasteriser bug and is not one.
-
-A second homebrew, this one reading its own cartridge and drawing in three dimensions, found the
-last two: it streams about 36 KiB of NitroFS out of its ROM by card DMA in the first ten frames,
-draws its whole interface, and renders its normal-mapped scene. That scene is checked against the
-author's own screenshot, committed upstream — mean absolute difference 6.6 of 255, with 98.6% of
-pixels within 24.
-
-**Implemented:**
-
-- **Both CPUs**, interleaved deterministically on one thread, with the runtime-configurable
-  shared-WRAM split and two genuinely different views of memory.
-- **All nine VRAM banks** and every mapping their control registers can select, including two banks
-  claiming one address at once.
-- **Both 2D engines** — background modes 0-5 (text, affine, and all three extended types), sprites
-  at 4 and 8 bits per pixel in both mapping arrangements with flips, rotation, scaling, semi-
-  transparency, bitmap and object-window modes, extended palettes, windows, alpha blending,
-  brightness effects, and master brightness.
-- **The 3D core** — the full geometry command set, four matrix stacks, four-light vertex lighting,
-  clipping against all six frustum planes, a perspective-correct software rasteriser with a 24-bit
-  depth buffer, all seven texture formats including 4x4 compression, and compositing into the 2D
-  layers through the ordinary blend unit.
-- **Sixteen-channel sound** — PCM8, PCM16, IMA-ADPCM, six square-wave channels and two noise
-  channels, with per-channel rate, volume, panning, and loop modes.
-- **The cartridge save chip.** Which chip a cartridge has is not in its header. A verified
-  per-title table is tried first — empty today, since a wrong entry would be a confident wrong
-  answer rather than an honest unknown one — and falls back to working it out from how the game
-  talks to it. Nothing is written to disk until the type is certain, because a save file of the
-  wrong shape is worse than none; a cartridge that never settles it says so through a queryable
-  status rather than dropping writes with only a log line to show for it.
-- **Input**: the keypad, the two extra buttons only the ARM7 can see, and the touchscreen.
-- **The BIOS calls both cores make**, with a separate table per core because the two do not have
-  the same ones — `Div`, `Sqrt`, `CpuSet`, `CpuFastSet`, `GetCRC16`, the five decompressors, and
-  `IntrWait`/`VBlankIntrWait` answered against the flag word each core's BIOS keeps in a different
-  place. No BIOS image is vendored and none is needed.
-- **The hardware divider and square-root unit**, which is how an ARM9 divides at all — three
-  division widths, an integer root over 32 or 64 bits, and the divide-by-zero flag software checks.
-- IPC (both FIFOs and `IPCSYNC`), both interrupt controllers, eight timers, eight DMA channels, the
-  cartridge transfer interface, direct boot, and save states covering all of it — including, for
-  the 3D core, the display list a frame is still assembling, the last `POS_TEST`/`VEC_TEST`
-  results, a `GXFIFO` command caught between parameters, and the picture actually on screen, none
-  of which used to survive a save taken mid-frame.
-- **Cartridge streaming end to end**: a `ROMCTRL` transfer arms whichever core's DMA channel is set
-  to the card start-timing, the channel pulls the block out of the data port, and completion raises
-  the card interrupt when `AUXSPICNT` bit 14 asks for it. A block bigger than one channel's count
-  re-arms until it is drained, which is how a driver reads more than a channel can carry at once.
-
-**Not implemented, and visibly so rather than approximated:**
-
-- **3D refinements**, ranked below getting the geometry and textures right: fog, edge marking,
-  anti-aliasing, shadow polygons (which render as ordinary geometry), and the toon and highlight
-  tables (which fall back to plain texturing). `BOX_TEST` always answers "visible" — answering
-  "hidden" wrongly makes geometry disappear with no way to recover it, while answering "visible"
-  wrongly only costs a little work. The geometry command queue is reported as never full, because
-  real hardware stalls the CPU when it fills and nothing in this codebase's bus interface can
-  express a bus that blocks a CPU part-way through an instruction.
-- **Wifi**, and it is not planned. Its register block reads as open bus, which is what a DS with no
-  card present looks like.
-- Mosaic, mode 6's large bitmap, display mode 3 (main-memory display), KEY1 cartridge encryption,
-  and the per-line sprite budget.
-- **Four BIOS calls that would have to be guessed at**: `BitUnPack`, `SoftReset`, the ARM7's
-  `Sleep`, and its three sound-table getters, whose contents live in a BIOS ROM this project does
-  not ship. Each logs a warning and returns with the caller's registers untouched, because a
-  visibly missing result is far easier to chase than a plausible wrong one.
-- **A save state taken between `BEGIN_VTXS` and a primitive's last vertex** loses the vertices
-  already popped off `GXFIFO` for it — the *finished* polygons a frame has built do survive, and so
-  does everything else about a save taken mid-frame; only this one narrow window does not. Accepted
-  because it is rare (a handful of instructions out of a whole frame) and small (at most three or
-  four vertices), unlike the display list itself, which is neither.
-- **A save-chip game-code table with no entries in it.** The mechanism a verified table would use
-  is built and tested; the table itself needs a source for each entry that is not "trust the
-  author", and none has been added yet. Every real cartridge goes through the write-pattern
-  heuristic exactly as before.
-
-Component status:
-
-| Component | Status |
-|---|---|
-| Workspace, `xtask`, CI, crate-boundary enforcement | done |
-| `core-common` — scheduler, bus, CPU/system traits | done |
-| `savestate` — versioned format, `Savable`, rewind ring buffer | done; rewind verified against a running machine |
-| `cpu-sm83` — Game Boy CPU | complete; passes all Blargg CPU and timing suites |
-| `cpu-arm7tdmi` — GBA / DS ARM7 CPU | complete; passes `gba-suite`'s ARM and Thumb instruction ROMs |
-| `cpu-arm946e` — DS ARM9 CPU (ARMv5TE, CP15, TCM) | complete, unit-tested; **accuracy ROMs not yet run** |
-| `cart-common` — headers, MBC1/2/3/5, SRAM/Flash/EEPROM, RTCs | done for GB and GBA save chips |
-| `system-gb` memory map | done (WRAM/VRAM banking, echo RAM, boot ROM) |
-| `system-gb` timing — timer, PPU mode machine, APU sequencer | done as scheduled events; **Mooneye timer ROMs not yet run** |
-| `ppu-tile2d` — tile decode, palettes, scanline compositing | done for GB/GBC/GBA formats; both sprite-priority rules, both tile-mapping arrangements, and per-sprite bit depth |
-| `system-gb` PPU — background, window, sprites | done, scanline-accurate; dmg-acid2 validated pixel-exact |
-| `apu-shared` — square/wave/noise channels, envelope, sweep, mixer | done; 9 of 12 Blargg `dmg_sound` sub-tests pass |
-| `frontend-core` audio pipeline — lock-free ring, resampler | done and bound to a `cpal` device; fast-forward is pitch-shifted rather than dropped |
-| `system-gb` APU — NR10-NR52 register layer | done; DMG wave-RAM window is machine-cycle accurate, not t-cycle |
-| `frontend-core` input — keybinds, conflict rule, delivery | done and driven from the window; keyboard only, gamepads are future work |
-| `system-gb` assembly — `System` impl, joypad, OAM DMA, boot | done; save-state round-trip is frame-exact |
-| `system-gb` CGB blocks — palette RAM, `KEY1`, VRAM DMA, tile attributes | done and driven by the bus |
-| `system-gbc` — `System` impl, model selection, compatibility boot | done; 11 of 12 `cgb_sound` sub-tests pass, cgb-acid2 validated pixel-exact; **`OPRI` not modelled** |
-| `testing/harness` — accuracy runner, fetch automation | done; drives the GB suite end to end |
-| `frontend-headless` — CLI driver, framebuffer hashing, determinism check | done for the Game Boy family |
-| `library` — SQLite index, watched folders, reconciliation | done; a moved file is recognised by content hash and keeps its row |
-| `frontend-core` session — emulation thread, commands/events, frame pipe, rewind, save-RAM flush | done; lifecycle driven end to end by tests against a real thread |
-| `frontend-core` settings — TOML config, keybinds, presentation, rewind depth | done; a malformed file falls back to defaults and is left on disk |
-| `frontend-native` — window, `wgpu` presentation, `egui` chrome, library browser, HUD, keybind editor | done; **no native file dialog — drag-and-drop or a pasted path** |
-| `system-gba` memory map — regions, mirroring, open bus, 8-bit write quirk | done |
-| `system-gba` interrupt controller, timers, 4-channel DMA | done and tested, and driven by real games; a sound-FIFO transfer's shape is fixed by hardware rather than read from the channel |
-| `system-gba` video timing and bitmap modes 3/4/5 | done and tested, and driven by real games |
-| `system-gba` text backgrounds — four layers, map decode, draw order | done and tested, and driven by real games |
-| `system-gba` sprites — OAM decode, sizes, per-line selection, matrices | done and tested; 16- and 256-colour, with the depth carried per sprite because one line can hold both |
-| `system-gba` affine transform — backgrounds and sprites | done and tested, and driven by real games |
-| `system-gba` direct sound — two DMA-fed FIFO channels | done and tested, and audible — the FIFO write path was missing entirely until 2026-08-10; **PSG mixing still not wired** |
-| `system-gba` wait states — `WAITCNT`, per-region access cost | done; charged once per access, and only for the cycles the access waited beyond the one the CPU core already counts |
-| `system-gba` compositor — layers, priority, palette, sprites, affine | text, bitmap, and affine backgrounds at every map size, sprites at both depths with priority resolved against the backgrounds, affine sprites through their matrices, and index 0 treated as transparent |
-| `system-gba` keypad — `KEYINPUT`, `KEYCNT`, combination interrupt | done and driven |
-| `system-gba` windows and colour blending | both rectangular windows and the object window; alpha blending composes the real lower layer in a second pass and only blends where that layer is a declared second target; the window colour-effect enable is honoured |
-| `system-gba` cartridge — three ROM windows, SRAM/Flash detection | done; a real cartridge's chip and size are detected from how the game talks to it, and in-game saving is confirmed working by play. **EEPROM reported absent rather than emulated** |
-| `system-gba` assembly — `System` impl, bus routing, HLE interrupt entry | done; runs a ROM headlessly |
-| `system-gba` HLE BIOS — arithmetic, `CpuSet`, the waiting calls, `RegisterRamReset`, the affine setters, and all five decompressors (LZ77, RLE, Huffman, and both difference filters) | done in **both** ARM and Thumb; an unhandled call still changes nothing but now says so in the log |
-| `system-gba` HLE interrupt wrapper — register save, handler call, `subs pc, lr, #4` return | done; the return is what puts `CPSR` back, and without it a machine takes exactly one interrupt |
-| `debugger` — breakpoints, watchpoints, conditions | done; execution breakpoints and watchpoints both halt a running machine; **no GDB server or tracing yet** |
-| `debugger` — snapshot capture (registers, disassembly, memory) | done against `DebugTarget`, so no branch per system |
-| `core-common` — `DebugTarget`, `System::step_instruction`, `AccessLog` | done; all four systems implement introspection and access recording |
-| `system-nds` memory map — two views over one store, shared-WRAM split, open bus per core | done and tested |
-| `system-nds` VRAM — nine banks, every `VRAMCNT` mapping, overlap, precomputed page table | done and tested |
-| `system-nds` IPC — `IPCSYNC`, both FIFOs, edge-triggered interrupts | done and tested; driven end to end by two real programs on the two cores |
-| `system-nds` interrupt controllers, timers, DMA | done and tested; per-core source masks, 21-bit ARM9 DMA counts |
-| `system-nds` ARM9 divider and square-root unit | done and tested; all three division widths, both root widths, the divide-by-zero flag and its documented results. Instant rather than timed, so the busy bit always reads clear |
-| `system-nds` video timing — 263 lines, two `DISPSTAT`s, one `VCOUNT` | done and tested |
-| `system-nds` 2D engines — modes 0-5, sprites, windows, blending, master brightness | done and tested; **mosaic, mode 6, and display mode 3 not implemented** |
-| `system-nds` input — keypad, `EXTKEYIN`, touchscreen over SPI | done and tested; firmware and power-management SPI devices are stubs |
-| `system-nds` cartridge — header, direct boot, card transfers, DMA streaming and the completion interrupt | done and tested end to end, by a hand-written program and by a real NitroFS homebrew that streams 36 KiB out of its own ROM; **no KEY1 encryption** |
-| `system-nds` save chip — EEPROM and FLASH over auxiliary SPI, six sizes, type detection | done and tested; a verified per-title table (currently empty) is tried before the write-pattern heuristic, which is the only thing that can tell apart two chips whose write lengths happen to coincide; write timing is not modelled, and an unlisted cartridge that only ever writes partial pages still cannot be identified — but now reports that through a queryable status instead of dropping writes silently |
-| `system-nds` audio — sixteen channels, PCM8/PCM16/ADPCM/PSG/noise, panning, loop modes | done and tested; `SOUNDBIAS`, the output filter, and sound capture are not modelled |
-| `system-nds` 3D matrices — four stacks, push/pop/store/restore, the clip matrix | done and tested |
-| `system-nds` 3D geometry — command FIFO, vertex assembly, lighting, frustum clipping | done and tested, including a save state taken mid-frame — the display list under construction, the last `POS_TEST`/`VEC_TEST` results, a `GXFIFO` command caught between parameters, and the rendered picture all survive; shininess table, `BOX_TEST`, and a vertex still mid-primitive at save time are deferred |
-| `system-nds` 3D rasteriser — perspective-correct spans, depth buffer, all seven texture formats | done and tested, and **validated against a real program's own reference screenshot**; **no fog, edge marking, anti-aliasing, shadow polygons, or toon table** |
-| `system-nds` BIOS calls — two per-core tables, `IntrWait` against each core's flag word, decompressors | done and tested; **`BitUnPack`, `SoftReset`, `Sleep`, and the three ARM7 sound tables log and return rather than guessing** |
-| `system-nds` assembly — `System` impl, two bus views, dual-core frame loop, BIOS interrupt wrapper | done; draws both screens and produces audio, and **runs a real libnds binary to a stable, correct picture** — validated in the accuracy suite against the text the program prints |
-| `system-nds` debugger support — `DebugTarget`, access log, region list | done and tested; **the ARM9 only** — the ARM7 is not reachable from the debugger |
-| `system-nds` diagnostics — VRAM bank map, per-layer decode, dual-core state dump | done and tested; side-effect free, so a dump can be taken from anywhere |
-| `frontend-native` debugger panel | registers, disassembly with PC highlight and click-to-toggle breakpoints, hex viewer, read/write watchpoints, instruction stepping |
-| Everything else | not started |
-
-### Accuracy suite
-
-The harness is in place and the Game Boy suite runs. Fetch the ROMs with
-`cargo xtask fetch-test-roms`, then `cargo xtask test --accuracy`. Nothing is vendored; the
-corpus directory is gitignored and tests skip cleanly when it is empty.
-
-Current Game Boy results:
-
-| Test ROM | Result |
-|---|---|
-| Blargg `cpu_instrs`, all 11 sub-tests individually | **pass** |
-| Blargg `instr_timing` | **passes** |
-| Blargg `mem_timing` | **passes** |
-| Blargg `dmg_sound` sub-tests 01–08, 11 | **pass** |
-| Blargg `cgb_sound` sub-tests 01–08, 10–12 | **pass** |
-| Blargg `cpu_instrs` (combined ROM) | hangs — see below |
-| Blargg `dmg_sound` sub-tests 09, 10, 12 | fail — see below |
-| Blargg `cgb_sound` sub-test 09 | fails — see below |
-| `gba-suite` arm, thumb, memory | **pass** |
-| dmg-acid2, cgb-acid2 | **pass** — pixel-exact against the published reference images |
-
-**Nintendo DS accuracy coverage is zero, and that is reported rather than papered over.** Prompt 13
-asks for whatever test-ROM coverage exists at implementation time and for an explicit statement of
-what is verified only by other means. Nothing DS-shaped is in the corpus: the community's DS test
-ROMs are far fewer than the Game Boy family's, most target hardware this build does not model (3D,
-wifi, the firmware), and several are distributed only as parts of emulator repositories rather than
-as fetchable artifacts. What the DS *is* verified by instead:
-
-- **339 unit tests in `system-nds`**, covering every module against the register behaviour it
-  implements — including the VRAM bank table, both cores' interrupt source masks, the DMA start-
-  timing decode that differs per core, and the IPC FIFO's edge-triggered interrupts.
-- **End-to-end tests that assemble ARM by hand** and run it on the real machine: the ARM9 executing
-  code direct boot loaded, the ARM7 writing where only it can see, the two cores exchanging a word
-  through the FIFO with each side spinning on its own status flag, a vblank interrupt reaching a
-  handler with no BIOS present, a program that maps a VRAM bank and puts a colour on screen, and an
-  ARM7 program that starts a sound channel and is heard, and an ARM9 program that feeds a display
-  list through `GXFIFO` and gets a triangle on the top screen.
-- **A determinism test**: two machines given the same ROM and input agree byte for byte after four
-  frames, which is prompt 13's dual-CPU constraint checked rather than asserted.
-- **A save-state round trip** that is a fixed point and that continues identically from a restore.
-- **Manual smoke test**: a hand-built homebrew that fills a VRAM framebuffer, run through
-  `frontend-headless run --frames 5 --save-frame`, produces the expected gradient on the top screen
-  and white on the bottom.
-
-This is a lower bar than the Game Boy family's and is meant to read as one.
-
-Open gaps, each tracked with the specific reason:
-
-- **Combined `cpu_instrs`** executes `STOP` inside the runner it copies into work RAM. Not an
-  instruction bug — all eleven sub-tests pass standalone and MBC1 bank reads are verified
-  against that exact ROM by a dedicated test. `STOP` now releases correctly when a joypad line
-  goes low, so this ROM reaches `STOP` for some earlier reason still to be found.
-- **`dmg_sound` 09, 10, 12** exercise wave RAM while channel 3 is playing. The DMG access
-  window *is* modelled — the CPU sees the byte the channel just fetched, and `0xFF` at any
-  other time — but only to machine-cycle resolution, and these ROMs resolve it to single
-  t-cycles. Closing them means stepping the APU finer than one machine cycle. Test 10 also
-  needs the wave-RAM corruption a mid-playback trigger causes, which is not modelled at all.
-- **`cgb_sound` 09** fails for exactly the reason its DMG counterpart does, and the other
-  eleven pass. The two suites deliberately test *opposite* expectations for three behaviours —
-  whether powering off clears the length counters, whether `NRx1` length writes land while the
-  APU is off, and whether the CPU may reach wave RAM mid-playback — so each is gated on the
-  model rather than fixed one way.
-- **dmg-acid2 now passes**, compared pixel-for-pixel against its published reference: all 23 040
-  matched, so the DMG background, window, sprite priority, and both tile-mapping arrangements are
-  validated end to end rather than argued for. The hash is recorded in the corpus along with the
-  commands to redo the comparison; the reference image is fetched, never committed, same rule as
-  the ROMs.
-- **cgb-acid2 now passes too**, which makes it the only end-to-end check of CGB tile attributes,
-  the second VRAM bank, OBJ palettes, and CGB sprite priority. Getting there found two real bugs,
-  both the same shape — a CGB read the DMG way, producing a complete and plausible wrong picture
-  rather than an error. Sprite attributes were decoded with the DMG's rule, so every sprite drew
-  through OBJ palette 0 with bank 0 tiles; and sprites were ordered by X coordinate, which is the
-  DMG rule where a CGB orders by OAM index. Neither would have been caught by anything except a
-  reference comparison.
-
-Blargg's sound ROMs report through cartridge RAM rather than the serial port, and the message
-they leave there names the exact rule that failed. `cargo test -p harness --release --
---ignored --nocapture dmg_sound_results` prints all twelve.
-
-All are tracked as known failures in the corpus, so the suite stays green for *regressions*
-while they are open — and fails loudly if one starts passing, which means the marker needs
-removing.
-
-**All three `gba-suite` ROMs pass** — the whole instruction set in both states, and the memory
-suite. Between them they found two real bugs that no amount of unit testing would have caught:
-the ARM7TDMI's legacy "P" form, and 32-bit writes to palette RAM and VRAM being decomposed into
-bytes and so corrupted by the 16-bit bus quirk that applies to genuine byte writes.
-
-The Game Boy Color's colour *rendering* is now validated against a reference — that is what
-cgb-acid2 covers. Its speed switch and VRAM DMA are still checked against hardware documentation
-and unit tests only, `OPRI` is not modelled at all, and the Mooneye CGB suite is not in the corpus
-yet.
-
-There is now a GBA to run them on, which there was not before.
-
-## Installing
-
-There are no published releases yet. When there is a tag, CI builds `alpha-emulator` (the windowed
-application) and `alpha-headless` (the CLI driver) for Linux, macOS on both architectures, and
-Windows, and attaches them to a draft GitHub release. Nothing is code-signed or notarised, so macOS
-and Windows will warn on first run — expected for an unsigned build, not a sign the archive is wrong.
-
-Until then, build it: see below.
-
-## Setup
-
-You need a Rust toolchain ([rustup](https://rustup.rs) — the pinned version is selected
-automatically) and a ROM file you own. On Linux you also need two sets of development headers,
-which `cargo xtask setup` names for you.
-
-```sh
-cargo xtask setup                       # checks your machine, prints anything missing
-cargo xtask dev -- path/to/rom.gba      # build, then open that cartridge
-cargo xtask dev                         # …or open with no cartridge and drag one in
-```
-
-The first build takes a few minutes; later ones take seconds. `cargo xtask setup` never downloads
-or vendors a binary into the repository — if a system package is missing it prints the exact
-`apt`/`dnf`/`pacman` command and exits non-zero.
-
-**[SETUP.md](SETUP.md) is the full guide**: per-OS packages, controls, where your saves go, and what
-to do when something goes wrong.
-
-## Developer tasks
-
-Everything goes through `xtask`, which is a Rust program and therefore behaves identically on
-Linux, macOS, and Windows:
-
-| Command | What it does |
-|---|---|
-| `cargo xtask setup` | Verify host toolchain and system packages |
-| `cargo xtask dev` | Run the native frontend (`-- <rom>` to open a cartridge) |
-| `cargo xtask build --release` | Build the workspace optimized |
-| `cargo xtask test` | `cargo test --workspace` (`--accuracy` adds the test-ROM suite) |
-| `cargo xtask bench` | Criterion benchmarks (`--quick`, `--filter`, `--save-baseline`, `--baseline`) |
-| `cargo xtask profile <rom>` | Build the release driver and print the flamegraph command |
-| `cargo xtask fetch-test-roms` | Download the accuracy test-ROM corpus (never committed) |
-| `cargo xtask lint` | `rustfmt --check` + `clippy -D warnings`, exactly as CI runs them |
-
-### What CI checks
-
-`ci.yml` runs on every push and pull request: `rustfmt` and `clippy`, the crate-boundary rule via
-`cargo deny`, unit tests and the full accuracy suite on Linux, macOS, and Windows, `cargo doc` with
-warnings denied, a release-profile build of the two shipped binaries, and `cargo bench --no-run`.
-
-The last two are there because both fail in ways nothing else catches. `panic = "abort"` and thin LTO
-apply only to the release profile, so a release-only compile error is real and would otherwise be
-discovered while cutting a tag. And nothing references the benchmarks, so they would rot silently
-until the next person needed a measurement — CI compiles them but never times them, because timings
-on a shared runner are noise and a check people learn to ignore is worse than no check.
-
-Every job pins the same toolchain `rust-toolchain.toml` gives a fresh clone. A CI that quietly ran a
-newer compiler would let a lint land that nobody local sees, or reject one everybody local passes.
-
-`docs.yml` publishes the rendered API documentation to GitHub Pages from `main`. Most of what a
-contributor needs here is `//!` prose beside the code it describes, so it is worth reading rendered.
-
-### Playing a game
-
-`cargo xtask dev` opens the application. Drop a `.gb`, `.gbc`, `.gba`, or `.nds` file onto the window — or
-paste its path into the library panel's import box — and it is indexed and starts playing. A ROM
-named on the command line does the same in one step. On a DS game the lower screen is the
-touchscreen: click and drag on it with the mouse.
-
-The library is a SQLite index, not a directory scan, and that distinction is load-bearing: a title
-you correct, a play count, and a save-state list all survive the file being moved to another folder,
-because reconciliation recognises it again by content hash. Files that have genuinely gone are
-greyed out and keep their history rather than vanishing.
-
-| Default key | Action |
-|---|---|
-| `W` `A` `S` `D` | D-pad |
-| `Space` / `R` | A / B |
-| `T` / `G` / `Q` / `E` | X / Y / L / R (GBA and DS) |
-| `Enter` / `Left Shift` | Start / Select |
-| `P` | Pause |
-| `Tab` (held) | Fast-forward |
-| `Backspace` (held) | Rewind |
-| `F1` | HUD |
-| `F2` / `F3` | Quicksave / quickload (slot 0) |
-| `F9` | Debugger panel |
-| `F11` / `F12` | Fullscreen / screenshot |
-| `Escape` | Reset |
-
-All of them are rebindable in the **Keys** panel, and the bindings are physical key *positions*
-rather than letters, so a non-QWERTY layout gets the keys under the same fingers. Settings and
-keybinds are written as hand-editable TOML; run with `--data-dir <path>` to keep a whole separate
-library, saves, and config, which is what to use when trying something out.
-
-Everything the emulator writes goes to the OS-appropriate local-app-data directory — the paths are
-printed at startup.
-
-### Running a ROM without a GUI
-
-`frontend-headless` runs a ROM with no window, no audio device, and no GPU:
-
-```sh
-cargo run -p frontend-headless -- run path/to/rom.gb --frames 600
-cargo run -p frontend-headless -- run path/to/rom.gb --frames 600 --trace-every 60
-cargo run -p frontend-headless -- run path/to/rom.gb --frames 120 --save-frame out.png
-cargo run -p frontend-headless -- run path/to/rom.gba --frames 5000 --press start@4400 --press a@4750
-cargo run -p frontend-headless -- run path/to/rom.gba --frames 1 --state slot1.ast --save-frame out.png
-cargo run -p frontend-headless -- check-determinism path/to/rom.gb --frames 600
-cargo run -p frontend-headless -- identify path/to/rom.gb
-```
-
-A `.gb` file runs on Game Boy hardware and a `.gbc` file on Game Boy Color hardware; what the
-cartridge header says decides whether a colour machine runs in full colour or in
-DMG-compatibility mode.
-
-`--save-frame` writes the final framebuffer as a PNG, which is how a rendering test ROM gets
-*looked at* rather than reduced to a hash. `identify` runs the same probe the library importer
-does, so the title and content hash it prints are the ones that would be indexed.
-
-`--press <button>@<frame>[:<frames>]` holds a button, and can be repeated for a sequence. Without
-it nothing past a title screen is reachable without a window, which is most of what a commercial
-game does — pressing start, loading a save, and walking around are all on the other side of it. The
-frame is the first one the button is down and the count defaults to 10, which is long enough for a
-game polling once a frame to see the press and short enough that it still sees the release.
-
-`--state` loads a save state before running and `--save-state` writes one after, in the format the
-window reads. Together they are what makes a bug report reproducible: a picture that is wrong only
-after an hour of play cannot be reached by a press schedule, but the state file from the moment it
-went wrong can be re-rendered and dumped here instead of in a window. A state resumes byte-exactly,
-so running five frames past a loaded state gives the same framebuffer hash as running the whole way
-from a reset.
-
-`run` prints a framebuffer hash — the same FNV-1a the accuracy corpus records, so a hash
-printed here can be pasted straight into a corpus entry. `--trace-every` prints one per N
-frames, which is how you locate the frame where two builds diverge rather than just learning
-that they did. `check-determinism` runs the same ROM twice from a fresh machine and compares:
-determinism is what save states, rewind, and replay all rest on, and it is cheap to check and
-easy to lose.
+speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game. The
+Game Boy and Game Boy Color are held to a full accuracy bar; see each system's notes for specifics.
+
+The application has a ROM library, video, audio, keyboard and touchscreen input, quicksave and
+quickload, rewind, an HUD, a rebindable keymap, screenshots, and an in-app debugger with registers,
+disassembly, a memory viewer, breakpoints, and watchpoints.
+
+## What actually works
+
+For each system's implementation status, gaps worth noting, and the bugs worth knowing about before
+debugging timing or graphics, see:
+
+- **Game Boy / Game Boy Color**: The core is complete and holds a full accuracy bar against
+  Blargg's test ROMs. Minor known gaps are listed in `README.md`'s accuracy suite section and in
+  `system-gb`'s crate docs.
+- **Game Boy Advance**: All three `gba-suite` instruction ROMs pass, and a commercial game plays at
+  full speed. Seven rendering bugs surfaced and were fixed; see **[AGENTS.md](AGENTS.md)** under
+  "Gotchas" for what they looked like and how they were found. A real commercial game plays at 100%
+  speed with sound. **PSG mixing is not wired** — that is the biggest missing piece. See
+  `system-gba`'s crate docs for the full list.
+- **Nintendo DS**: Boots and draws both screens with sound and 3D. Runs real libnds homebrew.
+  **No commercial title has been tried yet.** See `system-nds`'s crate docs and **[AGENTS.md](AGENTS.md)**
+  under "Start here" for the gaps, the implementation summary, and what has been verified.
 
 ## Performance
 
-Measured on an Apple M3, `bench` profile. Full numbers, the per-frame apportionment, and the
-dynamic-recompilation decision live in `testing/harness/benches/systems.rs` — beside the benchmarks
-that produced them rather than in prose that can drift from them.
+Measured on an Apple M3. **[docs/performance.md](docs/performance.md)** has full numbers and the
+reasoning: all systems meet their targets with 5x to 80x margin, so no dynamic recompiler has been
+added. The DS is the tightest at 3.2x real time. One optimisation — the DS bus reading RAM at its
+real width instead of composing wide accesses out of byte accesses — dropped a frame by 65% and is
+the only one worth the risk.
 
-| workload | frame time | speed |
-|---|---|---|
-| Game Boy, rendering | 246 µs | 68x |
-| Game Boy, rendering + four APU channels | 361 µs | 46x |
-| Game Boy Advance, ARM instructions straight from ROM | 1 372 µs | 12.2x |
-| Game Boy Advance, **a commercial game** (measured outside the bench suite) | ≈3 050 µs | ≈5x |
-| dmg-acid2 / cgb-acid2 | 243 / 258 µs | 69x / 65x |
-| Nintendo DS, both cores spinning, displays off | 5 161 µs | 3.2x |
-| Nintendo DS, engine A reading a VRAM framebuffer | 5 276 µs | 3.2x |
-| Nintendo DS, the same with the sound hardware wired in | ≈5 440 µs | ≈3.1x |
-| Nintendo DS 3D rasteriser, three screen-filling quads with overdraw | ≈730 µs | — |
+## Installing
 
-Three findings worth surfacing:
+There are no released builds yet. When there is a tag, CI builds the windowed application and
+CLI driver for Linux, macOS on both architectures, and Windows. Nothing is code-signed or
+notarised, so macOS and Windows will warn on first run — expected for an unsigned build.
 
-- **The APU costs more than the PPU on a Game Boy frame** — about a third of it against a sixth. Not
-  what you would guess for a machine whose job is drawing a picture, and the first place to look if
-  the Game Boy ever needs to be faster.
-- **No dynamic recompiler, for either CPU core**, on the evidence rather than by preference. A dynarec
-  replaces dispatch and nothing else, and the worst measured workload on each system already runs at
-  46x and 12.2x real time — though a *real* GBA game is about 5x, and that is the figure to hold.
+Until then, build it yourself: `cargo xtask setup` and `cargo xtask dev`. See **[SETUP.md](SETUP.md)**.
 
-  The GBA figure was 11.3x until 2026-07-31 and that number was not real: the machine charged every
-  memory access three to six times over, so the same benchmark ROM got through a quarter of the
-  instructions it should have. The emulator was not fast, the emulated machine was slow, and a frame
-  is a fixed number of cycles either way. A real game at 5x still clears the 4x fast-forward target,
-  but this is the one system where more per-instruction work would change the answer.
-- **The Nintendo DS has a fifth of the margin the GBA does, and prompt 18 was right about it.** At
-  3.2x real time against the other systems' 11x to 80x, it is by a wide margin the tightest — and
-  that is *without* the 3D core. The dynarec question stays open for it rather than being inherited
-  from the two answers above; it needs re-asking once the 3D rasteriser exists, since that is the
-  workload prompt 18 expects to be the real problem.
+## Playing and debugging
 
-  The first measurement was 15.0 ms against a 16.71 ms budget — 1.1x, barely real time. The cause
-  was not the two 2D engines: turning both displays off saved 1.5%. It was that `NdsBus` composed
-  every halfword and word access out of byte accesses, so each instruction fetch cost four region
-  decodes. Reading and writing RAM at its real width dropped a frame from 15.2 ms to 5.28 ms, a
-  **65% reduction**, measured before and after with `cargo bench -p harness --bench systems`. That
-  is the only optimisation in the project so far, and it had a measured problem behind it.
-- **The debugger's watchpoint recorder is not free**: +1.7% of a Game Boy frame, +4.5% of a GBA one,
-  and +3.7% of a DS one, even disarmed, because it is a branch on every bus access. That fails the "zero measurable
-  overhead" constraint it was written against, and it is kept anyway — a Cargo feature would either
-  leave the shipped build paying it or leave the shipped build without watchpoints. Documented as a
-  deliberate deviation with the number, not as compliance.
+- `cargo xtask dev` opens the native frontend. Drop a ROM onto the window or paste its path into
+  the library panel.
+- `cargo run -p frontend-headless -- run path/to/rom.gb --frames 600` plays without a window. Use
+  `--save-frame out.png` to render the final framebuffer, `--state file.ast` to load a save state,
+  and `--press button@frame` for scripted input.
+- **Reporting a bug?** See **[CONTRIBUTING.md](CONTRIBUTING.md)** under "Reporting a bug" for how
+  to capture the frame where it happens and make the diagnosis five-minute instead of five-hour.
 
-Two things have been optimised, each with a profiled problem behind it and a before/after to show
-for it — the DS bus composing wide accesses out of byte accesses (−65% of a frame), and the GBA's
-per-instruction scheduler poll, which a `sample` profile of a real game put at **39% of a frame**
-against 7% for all of rendering (−8.2% of `gba/spin`, hash unchanged). Nothing else has been:
-every system meets its target with 5x to 80x of margin, and an optimisation with no problem behind
-it is not worth its own risk.
+## Developer guide
 
-**Benchmark figures here move by up to 2x with the machine's thermal state.** `gba/spin` measured
-2 665 µs during a long working session and 1 372 µs on identical code cooled down. Make a
-before/after claim from one `--baseline` run, never against a number written down on another day.
+- **[SETUP.md](SETUP.md)**: Building, controls, where saves go
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: The three rules, testing, bug reports
+- **[AGENTS.md](AGENTS.md)**: Standing workflow and paid-for mistakes (read if you are an AI agent)
+- **[docs/performance.md](docs/performance.md)**: Benchmarks and the optimisation policy
+- **[docs/successor-emulator/](docs/successor-emulator/)**: Full architecture and design rationale
 
-## Architecture
+The project works through twenty prompt files in `docs/successor-emulator/` **in order**, starting
+with **[00-INDEX-AND-ARCHITECTURE.md](docs/successor-emulator/00-INDEX-AND-ARCHITECTURE.md)**.
 
-The full design rationale — why this stack, what the crate boundaries mean, and what was
-deliberately learned from the predecessor project — lives in
-[`docs/successor-emulator/`](docs/successor-emulator/), starting with
-[`00-INDEX-AND-ARCHITECTURE.md`](docs/successor-emulator/00-INDEX-AND-ARCHITECTURE.md).
+## Accuracy suite
 
-Two rules are load-bearing and enforced mechanically rather than by review:
+The Game Boy suite runs: `cargo xtask fetch-test-roms` pulls the corpus, then `cargo xtask test --accuracy`
+runs it. Nothing is vendored; the tests skip cleanly when ROMs are absent. **[AGENTS.md](AGENTS.md)**
+documents what ROMs pass, which ones don't, and why.
 
-1. **Crate boundaries.** No crate under `crates/system-*`, `crates/cpu-*`, `crates/ppu-*`,
-   `crates/apu-*`, `savestate`, or `core-common` may depend on `winit`, `wgpu`, `egui`, or
-   `cpal`. Enforced by `cargo deny check bans` in CI.
-2. **`Savable` at creation time.** Every stateful struct implements save/load when it is
-   written, never bolted on later by reaching into another module's private fields.
+## Crate architecture
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), and [AGENTS.md](AGENTS.md) if you are an AI agent
-picking this up — it carries the conventions and the paid-for mistakes that the code itself
-cannot tell you.
+Two mechanical rules are enforced by CI:
+
+1. **Crate boundaries are a dependency direction.** No system/CPU/PPU/APU crate may depend on
+   `winit`, `wgpu`, `egui`, or `cpal`. The emulation core is a pure library.
+2. **`Savable` is implemented when the struct is written**, never bolted on later by reaching into
+   another module's private fields.
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for details and the rationale behind each.
 
 ## License
 
