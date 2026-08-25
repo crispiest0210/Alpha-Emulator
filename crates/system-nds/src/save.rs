@@ -173,8 +173,8 @@ impl ChipKind {
     /// is strictly more reliable than any heuristic: the chip is fixed in silicon per title, so a
     /// verified entry cannot be wrong the way an inference from write lengths sometimes can be
     /// (see the module docs for the 131-byte collision this exists to resolve). Falls through to
-    /// [`from_write_length`] when a code is not listed, which is every code today — see
-    /// [`GAME_CODE_TABLE`].
+    /// `from_write_length` when a code is not listed, which is every code today — see
+    /// `GAME_CODE_TABLE`.
     pub fn from_game_code(code: &str) -> Option<Self> {
         Self::lookup(GAME_CODE_TABLE, code)
     }
@@ -239,7 +239,7 @@ pub enum SaveStatus {
     /// Still guessing. `held_writes` is how many ambiguous writes are queued waiting for something
     /// decisive to arrive; none of them has reached the backing store yet.
     ///
-    /// `gave_up` is set once that queue hit [`HELD_WRITE_LIMIT`] and further writes started being
+    /// `gave_up` is set once that queue hit `HELD_WRITE_LIMIT` and further writes started being
     /// dropped rather than held — the point at which this cartridge's save is genuinely at risk,
     /// and the signal a frontend should poll for and tell the player about. It was previously only
     /// a `tracing::warn!` line nobody playing the game would ever see.
@@ -292,7 +292,7 @@ impl SaveChip {
     /// the very first write is placed correctly rather than the first one merely being enough to
     /// classify the chip by.
     ///
-    /// This is also what resolves the collision [`ChipKind::from_write_length`] cannot: two chips
+    /// This is also what resolves the collision `ChipKind::from_write_length` cannot: two chips
     /// that produce the same total transaction length are only distinguishable by something that
     /// is not in the transaction, and a caller that already knows the answer is exactly that.
     pub fn new_known(kind: ChipKind) -> Self {

@@ -21,3 +21,8 @@
 
 # OS noise
 .DS_Store
+
+# Per-user agent state: local permission overrides, and live git worktrees that
+# must never be committed into the repository they are checked out from.
+/.claude/settings.local.json
+/.claude/worktrees/

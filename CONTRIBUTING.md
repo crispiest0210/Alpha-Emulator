@@ -126,27 +126,41 @@ dmg_sound_results` prints what the memory-protocol ROMs actually said.
 
 ## Reporting a bug
 
-When graphics are wrong or the emulator behaves unexpectedly, the most helpful thing is a save
-state from the moment the bug appears. The steps are fast:
+When a picture is wrong or the machine behaves unexpectedly, the most useful thing to attach is a
+**save state from the moment it went wrong**, because a state resumes byte-exactly: running five
+frames past a loaded state gives the same framebuffer hash as running the whole way from a reset.
+That turns "the graphics are wrong after an hour of play" — which no press schedule can reach —
+into a two-minute diagnosis anyone can reproduce.
 
-1. Run the game, get to the frame where the bug is visible
-2. Press `F2` (quicksave by default) to save to slot 0
-3. From the command line, render that state:
+1. Play to the frame where the bug is visible and press `F2` (quicksave, slot 0 by default).
+2. Find the state file. Save states live under the application's data directory, in a per-ROM
+   subdirectory named after the ROM's file stem:
+
+   ```text
+   <data-dir>/states/<rom-file-stem>/slot0.ast
+   ```
+
+   The data directory is OS-specific and **printed at startup** — look for the `data:` line in the
+   log. If you ran with `--data-dir <path>`, it is `<path>/data` instead.
+
+3. Re-render that state headlessly and dump the frame as a PNG:
+
    ```sh
    cargo run -p frontend-headless -- run path/to/rom.gba \
-     --state ~/.local/share/alpha-emulator/states/slot0.ast \
+     --state <data-dir>/states/<rom-file-stem>/slot0.ast \
      --frames 1 --save-frame out.png
    ```
-4. Attach the `.ast` (save state) file and the `out.png` to the bug report
 
-A save state resumes byte-exactly, so rendering five frames from a loaded state produces the same
-framebuffer hash as running the whole way from a reset. This means a picture that is wrong only
-after an hour of play becomes a two-minute diagnosis — no need to recreate the setup, no guessing
-about what started it.
+4. Attach **the `.ast` state file and `out.png`** to the report, and say which ROM it is — the ROM
+   itself must not be attached, and is never needed to start the diagnosis.
 
-State files can also be named on the command line when running — `~/.local/share/alpha-emulator/states/`
-is the default on macOS and Linux; use `--data-dir <path>` to use a different location. Files are
-saved alongside the ROM by default in `frontend-native`, but for bug reports the CLI tool is faster.
+`run` also prints a framebuffer hash (the same FNV-1a the accuracy corpus records), so two people
+can confirm they are looking at the same frame before arguing about what is in it. `--trace-every N`
+prints one hash every N frames, which is how the frame where two builds diverge gets located rather
+than merely established.
+
+For a rendering bug specifically, the layer-by-layer bisect described in [AGENTS.md](AGENTS.md)
+under "Gotchas" is what found four of the seven GBA rendering bugs, each in minutes.
 
 ## Licensing
 
