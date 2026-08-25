@@ -1,0 +1,16 @@
+[package]
+name = "corpus"
+description = "The accuracy test-ROM corpus: what to fetch, from where, and how to judge it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Deliberately no dependencies, not even `anyhow`. This crate is a list of URLs, paths, and
+# expectations, and `xtask` depends on it so the fetcher and the accuracy suite read one source
+# of truth. If it grew a dependency on an engine crate, `cargo xtask fetch-test-roms` would stop
+# building whenever the emulator did not — which is exactly when someone needs to fetch ROMs.
+[dependencies]

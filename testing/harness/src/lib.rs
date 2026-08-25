@@ -30,7 +30,12 @@
 
 #![deny(unsafe_code)]
 
-pub mod corpus;
+/// The ROM corpus, re-exported so `harness::corpus::…` keeps resolving.
+///
+/// It lives in its own dependency-free crate rather than here as a module, because `xtask` needs
+/// the same list to fetch from and depending on this crate to get it would drag every engine
+/// crate into the fetcher's build. See `testing/corpus/Cargo.toml`.
+pub use corpus;
 
 use core_common::{AudioSample, Framebuffer, InputState, RegisterValue, System};
 

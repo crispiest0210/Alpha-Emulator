@@ -20,6 +20,7 @@ members = [
     "crates/frontend-native",
     "crates/frontend-headless",
     "testing/harness",
+    "testing/corpus",
 ]
 
 [workspace.package]
@@ -48,6 +49,7 @@ debugger = { path = "crates/debugger" }
 library = { path = "crates/library" }
 frontend-core = { path = "crates/frontend-core" }
 harness = { path = "testing/harness" }
+corpus = { path = "testing/corpus" }
 
 # --- shared third-party (versions pinned once, here) ---
 anyhow = "1.0"

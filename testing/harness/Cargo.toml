@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+corpus.workspace = true
 core-common.workspace = true
 system-gb.workspace = true
 cart-common.workspace = true

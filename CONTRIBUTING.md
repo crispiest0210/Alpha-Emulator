@@ -45,7 +45,18 @@ frontend-native / frontend-headless  ->  frontend-core, library, debugger, syste
 system-*                             ->  cpu-*, ppu-tile2d, apu-shared, cart-common, core-common
 system-gbc                           ->  system-gb   (a variant may depend on its base system)
 cpu-* / ppu-* / apu-* / cart-common  ->  core-common, savestate
+harness                              ->  corpus, system-*, core-common
+xtask                                ->  corpus       (and nothing else from this workspace)
+corpus                               ->  nothing
 ```
+
+**`corpus` has no dependencies, and `xtask` depends on nothing else here.** That is load-bearing
+rather than tidy. `cargo xtask fetch-test-roms` has to work when the emulator does not compile —
+that is precisely when someone is setting up, bisecting, or fixing a broken tree. `xtask` used to
+reach the ROM list through `harness`, which dragged every engine crate into the fetcher's build.
+If you find yourself wanting a system type in either crate, the list wants a plain description of
+the ROM instead. You can check the property directly: break an engine crate and confirm
+`cargo build -p xtask` still succeeds.
 
 ### 2. `Savable` is implemented when the struct is written, not later
 

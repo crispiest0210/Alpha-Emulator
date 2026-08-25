@@ -754,9 +754,10 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-- **Four things were reviewed onto a branch and deliberately left off `main`.** They are not lost
+- **Three things were reviewed onto a branch and deliberately left off `main`.** They are not lost
   and they are not rejected; each was weighed against what it would cost the core to take it now.
-  `worktree-gba-harness-fixes` is where all four live:
+  `worktree-gba-harness-fixes` is where all three live. (A fourth, extracting the corpus into its
+  own crate, has since been ported — see `testing/corpus`.)
   - **A GBA PPU debugger** — layer isolation, palette/tile/OAM viewers. Its compositor hooks are
     written against the bitmap path that has since been replaced (bitmaps composite as background
     2 through the shared buffer now, which is what makes rotation, windows and blending work over
@@ -765,10 +766,6 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   - **A rendering golden manifest** — committed per-ROM framebuffer hashes with mandatory
     provenance, and a PNG artifact on mismatch. Genuinely wanted, especially now that a lot of
     rendering has moved. Coupled to the corpus-crate split below.
-  - **Extracting `testing/corpus` into its own zero-dependency crate.** Better than what `main`
-    does today: `xtask` depends on `harness`, so building the fetcher builds every engine crate.
-    The corpus is a list of URLs and expectations and needs none of them. This is the one worth
-    porting first; the cost today is build time, not behaviour.
   - **Mealybug-tearoom-tests in the corpus.** Five DMG ROMs measuring what a scanline renderer
     cannot do — a register rewritten partway along a line. All five would be expected failures,
     which is why they were not urgent, but they are exactly the evidence that the per-dot gap is

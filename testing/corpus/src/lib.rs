@@ -1,5 +1,22 @@
 //! The test-ROM corpus: what to fetch, from where, and how to judge it.
 //!
+//! # Why this is its own crate, and why it has no dependencies
+//!
+//! Two things need this list and they need it for different reasons: `harness` runs the ROMs,
+//! and `xtask` downloads them. Keeping one list means one of them depends on the other's crate,
+//! or both depend on this one.
+//!
+//! It used to be a module inside `harness`, so `xtask` depended on `harness` to reach it — and
+//! `harness` depends on every system crate, which meant `cargo xtask fetch-test-roms` could only
+//! build when the whole emulator built. That is backwards: fetching ROMs is what someone does
+//! while setting up, bisecting, or repairing a tree that does not compile. Before that, the list
+//! was simply written out twice, which drifted — `CGB_ROMS` and `GBA_ROMS` were fetchable but
+//! never run, and the mooneye ROMs were fetched by a second copy that the suite never consulted.
+//!
+//! So this crate holds the list, depends on nothing at all, and both sides read it. Adding a
+//! dependency here — even a small one, even `anyhow` — starts giving it back the property it
+//! exists to avoid. A ROM entry is a path, a URL, and an expectation; none of that needs help.
+//!
 //! # Licensing
 //!
 //! Nothing here is committed to the repository. Each suite is downloaded from its own

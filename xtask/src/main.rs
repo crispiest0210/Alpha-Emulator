@@ -383,7 +383,7 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     let mut skipped = 0usize;
     let mut failed: Vec<String> = Vec::new();
 
-    for rom in harness::corpus::all_roms() {
+    for rom in corpus::all_roms() {
         let target = corpus.join(rom.path);
         if target.is_file() && !force {
             skipped += 1;
