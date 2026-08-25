@@ -47,6 +47,7 @@ savestate = { path = "crates/savestate" }
 debugger = { path = "crates/debugger" }
 library = { path = "crates/library" }
 frontend-core = { path = "crates/frontend-core" }
+harness = { path = "testing/harness" }
 
 # --- shared third-party (versions pinned once, here) ---
 anyhow = "1.0"
@@ -83,7 +84,7 @@ criterion = "0.8"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 
 # Emulation is unusably slow in a fully unoptimized debug build. Optimize the
 # core crates even in dev profile so `cargo xtask dev` is playable.

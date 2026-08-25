@@ -24,8 +24,10 @@
 //! leaves a caller with unchanged registers — visible in a trace, unlike a plausible-looking
 //! wrong answer.
 
+use crate::irq::{reg, source};
+use crate::system::{CARTRIDGE_ENTRY, SP_IRQ, SP_SUPERVISOR, SP_SYSTEM};
 use core_common::Bus;
-use cpu_arm7tdmi::Arm7Tdmi;
+use cpu_arm7tdmi::{Arm7Tdmi, Mode, Psr};
 
 /// The calls this module answers.
 ///
@@ -41,9 +43,13 @@ pub enum BiosCall {
     Div,
     DivArm,
     Sqrt,
+    /// Not `ArcTan2` (0x0A): the plain one-argument form, whose documented range is only
+    /// `-PI/2..PI/2` and which shares `ArcTan2`'s well-known accuracy problem near the extremes.
+    ArcTan,
     ArcTan2,
     CpuSet,
     CpuFastSet,
+    GetBiosChecksum,
     /// Clear the areas of memory a boot would, selected by a bitmask.
     RegisterRamReset,
     BgAffineSet,
@@ -62,6 +68,9 @@ pub enum BiosCall {
     Diff8bitUnFilterWram,
     Diff8bitUnFilterVram,
     Diff16bitUnFilter,
+    /// Recognised but not modelled: see the crate docs' Status section for why.
+    SoundBias,
+    MidiKey2Freq,
     Unhandled(u8),
 }
 
@@ -76,9 +85,11 @@ impl BiosCall {
             0x06 => BiosCall::Div,
             0x07 => BiosCall::DivArm,
             0x08 => BiosCall::Sqrt,
+            0x09 => BiosCall::ArcTan,
             0x0A => BiosCall::ArcTan2,
             0x0B => BiosCall::CpuSet,
             0x0C => BiosCall::CpuFastSet,
+            0x0D => BiosCall::GetBiosChecksum,
             0x01 => BiosCall::RegisterRamReset,
             0x0E => BiosCall::BgAffineSet,
             0x0F => BiosCall::ObjAffineSet,
@@ -91,23 +102,63 @@ impl BiosCall {
             0x16 => BiosCall::Diff8bitUnFilterWram,
             0x17 => BiosCall::Diff8bitUnFilterVram,
             0x18 => BiosCall::Diff16bitUnFilter,
+            0x19 => BiosCall::SoundBias,
+            0x1F => BiosCall::MidiKey2Freq,
             other => BiosCall::Unhandled(other),
         }
     }
 }
 
+/// The BIOS's own interrupt-flag word, at the top of internal WRAM.
+///
+/// Separate from `IF`, and the two are acknowledged by different code at different times: `IF` is
+/// cleared by the game's handler as it services a source, while this word *accumulates* what has
+/// been serviced so that [`BiosCall::IntrWait`] — which runs long after — can tell whether the
+/// source it is waiting for has arrived. A wait that consulted `IF` instead would see it already
+/// cleared and sleep forever.
+pub const INTRWAIT_FLAGS: u32 = 0x0300_7FF8;
+
 /// What the caller must do after the call, beyond returning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BiosEffect {
-    /// The CPU should stop until an interrupt arrives.
-    pub halt: bool,
+pub enum BiosEffect {
+    /// Carry on at the instruction after the `SWI`.
+    ///
+    /// Also wakes a halted CPU, because the only way to reach a `SWI` while halted is the
+    /// [`BiosEffect::Retry`] path below finishing its wait.
+    #[default]
+    Return,
+    /// Stop the CPU until an interrupt arrives. The call itself is finished.
+    Halt,
+    /// The call has *not* finished: stop the CPU and run this same `SWI` again on the next step.
+    ///
+    /// This is how a wait that hardware implements as a loop inside the BIOS is expressed in an
+    /// emulator whose CPU cannot be suspended part-way through an instruction. See `intr_wait`.
+    Retry,
+    /// The call already set the program counter to where execution continues; step over nothing.
+    ///
+    /// `SoftReset` is the only call that returns this. GBATEK is explicit that it "does not
+    /// return to calling procedure" — it jumps to a fresh entry point rather than resuming after
+    /// the `SWI`, so the usual "step over the instruction that called it" is wrong here: the
+    /// instruction after the `SWI` is not where execution goes next, and may not even belong to
+    /// the game that is still running once this call is answered.
+    Jump,
 }
 
 /// Perform a BIOS call in place of the ROM.
 ///
 /// Takes the CPU and the bus rather than a register array because several calls move memory,
 /// and splitting "which registers" from "what it does" would put the contract in two places.
-pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -> BiosEffect {
+///
+/// `wait` carries the one piece of state a BIOS call keeps between steps: the mask of an
+/// `intr_wait` that has begun and not yet been satisfied. Every other call here is a pure
+/// function of the registers and memory, which is why it is one parameter rather than a context
+/// struct.
+pub fn dispatch<B: Bus + ?Sized>(
+    cpu: &mut Arm7Tdmi,
+    bus: &mut B,
+    wait: &mut Option<u16>,
+    comment: u8,
+) -> BiosEffect {
     let mut effect = BiosEffect::default();
 
     match BiosCall::from_comment(comment) {
@@ -128,11 +179,23 @@ pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -
             let wrapped = angle.rem_euclid(1.0);
             cpu.set_reg(0, (wrapped * 65536.0) as u32 & 0xFFFF);
         }
+        BiosCall::ArcTan => arc_tan(cpu),
         BiosCall::CpuSet => cpu_set(cpu, bus, false),
         BiosCall::CpuFastSet => cpu_set(cpu, bus, true),
-        BiosCall::Halt | BiosCall::Stop | BiosCall::IntrWait | BiosCall::VBlankIntrWait => {
-            effect.halt = true;
+        BiosCall::GetBiosChecksum => {
+            // The checksum of a genuine GBA/GBA SP BIOS image, over its 16 KiB in 32-bit units.
+            // Answered as a constant rather than computed, for the same reason a no-BIOS machine
+            // can answer at all: there is no image here to sum. A game checks this against the
+            // one well-known value; answering with it is the faithful response regardless of
+            // whether a real image happens to be loaded.
+            cpu.set_reg(0, 0xBAAE_187F);
         }
+        // `Halt` and `Stop` sleep until *any* interrupt arrives, and the controller decides what
+        // counts as one. They are genuinely the "wake on anything" calls, which is why the two
+        // below them — which are not — no longer share this arm.
+        BiosCall::Halt | BiosCall::Stop => effect = BiosEffect::Halt,
+        BiosCall::IntrWait => effect = intr_wait(cpu, bus, wait, false),
+        BiosCall::VBlankIntrWait => effect = intr_wait(cpu, bus, wait, true),
         BiosCall::RegisterRamReset => register_ram_reset(cpu, bus),
         BiosCall::BgAffineSet => affine_set(cpu, bus, true),
         BiosCall::ObjAffineSet => affine_set(cpu, bus, false),
@@ -144,21 +207,194 @@ pub fn dispatch<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, comment: u8) -
         BiosCall::Diff8bitUnFilterWram => unpack(cpu, bus, Decoder::Diff8, false),
         BiosCall::Diff8bitUnFilterVram => unpack(cpu, bus, Decoder::Diff8, true),
         BiosCall::Diff16bitUnFilter => unpack(cpu, bus, Decoder::Diff16, true),
+        BiosCall::BitUnPack => bit_unpack(cpu, bus),
+        BiosCall::SoftReset => {
+            soft_reset(cpu, bus);
+            effect = BiosEffect::Jump;
+        }
+        // `fifo::DirectSound::soundbias` now stores the register a plain write to `0x0400_0088`
+        // reaches, but this call is a different contract: hardware ramps the level toward the
+        // target over a handful of VBlanks rather than snapping to it, which cannot be answered
+        // in one step here without either blocking (like `IntrWait`) or fabricating a ramp rate
+        // this crate has not modelled. Recognising the call at all is still worth doing: MP2K
+        // calls it during its own init, and answering it here means that startup sequence sees a
+        // call that exists rather than one that silently vanished. See the crate docs' Status
+        // section.
+        BiosCall::SoundBias => {
+            tracing::debug!(
+                "SoundBias asked to ramp SOUNDBIAS toward {:#X}; the ramp itself is not \
+                 modelled, so the register is unaffected by this call",
+                cpu.reg(0)
+            );
+        }
+        BiosCall::MidiKey2Freq => midi_key_to_freq(cpu, bus),
         // Doing nothing leaves the caller's registers unchanged, which shows up in a trace.
         // Guessing would produce a plausible wrong answer that surfaces far from its cause.
         //
         // But it is *logged*. A call that silently does nothing is exactly how Pokémon Emerald
         // ran at full speed with a black screen for a whole session: every graphic it owns is
         // LZ77-compressed, the decompressor was missing, and nothing said so.
-        BiosCall::BitUnPack | BiosCall::Unhandled(_) => {
+        BiosCall::Unhandled(_) => {
             tracing::warn!(
                 "unimplemented BIOS call SWI {comment:#04X}; it did nothing, and whatever the \
                  game expected it to produce is missing"
             );
         }
-        BiosCall::SoftReset => {}
     }
     effect
+}
+
+/// `IntrWait` and `VBlankIntrWait`: sleep until one of the interrupts named in `r1` has been
+/// serviced.
+///
+/// # This is not `Halt`
+///
+/// It was implemented as one for a long time, and the difference is the whole point. `Halt` wakes
+/// on *any* interrupt. `IntrWait` wakes only on the sources named in its mask, and it decides that
+/// by reading [`INTRWAIT_FLAGS`] — a word that accumulates what has been serviced — rather than by
+/// asking whether the CPU woke up.
+///
+/// A game that enables `HBlank` for a raster effect and a timer for its sound driver, which is most
+/// commercial software, calls `VBlankIntrWait` once a frame and gets it back on the next `HBlank`
+/// instead: up to 160 returns per frame rather than one. Nothing errors. The game simply runs its
+/// main loop at 160 times the rate it expects, and every symptom downstream of frame pacing —
+/// animation speed, input handling, and any rendering read mid-frame — is wrong in a way that looks
+/// like a dozen unrelated bugs.
+///
+/// # Why the `SWI` is re-executed instead of looping here
+///
+/// Hardware implements this as a loop *inside* the BIOS, which an emulator can only match if it can
+/// suspend a CPU part-way through an instruction. Nothing in this codebase's core can: `step` runs
+/// one instruction to completion.
+///
+/// So the wait is spread across steps instead. An unsatisfied wait returns [`BiosEffect::Retry`],
+/// the system assembly leaves the program counter *on* the `SWI`, and the same call runs again next
+/// step — testing the flag word each time until it is satisfied. The observable behaviour is the
+/// same and no core change is needed.
+///
+/// The alternative considered was polling the condition from the system's step loop and leaving the
+/// program counter past the `SWI`. Rejected because it puts half of one BIOS call in `system.rs` and
+/// half here, and the half in `system.rs` would run on every step of every machine including the
+/// ones not waiting.
+///
+/// `wait` holds the mask of a wait already begun. It has to be real state rather than something
+/// re-derived from the registers, because `r0` — "discard what has already arrived" — must be
+/// honoured on the first pass and ignored on every later one, and after the first pass there is
+/// nothing in the machine that distinguishes the two.
+fn intr_wait<B: Bus + ?Sized>(
+    cpu: &mut Arm7Tdmi,
+    bus: &mut B,
+    wait: &mut Option<u16>,
+    vblank_only: bool,
+) -> BiosEffect {
+    // A later pass of a wait already begun: the discard is done, so only the test remains.
+    if let Some(mask) = *wait {
+        let flags = bus.read16(INTRWAIT_FLAGS);
+        let matched = flags & mask;
+        if matched == 0 {
+            return BiosEffect::Retry;
+        }
+        // Consume only what was waited for. Another source serviced meanwhile stays set for
+        // whoever asks next, which is what makes two waits on different sources compose.
+        bus.write16(INTRWAIT_FLAGS, flags & !matched);
+        *wait = None;
+        return BiosEffect::Return;
+    }
+
+    // The first pass. `SWI 0x05` is `SWI 0x04` with the mask fixed to vertical blank and the
+    // discard flag forced on, which is exactly how the BIOS implements it.
+    let (mask, discard) = if vblank_only {
+        (source::VBLANK, true)
+    } else {
+        ((cpu.reg(1) as u16) & source::ALL, cpu.reg(0) != 0)
+    };
+
+    // Hardware sets `IME` on entry, unconditionally. A game that called this with interrupts
+    // masked off would otherwise never be woken by anything — and some do, relying on the BIOS
+    // to turn them back on.
+    bus.write16(reg::IME, 1);
+
+    let flags = bus.read16(INTRWAIT_FLAGS);
+    if discard {
+        // "Wait for a *new* one": forget what has already arrived, then sleep.
+        bus.write16(INTRWAIT_FLAGS, flags & !mask);
+    } else {
+        let matched = flags & mask;
+        if matched != 0 {
+            // Already arrived, so this call does not sleep at all.
+            bus.write16(INTRWAIT_FLAGS, flags & !matched);
+            return BiosEffect::Return;
+        }
+    }
+
+    // A wait nothing can satisfy hangs on hardware, and this hangs too — deliberately, because
+    // inventing a wake-up would turn a game's bug into a wrong picture somewhere far away. It is
+    // said out loud, once, because the alternative is a machine that looks like it crashed.
+    let enabled = bus.read16(reg::IE);
+    if mask & enabled == 0 {
+        tracing::warn!(
+            mask = format_args!("{mask:#06X}"),
+            enabled = format_args!("{enabled:#06X}"),
+            "IntrWait is waiting for an interrupt that is not enabled; nothing can satisfy it, \
+             and the machine will sit here exactly as hardware would"
+        );
+    }
+
+    *wait = Some(mask);
+    BiosEffect::Retry
+}
+
+/// The byte, inside the region this call zeroes, that says where to jump: `0` for the cartridge
+/// (`0x0800_0000`), any other value for RAM (`0x0200_0000`).
+const SOFT_RESET_FLAG: u32 = 0x0300_7FFA;
+
+/// `SoftReset`: clear the BIOS's own top-of-IWRAM state and restart the game exactly the way a
+/// cold boot without a BIOS does.
+///
+/// # The documented contract
+///
+/// Zeroes the 0x200 bytes at `0x0300_7E00` — stacks, the interrupt handler pointer, this call's
+/// own destination flag, and [`INTRWAIT_FLAGS`] all live inside that span. Zeroes `r0`-`r12`,
+/// `LR_svc`/`SPSR_svc`, and `LR_irq`/`SPSR_irq`. Sets `SP_svc = 0x0300_7FE0`,
+/// `SP_irq = 0x0300_7FA0`, `SP_sys = 0x0300_7F00` — the exact three stacks
+/// `system::GbaSystem::apply_startup_state` also sets, because both are setting up the same
+/// documented post-boot state. Switches to System mode, ARM state, and jumps to `0x0800_0000`
+/// (ROM) or `0x0200_0000` (RAM) depending on the byte at [`SOFT_RESET_FLAG`] — which sits inside
+/// the region just zeroed, so it has to be read before that happens.
+///
+/// # Why r8-r12 are written through the Supervisor bank explicitly
+///
+/// This runs before the exception is entered — see `system::GbaSystem::intercept_bios_call` — so
+/// the CPU's *current* mode is still whatever the caller's was, not Supervisor. `cpu.set_reg`
+/// resolves against the current mode, which would write the wrong bank if the caller happened to
+/// be in FIQ (the one mode that banks `r8`-`r12` differently). Naming `Mode::Supervisor` directly
+/// is correct regardless of the caller's mode, because every mode but FIQ shares that bank anyway.
+fn soft_reset<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
+    let to_ram = bus.read8(SOFT_RESET_FLAG) != 0;
+
+    for offset in (0..0x200u32).step_by(4) {
+        bus.write32(0x0300_7E00 + offset, 0);
+    }
+
+    for index in 0..=12 {
+        cpu.regs.write(Mode::Supervisor, index, 0);
+    }
+    cpu.regs.write(Mode::Supervisor, 14, 0);
+    cpu.regs.set_spsr(Mode::Supervisor, Psr::default());
+    cpu.regs.write(Mode::Irq, 14, 0);
+    cpu.regs.set_spsr(Mode::Irq, Psr::default());
+
+    cpu.regs.write(Mode::Supervisor, 13, SP_SUPERVISOR);
+    cpu.regs.write(Mode::Irq, 13, SP_IRQ);
+    cpu.regs.write(Mode::System, 13, SP_SYSTEM);
+
+    cpu.cpsr.set_mode(Mode::System);
+    cpu.cpsr.set_thumb(false);
+    cpu.cpsr.set_irq_disabled(false);
+    cpu.cpsr.set_fiq_disabled(true);
+
+    cpu.regs
+        .set_pc(if to_ram { 0x0200_0000 } else { CARTRIDGE_ENTRY });
 }
 
 /// `RegisterRamReset`: clear the areas named by a bitmask in `r0`.
@@ -268,6 +504,82 @@ fn affine_set<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, background: bool
             bus.write32(destination, (dx - cx * pa - cy * pb) as u32);
             bus.write32(destination + 4, (dy - cx * pc - cy * pd) as u32);
             destination += 8;
+        }
+    }
+}
+
+/// `BitUnPack`: widen each source unit to a destination unit, optionally adding a bias.
+///
+/// Used to expand a low-colour-depth bitmap or tileset — a 1bpp font into 4bpp or 8bpp tiles, for
+/// instance — without shipping a second copy of the asset at the wider depth.
+///
+/// `r0` is the source, `r1` the destination (word-aligned; data is written in whole words), and
+/// `r2` points at a header: a `u16` length of the source in bytes, a `u8` source width and a `u8`
+/// destination width in bits (source only 1/2/4/8; destination only 1/2/4/8/16/32), and a `u32`
+/// whose low 31 bits are a bias added to every non-zero source unit and whose top bit — the "zero
+/// data" flag — extends that bias to zero units too.
+///
+/// # The bit-packing order
+///
+/// Source units are read LSB-first out of each byte — the low `SrcBpp` bits are the first unit,
+/// not the high ones — and destination units are packed LSB-first into a 32-bit accumulator that
+/// flushes as a whole word once full. Getting either direction backwards produces an image that
+/// is recognisably shuffled rather than obviously wrong, which is a harder bug to spot than a
+/// crash.
+///
+/// Register-side effects are not implemented: GBATEK is explicit that this call returns nothing,
+/// unlike `CpuSet`'s pointers.
+fn bit_unpack<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
+    let mut source = cpu.reg(0);
+    let mut destination = cpu.reg(1);
+    let info = cpu.reg(2);
+
+    let mut len = bus.read16(info) as u32;
+    let src_width = bus.read8(info + 2);
+    let dest_width = bus.read8(info + 3);
+    let data_offset = bus.read32(info + 4);
+
+    if !matches!(src_width, 1 | 2 | 4 | 8) || !matches!(dest_width, 1 | 2 | 4 | 8 | 16 | 32) {
+        tracing::warn!(
+            "BitUnPack asked for {src_width}-bit source units and {dest_width}-bit destination \
+             units; only 1/2/4/8 and 1/2/4/8/16/32 exist"
+        );
+        return;
+    }
+
+    let bias = data_offset & 0x7FFF_FFFF;
+    let bias_on_zero = data_offset & 0x8000_0000 != 0;
+    let src_mask = (1u32 << src_width) - 1;
+
+    let mut out: u32 = 0;
+    let mut out_bits = 0u32;
+    let mut in_byte = 0u32;
+    let mut in_bits = 0u32;
+
+    while len > 0 || in_bits > 0 {
+        if in_bits == 0 {
+            in_byte = bus.read8(source) as u32;
+            source += 1;
+            len -= 1;
+            in_bits = 8;
+        }
+
+        let mut unit = in_byte & src_mask;
+        in_byte >>= src_width;
+        in_bits -= src_width as u32;
+
+        if unit != 0 || bias_on_zero {
+            unit = unit.wrapping_add(bias);
+        }
+
+        out |= unit << out_bits;
+        out_bits += dest_width as u32;
+
+        if out_bits == 32 {
+            bus.write32(destination, out);
+            destination = destination.wrapping_add(4);
+            out = 0;
+            out_bits = 0;
         }
     }
 }
@@ -527,6 +839,36 @@ fn divide(cpu: &mut Arm7Tdmi, numerator: i32, denominator: i32) {
     cpu.set_reg(3, quotient.unsigned_abs());
 }
 
+/// `ArcTan`: the real BIOS's seventh-order fixed-point polynomial, not the true function.
+///
+/// `r0` is a `Q1.1.14` fixed-point tangent; the result is an angle in `-PI/2..PI/2` mapped onto
+/// `C000h..4000h` of a full circle (the same 16-bit-per-turn convention [`affine_set`] uses).
+///
+/// # Why this is a polynomial and not `f64::atan`
+///
+/// Hardware does not evaluate a true arctangent — it runs this specific `Q14` polynomial, and the
+/// polynomial has its own documented inaccuracy, worst "for THETA < -PI/4, PI/4 < THETA" per
+/// GBATEK. A game reading the *exact* hardware value, rather than a merely plausible angle, would
+/// see a different number from `atan` — most visibly right around zero, where `ArcTan(1)` rounds
+/// to `0` but `ArcTan(-1)` rounds to `-1` rather than the `0` symmetry would suggest. Reproducing
+/// `atan` here would answer a different, more accurate question than the one the game asked.
+///
+/// Every operation wraps like the hardware's 32-bit multiply and add do — see `divide` for the
+/// same reasoning applied to a different call — because a wild out-of-range input pushes several
+/// of the intermediate terms outside `i32` on the way to an answer that is still well-defined.
+fn arc_tan(cpu: &mut Arm7Tdmi) {
+    let i = cpu.reg(0) as i32;
+    let a = (i.wrapping_mul(i) >> 14).wrapping_neg();
+    let mut b = (0xA9i32.wrapping_mul(a) >> 14).wrapping_add(0x390);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0x91C);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0xFB6);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0x16AA);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0x2081);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0x3651);
+    b = (b.wrapping_mul(a) >> 14).wrapping_add(0xA2F9);
+    cpu.set_reg(0, (i.wrapping_mul(b) >> 16) as u32);
+}
+
 /// `CpuSet` and `CpuFastSet`: copy or fill memory.
 ///
 /// `r2` is not a byte count. Its low 21 bits are a count of *units*, and bit 26 chooses whether
@@ -566,6 +908,31 @@ fn cpu_set<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, fast: bool) {
             bus.write16((destination & !1).wrapping_add(index * 2), half);
         }
     }
+}
+
+/// `MidiKey2Freq`: the playback rate a sample must be resampled to for it to sound at a given
+/// MIDI key, given the rate it was originally recorded at.
+///
+/// The M4A/MP2K sound driver — used by every Pokémon game and much other commercial software —
+/// calls this to turn a note-on event into a DMA sample rate, which is why it matters more than
+/// an obscure math routine's call number suggests: without it, MP2K's own init sequence calls
+/// into an unanswered `SWI` before a game gets anywhere near rendering a title screen.
+///
+/// `r0` points at a `WaveData` header whose word at `r0+4` is the sample's rate, pre-scaled for
+/// its *original* recorded key by `sampling_rate * 2^((180 - original_key) / 12)`. `r1` is the
+/// target MIDI key (0-127) and `r2` a fine-pitch adjustment in 256ths of a semitone. Dividing the
+/// stored rate by the same exponential, evaluated at the target key and fine pitch instead of the
+/// original one, is what turns a recording of one note into the playback rate for another.
+fn midi_key_to_freq<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
+    let wave_data = cpu.reg(0);
+    let key = cpu.reg(1) as f64;
+    let fine_pitch = cpu.reg(2) as f64;
+
+    let rate = bus.read32(wave_data + 4) as f64;
+    let freq = rate / 2f64.powf((180.0 - key - fine_pitch / 256.0) / 12.0);
+    // Matches C's float-to-integer cast, which is what a real disassembly of this routine
+    // performs: truncated toward zero, not rounded.
+    cpu.set_reg(0, freq as u32);
 }
 
 #[cfg(test)]
@@ -640,7 +1007,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 100);
         cpu.set_reg(1, 7);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0), 14);
         assert_eq!(cpu.reg(1), 2);
         assert_eq!(cpu.reg(3), 14);
@@ -654,7 +1021,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, (-7i32) as u32);
         cpu.set_reg(1, 2);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0) as i32, -3);
         assert_eq!(cpu.reg(1) as i32, -1);
         assert_eq!(cpu.reg(3), 3, "the absolute quotient");
@@ -666,7 +1033,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 7);
         cpu.set_reg(1, 100);
-        dispatch(&mut cpu, &mut bus, 0x07);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x07);
         assert_eq!(cpu.reg(0), 14, "100 / 7, not 7 / 100");
     }
 
@@ -678,7 +1045,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 42);
         cpu.set_reg(1, 0);
-        dispatch(&mut cpu, &mut bus, 0x06);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x06);
         assert_eq!(cpu.reg(0), 42);
     }
 
@@ -688,7 +1055,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         for (input, expected) in [(0u32, 0u32), (1, 1), (2, 1), (16, 4), (17, 4), (10000, 100)] {
             cpu.set_reg(0, input);
-            dispatch(&mut cpu, &mut bus, 0x08);
+            dispatch(&mut cpu, &mut bus, &mut None, 0x08);
             assert_eq!(cpu.reg(0), expected, "sqrt({input})");
         }
     }
@@ -705,7 +1072,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 4); // four halfwords
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
 
         for index in 0..4u32 {
             assert_eq!(bus.read16(0x40 + index * 2), 0x1000 + index as u16);
@@ -722,7 +1089,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 2 | (1 << 26));
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
         assert_eq!(bus.read32(0x40), 0xDEAD_BEEF);
         assert_eq!(bus.read32(0x44), 0xCAFE_F00D);
     }
@@ -735,7 +1102,7 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 3 | (1 << 24) | (1 << 26));
-        dispatch(&mut cpu, &mut bus, 0x0B);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0B);
         for index in 0..3u32 {
             assert_eq!(bus.read32(0x40 + index * 4), 0x1234_5678);
         }
@@ -749,18 +1116,36 @@ pub(super) mod tests {
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x40);
         cpu.set_reg(2, 1); // the word bit is clear, and it makes no difference
-        dispatch(&mut cpu, &mut bus, 0x0C);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0C);
         assert_eq!(bus.read32(0x40), 0xAABB_CCDD);
     }
 
     #[test]
-    fn the_waiting_calls_ask_the_caller_to_halt() {
+    fn halt_and_stop_finish_the_call_but_the_waits_ask_to_run_again() {
+        // The distinction the shared arm used to hide. `Halt` is done when it returns and the
+        // program counter moves on; an `IntrWait` is not finished until its flag word says so, so
+        // it asks to be re-run rather than stepped over.
         let mut cpu = cpu();
         let mut bus = FlatBus::new(16);
-        for call in [0x02, 0x03, 0x04, 0x05] {
-            assert!(dispatch(&mut cpu, &mut bus, call).halt, "SWI {call:#04X}");
+        for call in [0x02, 0x03] {
+            assert_eq!(
+                dispatch(&mut cpu, &mut bus, &mut None, call),
+                BiosEffect::Halt,
+                "SWI {call:#04X}"
+            );
         }
-        assert!(!dispatch(&mut cpu, &mut bus, 0x06).halt, "but Div does not");
+        for call in [0x04, 0x05] {
+            assert_eq!(
+                dispatch(&mut cpu, &mut bus, &mut None, call),
+                BiosEffect::Retry,
+                "SWI {call:#04X}"
+            );
+        }
+        assert_eq!(
+            dispatch(&mut cpu, &mut bus, &mut None, 0x06),
+            BiosEffect::Return,
+            "but Div returns straight away"
+        );
     }
 
     #[test]
@@ -771,7 +1156,7 @@ pub(super) mod tests {
         let mut bus = FlatBus::new(16);
         cpu.set_reg(0, 0x1234);
         cpu.set_reg(1, 0x5678);
-        dispatch(&mut cpu, &mut bus, 0x99);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x99);
         assert_eq!(cpu.reg(0), 0x1234);
         assert_eq!(cpu.reg(1), 0x5678);
     }
@@ -800,7 +1185,7 @@ mod decompression_tests {
         let mut cpu = Arm7Tdmi::default();
         cpu.set_reg(0, source);
         cpu.set_reg(1, destination);
-        dispatch(&mut cpu, bus, swi);
+        dispatch(&mut cpu, bus, &mut None, swi);
     }
 
     fn read_out(bus: &mut FlatBus, at: u32, len: usize) -> Vec<u8> {
@@ -979,7 +1364,7 @@ mod decompression_tests {
         let mut bus = FlatBus::new(0x100);
         let mut cpu = Arm7Tdmi::default();
         cpu.set_reg(0, 0x1234);
-        dispatch(&mut cpu, &mut bus, 0x20);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x20);
         assert_eq!(cpu.reg(0), 0x1234, "registers are left alone");
     }
 
@@ -1006,5 +1391,268 @@ mod decompression_tests {
                 "SWI {comment:#04X}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bit_unpack_tests {
+    use super::*;
+    use crate::bios::tests::FlatBus;
+    use cpu_arm7tdmi::BootState;
+
+    /// Write a `BitUnPack` header at `at`: length, source width, destination width, data offset.
+    fn header(bus: &mut FlatBus, at: u32, len: u16, src_width: u8, dest_width: u8, offset: u32) {
+        bus.write16(at, len);
+        bus.write8(at + 2, src_width);
+        bus.write8(at + 3, dest_width);
+        bus.write32(at + 4, offset);
+    }
+
+    fn run(bus: &mut FlatBus, source: u32, destination: u32, info: u32) {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        cpu.set_reg(0, source);
+        cpu.set_reg(1, destination);
+        cpu.set_reg(2, info);
+        dispatch(&mut cpu, bus, &mut None, 0x10);
+    }
+
+    #[test]
+    fn four_bit_source_to_eight_bit_destination_with_no_offset() {
+        // Two source bytes, LSB nibble first: byte0=0x21 -> units 1,2; byte1=0x43 -> units 3,4.
+        // Each nibble widens straight into a byte, packed LSB-unit-first into the output word.
+        let mut bus = FlatBus::new(0x100);
+        header(&mut bus, 0x00, 2, 4, 8, 0);
+        bus.write8(0x10, 0x21);
+        bus.write8(0x11, 0x43);
+        run(&mut bus, 0x10, 0x20, 0x00);
+        assert_eq!(bus.read32(0x20), 0x0403_0201);
+    }
+
+    #[test]
+    fn two_bit_source_to_four_bit_destination_with_an_offset_that_skips_zero_units() {
+        // Eight 2-bit units across two bytes: [2,0,1,3, 0,0,1,2] (unit0 first, LSB of each byte).
+        // Offset 5, zero-data flag clear: a raw zero stays zero, everything else gains the
+        // offset. Verified by hand: transformed = [0,6,7,8, 0,0,6,7], each packed into its own
+        // nibble of the output word, unit0 in the lowest nibble.
+        let mut bus = FlatBus::new(0x100);
+        header(&mut bus, 0x00, 2, 2, 4, 5);
+        bus.write8(0x10, 0b11_10_01_00); // units, MSB pair first: 3,2,1,0
+        bus.write8(0x11, 0b10_01_00_00); // units: 2,1,0,0
+        run(&mut bus, 0x10, 0x20, 0x00);
+        assert_eq!(bus.read32(0x20), 0x7600_8760);
+    }
+
+    #[test]
+    fn one_bit_source_to_thirty_two_bit_destination_with_the_zero_data_flag_set() {
+        // Every unit is a single bit, and each becomes its own destination word, so this is the
+        // clearest possible demonstration of the zero-data flag: with it set, a raw 0 bit is
+        // *not* left alone, it gets the offset too.
+        let mut bus = FlatBus::new(0x100);
+        header(&mut bus, 0x00, 1, 1, 32, 0x1000 | 0x8000_0000);
+        bus.write8(0x10, 0b1010_0101); // bit0 (LSB) first: 1,0,1,0,0,1,0,1
+        run(&mut bus, 0x10, 0x20, 0x00);
+        let expected = [
+            0x1001, 0x1000, 0x1001, 0x1000, 0x1000, 0x1001, 0x1000, 0x1001,
+        ];
+        for (index, value) in expected.into_iter().enumerate() {
+            assert_eq!(bus.read32(0x20 + index as u32 * 4), value, "word {index}");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_bit_width_refuses_rather_than_shifting_by_a_meaningless_amount() {
+        let mut bus = FlatBus::new(0x100);
+        header(&mut bus, 0x00, 1, 3, 8, 0); // 3 is not a supported source width
+        bus.write8(0x10, 0xFF);
+        run(&mut bus, 0x10, 0x20, 0x00);
+        assert_eq!(bus.read32(0x20), 0, "nothing was written");
+    }
+}
+
+#[cfg(test)]
+mod soft_reset_tests {
+    use super::*;
+    use crate::bios::tests::FlatBus;
+    use cpu_arm7tdmi::BootState;
+
+    /// Everything a fresh boot leaves untouched: register banks with something recognisably not
+    /// zero, and the region `SoftReset` is documented to clear.
+    fn dirty(cpu: &mut Arm7Tdmi, bus: &mut FlatBus) {
+        for index in 0..=12 {
+            cpu.regs.write(Mode::Supervisor, index, 0xDEAD_BEEF);
+        }
+        cpu.regs.write(Mode::Supervisor, 13, 0x1111_1111);
+        cpu.regs.write(Mode::Supervisor, 14, 0x2222_2222);
+        cpu.regs.set_spsr(Mode::Supervisor, Psr::new(0xFFFF_FFFF));
+        cpu.regs.write(Mode::Irq, 13, 0x3333_3333);
+        cpu.regs.write(Mode::Irq, 14, 0x4444_4444);
+        cpu.regs.set_spsr(Mode::Irq, Psr::new(0xFFFF_FFFF));
+        cpu.regs.write(Mode::System, 13, 0x5555_5555);
+        cpu.cpsr.set_mode(Mode::Supervisor);
+        cpu.cpsr.set_thumb(true);
+        cpu.cpsr.set_irq_disabled(true);
+        cpu.cpsr.set_fiq_disabled(false);
+
+        for offset in (0..0x200u32).step_by(4) {
+            bus.write32(0x0300_7E00 + offset, 0xCCCC_CCCC);
+        }
+    }
+
+    #[test]
+    fn soft_reset_restores_the_documented_post_boot_state_and_jumps_to_rom() {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        // Large enough to cover the region actually under test; SoftReset never touches
+        // anything past 0x0300_8000.
+        let mut bus = FlatBus::new(0x0300_8000);
+        dirty(&mut cpu, &mut bus);
+        bus.write8(SOFT_RESET_FLAG, 0); // 0 selects the cartridge
+
+        dispatch(&mut cpu, &mut bus, &mut None, 0x00);
+
+        for offset in (0..0x200u32).step_by(4) {
+            assert_eq!(
+                bus.read32(0x0300_7E00 + offset),
+                0,
+                "byte {offset:#X} of the cleared region"
+            );
+        }
+        for index in 0..=12 {
+            assert_eq!(cpu.regs.read(Mode::Supervisor, index), 0, "r{index}");
+        }
+        assert_eq!(cpu.regs.read(Mode::Supervisor, 13), SP_SUPERVISOR);
+        assert_eq!(cpu.regs.read(Mode::Supervisor, 14), 0, "LR_svc");
+        assert_eq!(cpu.regs.spsr(Mode::Supervisor), Some(Psr::default()));
+        assert_eq!(cpu.regs.read(Mode::Irq, 13), SP_IRQ);
+        assert_eq!(cpu.regs.read(Mode::Irq, 14), 0, "LR_irq");
+        assert_eq!(cpu.regs.spsr(Mode::Irq), Some(Psr::default()));
+        assert_eq!(cpu.regs.read(Mode::System, 13), SP_SYSTEM);
+        assert_eq!(cpu.cpsr.mode(), Mode::System);
+        assert!(!cpu.cpsr.thumb(), "the entry point runs in ARM state");
+        assert!(!cpu.cpsr.irq_disabled(), "the BIOS has finished with them");
+        assert!(cpu.cpsr.fiq_disabled());
+        assert_eq!(cpu.regs.pc(), CARTRIDGE_ENTRY);
+    }
+
+    #[test]
+    fn a_nonzero_reset_flag_jumps_to_ram_instead_of_the_cartridge() {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        let mut bus = FlatBus::new(0x0300_8000);
+        bus.write8(SOFT_RESET_FLAG, 1);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x00);
+        assert_eq!(cpu.regs.pc(), 0x0200_0000);
+    }
+
+    #[test]
+    fn the_reset_flag_is_read_before_the_region_containing_it_is_cleared() {
+        // The flag lives inside the 0x200-byte span this call zeroes. Reading it after clearing
+        // would always see 0 and always jump to the cartridge, silently losing the RAM case.
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        let mut bus = FlatBus::new(0x0300_8000);
+        bus.write8(SOFT_RESET_FLAG, 0xFF);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x00);
+        assert_eq!(
+            cpu.regs.pc(),
+            0x0200_0000,
+            "the flag was honoured, not already cleared"
+        );
+    }
+}
+
+#[cfg(test)]
+mod arc_tan_tests {
+    use super::*;
+    use crate::bios::tests::FlatBus;
+    use cpu_arm7tdmi::BootState;
+
+    fn run(input: i32) -> u32 {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        let mut bus = FlatBus::new(16);
+        cpu.set_reg(0, input as u32);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x09);
+        cpu.reg(0)
+    }
+
+    #[test]
+    fn arc_tan_matches_the_hardware_polynomial_at_the_quarter_turns() {
+        // Q14 fixed point: 0x4000 is a tangent of 1.0, and the documented output range maps that
+        // to +/-45 degrees -- 0x2000 of a 0x10000 full turn, the same convention `affine_set`'s
+        // angle argument uses.
+        assert_eq!(run(0), 0, "tan 0 is angle 0");
+        assert_eq!(run(0x4000), 0x2000, "tan 1.0 is +45 degrees");
+        assert_eq!(
+            run(-0x4000i32),
+            (-0x2000i32) as u32,
+            "tan -1.0 is -45 degrees"
+        );
+    }
+
+    #[test]
+    fn arc_tan_is_not_symmetric_around_zero_because_it_is_the_hardware_polynomial() {
+        // The polynomial's own fixed-point rounding, not a bug in this transcription: +1 and -1,
+        // the smallest representable tangents, round to different-magnitude angles. A true
+        // arctangent would be symmetric here; this hardware is not.
+        assert_eq!(run(1), 0);
+        assert_eq!(run(-1i32), (-1i32) as u32);
+    }
+}
+
+#[cfg(test)]
+mod get_bios_checksum_tests {
+    use super::*;
+    use crate::bios::tests::FlatBus;
+    use cpu_arm7tdmi::BootState;
+
+    #[test]
+    fn get_bios_checksum_answers_the_one_well_known_value() {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        let mut bus = FlatBus::new(16);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x0D);
+        assert_eq!(
+            cpu.reg(0),
+            0xBAAE_187F,
+            "the checksum of a genuine GBA/GBA SP BIOS"
+        );
+    }
+}
+
+#[cfg(test)]
+mod midi_key_to_freq_tests {
+    use super::*;
+    use crate::bios::tests::FlatBus;
+    use cpu_arm7tdmi::BootState;
+
+    fn run(rate: u32, key: u32, fine_pitch: u32) -> u32 {
+        let mut cpu = Arm7Tdmi::new(BootState::default());
+        let mut bus = FlatBus::new(16);
+        bus.write32(4, rate); // WaveData::freq sits at offset 4
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, key);
+        cpu.set_reg(2, fine_pitch);
+        dispatch(&mut cpu, &mut bus, &mut None, 0x1F);
+        cpu.reg(0)
+    }
+
+    #[test]
+    fn the_target_key_matching_the_stored_reference_key_leaves_the_rate_unchanged() {
+        // GBATEK's WaveData.freq is pre-scaled by 2^((180-originalKey)/12); asking for that same
+        // key back is an exponent of zero, the one case simple enough to check by eye rather
+        // than by running the formula in a second tool.
+        assert_eq!(run(4096, 180, 0), 4096);
+    }
+
+    #[test]
+    fn key_168_is_the_documented_bios_read_trick_and_halves_the_rate() {
+        // GBATEK's own example of this call — reading BIOS memory through it without the usual
+        // range check — uses key 168 with no fine pitch, twelve semitones below the reference
+        // key of 180: exactly one octave, so the exponent is 1 and the rate exactly halves.
+        assert_eq!(run(1000, 168, 0), 500);
+    }
+
+    #[test]
+    fn a_nonzero_fine_pitch_shifts_the_result_by_a_fraction_of_a_semitone() {
+        // No clean closed form this time; verified independently by evaluating the same formula
+        // in Python rather than by construction, to catch a transcription error in the Rust
+        // rather than a matching one in both places.
+        assert_eq!(run(8000, 172, 128), 5187);
     }
 }

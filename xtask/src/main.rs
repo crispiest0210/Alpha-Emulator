@@ -112,8 +112,17 @@ fn cargo() -> String {
 }
 
 fn have(program: &str) -> bool {
+    have_with(program, "--version")
+}
+
+/// [`have`] for a program that does not answer to `--version`.
+///
+/// Info-ZIP's `unzip` is the one here that does not: it treats `--version` as two unknown
+/// options, prints its usage, and exits 10, so probing it the usual way reports a working
+/// `unzip` as missing.
+fn have_with(program: &str, flag: &str) -> bool {
     Command::new(program)
-        .arg("--version")
+        .arg(flag)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -269,7 +278,20 @@ fn bench(
     baseline: Option<String>,
     quick: bool,
 ) -> Result<()> {
-    let mut args: Vec<String> = vec!["bench".into(), "--workspace".into(), "--".into()];
+    // Exactly the one criterion bench target, not `--workspace` and not `--benches`. Every
+    // benchmark lives in `testing/harness/benches/systems.rs`, which is declared `harness = false`
+    // so criterion parses its own arguments. Any wider selection also runs *lib* targets, whose
+    // ordinary libtest harness rejects criterion's flags outright — so `--save-baseline` and
+    // `--baseline`, the two flags this command exists to forward, failed before a single benchmark
+    // ran. `--benches` is not enough: a lib target is benchmarked by default too.
+    let mut args: Vec<String> = vec![
+        "bench".into(),
+        "-p".into(),
+        "harness".into(),
+        "--bench".into(),
+        "systems".into(),
+        "--".into(),
+    ];
     if quick {
         // Enough to see a change of a few percent, not enough to quote. The defaults take minutes.
         args.extend(["--warm-up-time".into(), "1".into()]);
@@ -360,8 +382,8 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     let mut skipped = 0usize;
     let mut failed = Vec::new();
 
-    for (path, url) in TEST_ROMS {
-        let target = corpus.join(path);
+    for rom in harness::corpus::all_roms() {
+        let target = corpus.join(rom.path);
         if target.is_file() && !force {
             skipped += 1;
             continue;
@@ -371,50 +393,21 @@ fn fetch_test_roms(force: bool) -> Result<()> {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        println!("fetching {path}");
-        let status = Command::new("curl")
-            .args([
-                "--location", // these are redirects to a CDN
-                "--fail",     // a 404 must not leave an HTML error page on disk
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "120",
-                "--output",
-            ])
-            .arg(&target)
-            .arg(url)
-            .status()
-            .with_context(|| format!("running curl for {path}"))?;
+        println!("fetching {}", rom.path);
+        let outcome = match rom.url.split_once('#') {
+            Some((archive_url, member)) => {
+                extract_from_archive(&corpus, archive_url, member, &target)
+            }
+            None => download(rom.url, &target),
+        };
 
-        if status.success() {
+        if outcome? {
             fetched += 1;
         } else {
             // Leave nothing half-written behind: a truncated ROM would fail the suite in a
             // way that looks like an emulator bug.
             let _ = std::fs::remove_file(&target);
-            failed.push(*path);
-        }
-    }
-
-    for (path, url, member) in ARCHIVED_TEST_ROMS {
-        let target = corpus.join(path);
-        if target.is_file() && !force {
-            skipped += 1;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        println!("fetching {path} (from an archive)");
-        match fetch_from_archive(&target, url, member) {
-            Ok(()) => fetched += 1,
-            Err(error) => {
-                println!("  {error:#}");
-                let _ = std::fs::remove_file(&target);
-                failed.push(*path);
-            }
+            failed.push(rom.path);
         }
     }
 
@@ -432,137 +425,82 @@ fn fetch_test_roms(force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Download a zip and write one member of it to `target`.
-///
-/// `unzip -p` streams a single member to standard output, which keeps this to two processes and
-/// no temporary directory. The same reasoning as `curl`: shelling out to a tool every supported
-/// platform already has beats adding a decompressor to the build for a step that runs once per
-/// checkout.
-fn fetch_from_archive(target: &std::path::Path, url: &str, member: &str) -> Result<()> {
-    let archive = target.with_extension("zip.part");
+/// Fetch one URL to one file. `Ok(false)` means the server said no, which is not fatal.
+fn download(url: &str, target: &std::path::Path) -> Result<bool> {
     let status = Command::new("curl")
         .args([
-            "--location",
-            "--fail",
+            "--location", // these are redirects to a CDN
+            "--fail",     // a 404 must not leave an HTML error page on disk
             "--silent",
             "--show-error",
             "--max-time",
-            "180",
+            "120",
             "--output",
         ])
-        .arg(&archive)
+        .arg(target)
         .arg(url)
         .status()
         .with_context(|| format!("running curl for {url}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&archive);
-        bail!("curl could not download {url}");
+    Ok(status.success())
+}
+
+/// Pull one ROM out of a zip, given a `url#member-inside-the-zip` corpus entry.
+///
+/// Needed because not every suite publishes its ROMs as individual files. Mooneye's are built
+/// from source by its CI and published only as a dated archive — there is no per-file URL
+/// anywhere upstream, and its repository holds assembler source rather than binaries. The
+/// alternative was to commit the built ROMs, which is the one thing this corpus must never do.
+///
+/// The archive is downloaded once per run and kept beside the ROMs it produced, so the sixteen
+/// mooneye entries cost one download rather than sixteen. That directory is inside the
+/// gitignored corpus, so nothing it holds can be committed either.
+fn extract_from_archive(
+    corpus: &std::path::Path,
+    archive_url: &str,
+    member: &str,
+    target: &std::path::Path,
+) -> Result<bool> {
+    if !have_with("unzip", "-v") {
+        bail!("unzip is required to fetch archived test ROMs; install it and re-run");
     }
 
-    // No `have("unzip")` pre-check: Info-ZIP's `unzip` does not answer `--version` the way that
-    // helper asks, and reports "not installed" for a tool that is. Running it and reporting what
-    // happened is both simpler and honest about which of the two failures occurred.
-    let extracted = Command::new("unzip")
+    let cache = corpus.join(".archives");
+    std::fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    let name = archive_url
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty())
+        .context("the archive URL ends in a file name")?;
+    let archive = cache.join(name);
+
+    if !archive.is_file() {
+        println!("  downloading {name}");
+        if !download(archive_url, &archive)? {
+            let _ = std::fs::remove_file(&archive);
+            return Ok(false);
+        }
+    }
+
+    // `-p` writes the member to stdout, which is the only way to land it under a name of our
+    // choosing rather than the one it happens to have inside the archive.
+    let file =
+        std::fs::File::create(target).with_context(|| format!("creating {}", target.display()))?;
+    let status = Command::new("unzip")
         .arg("-p")
         .arg(&archive)
         .arg(member)
-        .output()
-        .context("running unzip; it is required to unpack this ROM and may not be installed")?;
-    let _ = std::fs::remove_file(&archive);
-    if !extracted.status.success() || extracted.stdout.is_empty() {
-        bail!("{member} is not in the archive at {url}");
-    }
-    std::fs::write(target, &extracted.stdout)
-        .with_context(|| format!("writing {}", target.display()))?;
-    Ok(())
+        .stdout(std::process::Stdio::from(file))
+        .status()
+        .with_context(|| format!("running unzip for {member}"))?;
+
+    // `unzip -p` reports success even when the member does not match anything, leaving an empty
+    // file behind, so the size is the real check.
+    let extracted = status.success()
+        && std::fs::metadata(target)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+    Ok(extracted)
 }
-
-/// ROMs upstream publishes only inside an archive.
-///
-/// A separate list rather than a third column on every row of [`TEST_ROMS`]: exactly one entry
-/// needs unpacking, and thirty-five `None`s is a worse way to say that than a second list.
-const ARCHIVED_TEST_ROMS: &[(&str, &str, &str)] = &[(
-    "nds/argv-test.nds",
-    "https://github.com/devkitPro/nds-hb-menu/releases/download/v0.11.0/hbmenu-0.11.0.zip",
-    "hbmenu/nds/argvTest.nds",
-)];
-
-/// The corpus, mirroring `testing/harness`'s own list.
-///
-/// Duplicated rather than shared because `xtask` deliberately does not depend on the
-/// workspace's crates — it must build and run even when they do not.
-const TEST_ROMS: &[(&str, &str)] = &[
-    (
-        "gb/blargg/cpu_instrs.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/cpu_instrs.gb",
-    ),
-    (
-        "gb/blargg/instr_timing.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/instr_timing/instr_timing.gb",
-    ),
-    (
-        "gb/blargg/mem_timing.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/mem_timing/mem_timing.gb",
-    ),
-    (
-        "gb/blargg/dmg_sound.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/dmg_sound.gb",
-    ),
-    ("gb/blargg/cpu_instrs/01-special.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/01-special.gb"),
-    ("gb/blargg/cpu_instrs/02-interrupts.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/02-interrupts.gb"),
-    ("gb/blargg/cpu_instrs/03-op_sp_hl.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/03-op%20sp,hl.gb"),
-    ("gb/blargg/cpu_instrs/04-op_r_imm.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/04-op%20r,imm.gb"),
-    ("gb/blargg/cpu_instrs/05-op_rp.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/05-op%20rp.gb"),
-    ("gb/blargg/cpu_instrs/06-ld_r_r.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/06-ld%20r,r.gb"),
-    ("gb/blargg/cpu_instrs/07-jr_jp_call_ret_rst.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb"),
-    ("gb/blargg/cpu_instrs/08-misc_instrs.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/08-misc%20instrs.gb"),
-    ("gb/blargg/cpu_instrs/09-op_r_r.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/09-op%20r,r.gb"),
-    ("gb/blargg/cpu_instrs/10-bit_ops.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/10-bit%20ops.gb"),
-    ("gb/blargg/cpu_instrs/11-op_a_hl.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cpu_instrs/individual/11-op%20a,(hl).gb"),
-    ("gb/blargg/dmg_sound/01-registers.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/01-registers.gb"),
-    ("gb/blargg/dmg_sound/02-len_ctr.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/02-len%20ctr.gb"),
-    ("gb/blargg/dmg_sound/03-trigger.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/03-trigger.gb"),
-    ("gb/blargg/dmg_sound/04-sweep.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/04-sweep.gb"),
-    ("gb/blargg/dmg_sound/05-sweep_details.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/05-sweep%20details.gb"),
-    ("gb/blargg/dmg_sound/06-overflow_on_trigger.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/06-overflow%20on%20trigger.gb"),
-    ("gb/blargg/dmg_sound/07-len_sweep_period_sync.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/07-len%20sweep%20period%20sync.gb"),
-    ("gb/blargg/dmg_sound/08-len_ctr_during_power.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/08-len%20ctr%20during%20power.gb"),
-    ("gb/blargg/dmg_sound/09-wave_read_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/09-wave%20read%20while%20on.gb"),
-    ("gb/blargg/dmg_sound/10-wave_trigger_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/10-wave%20trigger%20while%20on.gb"),
-    ("gb/blargg/dmg_sound/11-regs_after_power.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/11-regs%20after%20power.gb"),
-    ("gb/blargg/dmg_sound/12-wave_write_while_on.gb", "https://raw.githubusercontent.com/retrio/gb-test-roms/master/dmg_sound/rom_singles/12-wave%20write%20while%20on.gb"),
-    (
-        "gb/dmg-acid2.gb",
-        "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
-    ),
-    // Game Boy Color.
-    (
-        "gbc/cgb-acid2.gbc",
-        "https://github.com/mattcurrie/cgb-acid2/releases/download/v1.1/cgb-acid2.gbc",
-    ),
-    (
-        "gbc/blargg/cgb_sound.gb",
-        "https://raw.githubusercontent.com/retrio/gb-test-roms/master/cgb_sound/cgb_sound.gb",
-    ),
-    // Game Boy Advance. Also the first real test of the ARM7TDMI core.
-    (
-        "gba/gba-suite/arm.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/arm/arm.gba",
-    ),
-    (
-        "gba/gba-suite/thumb.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/thumb/thumb.gba",
-    ),
-    (
-        "gba/gba-suite/memory.gba",
-        "https://github.com/jsmolka/gba-tests/raw/master/memory/memory.gba",
-    ),
-    // Nintendo DS. The other DS ROM needs unpacking; see `ARCHIVED_TEST_ROMS`.
-    (
-        "nds/nitrofs-normalmap.nds",
-        "https://raw.githubusercontent.com/rmn20/NormalmappingDS/master/dist/nmap.nds",
-    ),
-];
 
 /// The workspace root, found from this crate rather than the current directory.
 fn workspace_root() -> Result<std::path::PathBuf> {

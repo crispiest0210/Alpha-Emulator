@@ -183,6 +183,8 @@ pub fn render_text_background<M: TilemapSource>(
                 priority: tile.priority,
                 layer: params.layer,
                 source: PixelSource::Background,
+                // Only a sprite can force a blend; a background is selected by `BLDCNT` or not.
+                forces_blend: false,
             },
         );
     }
@@ -221,6 +223,97 @@ pub struct Sprite {
     /// 256-colour one came out as a stretched checkerboard — one byte read as two indices — which
     /// looks like a corrupt tile rather than like an unimplemented feature.
     pub depth: BitDepth,
+    /// Whether this sprite's pixels blend with what is under them whatever the blend registers
+    /// say. See [`IndexedPixel::forces_blend`](crate::IndexedPixel::forces_blend), which it is
+    /// copied onto.
+    pub forces_blend: bool,
+}
+
+/// The claimed-pixel state one scanline's sprite compositing carries from sprite to sprite.
+///
+/// Sprites are offered front-to-back and the first to claim a pixel keeps it — whether or not it
+/// ends up *visible*, because a sprite that loses to the background has still claimed the pixel
+/// and a farther sprite must not show through the hole. That rule, and the priority comparison
+/// against the background, are the whole of sprite compositing beyond decoding tiles.
+///
+/// # Why the state is out here rather than inside a renderer
+///
+/// A system can have more than one sprite renderer. The Game Boy Advance has two: ordinary sprites
+/// go through [`render_sprite`], and rotated or scaled ones it draws itself, because this crate has
+/// no notion of an affine matrix. With the claim state private to [`render_sprites`], those two
+/// could not see each other — so the affine path wrote pixels unconditionally, ignoring background
+/// priority entirely, and every ordinary sprite then overwrote every affine one regardless of which
+/// was in front. A rotating object punched through the text box before it, and a farther plain
+/// sprite erased a nearer rotated one.
+///
+/// Holding the state here lets both renderers share one ordered pass, so they compete under one
+/// rule. It is the same reasoning that puts the window mask on [`ScanlineBuffer`] rather than in
+/// each background renderer; see the crate docs.
+pub struct SpritePass {
+    /// Which pixels a nearer sprite has already claimed.
+    claimed: Vec<bool>,
+    rule: SpriteRule,
+}
+
+impl SpritePass {
+    pub fn new(width: usize, rule: SpriteRule) -> Self {
+        Self {
+            claimed: vec![false; width],
+            rule,
+        }
+    }
+
+    /// Offer one sprite pixel, which must already be opaque.
+    ///
+    /// Returns whether this sprite claimed the pixel. A `false` return means a nearer sprite got
+    /// there first; a `true` return does *not* mean the pixel is visible, because the background
+    /// may still cover it — the claim is what stops a farther sprite trying.
+    ///
+    /// `behind_background` is the sprite's own "behind background" flag, which only the Game Boy
+    /// rules consult; the GBA compares the two priorities instead and leaves it false.
+    pub fn place(
+        &mut self,
+        out: &mut ScanlineBuffer,
+        x: usize,
+        pixel: IndexedPixel,
+        behind_background: bool,
+    ) -> bool {
+        if x >= self.claimed.len() || self.claimed[x] {
+            return false;
+        }
+        self.claimed[x] = true;
+
+        let background = out.get(x);
+        // A direct-colour pixel — the Game Boy Advance's bitmap modes 3 and 5 — has no
+        // transparent index at all, unlike an ordinary indexed background where colour 0 is a
+        // hole nothing can cover through. `ByPriority` is the only rule a direct-colour pixel
+        // ever meets in practice, since only the GBA produces one and the GBA always compares
+        // priorities rather than consulting a "behind background" bit, but the comparison itself
+        // is written out either way rather than assumed.
+        let covered = match background.source {
+            PixelSource::Background => match self.rule {
+                // A transparent background pixel never covers anything, whatever the priorities
+                // say.
+                SpriteRule::ByPriority => {
+                    background.color != 0 && pixel.priority > background.priority
+                }
+                rule => background_wins(
+                    rule,
+                    // `TileRef::priority` counts lower as nearer, so zero is the tile asking to be
+                    // drawn in front.
+                    background.priority == 0,
+                    behind_background,
+                    background.color,
+                ),
+            },
+            PixelSource::DirectColor => pixel.priority > background.priority,
+            PixelSource::Backdrop | PixelSource::Sprite => false,
+        };
+        if !covered {
+            out.set(x, pixel);
+        }
+        true
+    }
 }
 
 /// Composite one scanline of sprites.
@@ -291,100 +384,93 @@ pub fn render_sprites(
     rule: SpriteRule,
     out: &mut ScanlineBuffer,
 ) {
-    // Remembers which pixels a nearer sprite already claimed, so a farther one cannot
-    // overwrite it even where the nearer sprite is opaque.
-    let mut claimed = vec![false; out.width()];
-    let mut pixels = [0u8; 8];
-
+    let mut pass = SpritePass::new(out.width(), rule);
     for sprite in sprites {
-        let row = line as i32 - sprite.y;
-        if row < 0 || row >= sprite.height as i32 {
-            continue;
-        }
-        let row = if sprite.flip_y {
-            sprite.height - 1 - row as u32
+        render_sprite(sprite, tile_data, line, &mut pass, out);
+    }
+}
+
+/// Composite one sprite into a pass already in progress.
+///
+/// Split out of [`render_sprites`] so a system with a second sprite renderer of its own can
+/// interleave the two in one front-to-back pass and have them compete under one rule — see
+/// [`SpritePass`]. Callers must offer sprites front-most first; the pass enforces the claim, not
+/// the ordering.
+///
+/// Colour index 0 is transparent and never written, which is what lets sprites overlap without
+/// punching holes in each other.
+pub fn render_sprite(
+    sprite: &Sprite,
+    tile_data: &[u8],
+    line: u32,
+    pass: &mut SpritePass,
+    out: &mut ScanlineBuffer,
+) {
+    let row = line as i32 - sprite.y;
+    if row < 0 || row >= sprite.height as i32 {
+        return;
+    }
+    let row = if sprite.flip_y {
+        sprite.height - 1 - row as u32
+    } else {
+        row as u32
+    };
+
+    // Tall sprites are stacked 8x8 tiles, so the row selects which tile as well as which
+    // row within it.
+    let tile_index_in_sprite = row / 8;
+    let row_in_tile = row % 8;
+
+    let mut pixels = [0u8; 8];
+    let depth = sprite.depth;
+    for tile_column in 0..(sprite.width / 8) {
+        // A horizontal flip reverses which tile column appears where, not just the
+        // pixels inside each one.
+        let source_column = if sprite.flip_x {
+            sprite.width / 8 - 1 - tile_column
         } else {
-            row as u32
+            tile_column
         };
+        let row_stride = match sprite.row_stride {
+            0 => (sprite.width / 8) as usize * depth.tile_size(),
+            stride => stride,
+        };
+        let tile = TileRef {
+            data_offset: sprite.tile_offset
+                + tile_index_in_sprite as usize * row_stride
+                + source_column as usize * depth.tile_size(),
+            palette: sprite.palette,
+            flip_x: sprite.flip_x,
+            // The row was already flipped above, so the tile fetch must not flip again.
+            flip_y: false,
+            priority: 0,
+        };
+        tile_row_pixels(&tile, tile_data, depth, row_in_tile, &mut pixels);
 
-        // Tall sprites are stacked 8x8 tiles, so the row selects which tile as well as which
-        // row within it.
-        let tile_index_in_sprite = row / 8;
-        let row_in_tile = row % 8;
-
-        let depth = sprite.depth;
-        for tile_column in 0..(sprite.width / 8) {
-            // A horizontal flip reverses which tile column appears where, not just the
-            // pixels inside each one.
-            let source_column = if sprite.flip_x {
-                sprite.width / 8 - 1 - tile_column
-            } else {
-                tile_column
-            };
-            let row_stride = match sprite.row_stride {
-                0 => (sprite.width / 8) as usize * depth.tile_size(),
-                stride => stride,
-            };
-            let tile = TileRef {
-                data_offset: sprite.tile_offset
-                    + tile_index_in_sprite as usize * row_stride
-                    + source_column as usize * depth.tile_size(),
-                palette: sprite.palette,
-                flip_x: sprite.flip_x,
-                // The row was already flipped above, so the tile fetch must not flip again.
-                flip_y: false,
-                priority: 0,
-            };
-            tile_row_pixels(&tile, tile_data, depth, row_in_tile, &mut pixels);
-
-            for (pixel_x, &color) in pixels.iter().enumerate() {
-                if color == 0 {
-                    continue; // transparent
-                }
-                let screen_x = sprite.x + (tile_column * 8) as i32 + pixel_x as i32;
-                if screen_x < 0 || screen_x as usize >= out.width() {
-                    continue;
-                }
-                let screen_x = screen_x as usize;
-                if claimed[screen_x] {
-                    continue; // a nearer sprite already owns this pixel
-                }
-                claimed[screen_x] = true;
-
-                let background = out.get(screen_x);
-                let covered = background.source == PixelSource::Background
-                    && match rule {
-                        // A transparent background pixel never covers anything, whatever the
-                        // priorities say.
-                        SpriteRule::ByPriority => {
-                            background.color != 0 && sprite.priority > background.priority
-                        }
-                        _ => background_wins(
-                            rule,
-                            // `TileRef::priority` counts lower as nearer, so zero is the tile
-                            // asking to be drawn in front.
-                            background.priority == 0,
-                            sprite.behind_background,
-                            background.color,
-                        ),
-                    };
-                if covered {
-                    // The sprite loses to the background here, but it has still claimed the
-                    // pixel: a farther sprite does not get to show through instead.
-                    continue;
-                }
-
-                out.set(
-                    screen_x,
-                    IndexedPixel {
-                        color,
-                        palette: sprite.palette,
-                        priority: 0,
-                        layer: 0,
-                        source: PixelSource::Sprite,
-                    },
-                );
+        for (pixel_x, &color) in pixels.iter().enumerate() {
+            if color == 0 {
+                continue; // transparent
             }
+            let screen_x = sprite.x + (tile_column * 8) as i32 + pixel_x as i32;
+            if screen_x < 0 || screen_x as usize >= out.width() {
+                continue;
+            }
+            pass.place(
+                out,
+                screen_x as usize,
+                IndexedPixel {
+                    color,
+                    palette: sprite.palette,
+                    // The sprite's own priority, which the pass compares against the background's.
+                    // It was written as a flat zero here, which threw away the one value a second
+                    // sprite renderer would need to compete on equal terms.
+                    priority: sprite.priority,
+                    layer: 0,
+                    source: PixelSource::Sprite,
+                    forces_blend: sprite.forces_blend,
+                },
+                sprite.behind_background,
+            );
         }
     }
 }
@@ -645,6 +731,7 @@ mod tests {
             flip_y: false,
             behind_background: false,
             row_stride: 0,
+            forces_blend: false,
         }
     }
 

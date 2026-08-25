@@ -38,7 +38,10 @@ use std::time::{Duration, Instant};
 ///
 /// A game writes to save RAM in bursts — several hundred bytes over a few frames — so writing on
 /// every dirty frame would mean dozens of file writes for one in-game save. Two seconds is short
-/// enough that a crash loses nothing a player would notice and long enough to coalesce a burst.
+/// enough that a crash loses nothing a player would notice and long enough to coalesce a burst —
+/// true only because [`run`] catches a panic out of [`Emulator::tick`] and flushes before letting
+/// it continue; a debounce is not a safety margin against something that never gets the chance to
+/// run at all, which is what an uncaught panic would leave it.
 const SAVE_RAM_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// How often statistics are published. Four times a second: fast enough that a HUD feels live,
@@ -91,6 +94,8 @@ pub(crate) fn run(
         resume_past: None,
         pacer: Pacer::default(),
         stats: StatsWindow::new(),
+        #[cfg(test)]
+        test_panic_on_next_tick: false,
     };
     emulator.emit(SessionEvent::StatusChanged(SessionStatus::Idle));
 
@@ -115,7 +120,20 @@ pub(crate) fn run(
         }
 
         if emulator.should_run() {
-            emulator.tick();
+            // A panic here is exactly the failure mode `panic = "unwind"` (see `Cargo.toml`'s
+            // `[profile.release]`) exists to make survivable — a core bug in the emulated CPU or
+            // PPU, indexing off the end of a buffer mid-frame. Unwinding alone is not enough: it
+            // lets `Session::stop`'s `thread.join()` observe and log the panic, but nothing
+            // upstream of this call would ever run `close_rom`'s save-RAM flush, since the panic
+            // propagates straight out of `run` and the thread is simply gone. Catching it here,
+            // flushing, and then resuming the same unwind is what actually closes the gap: the
+            // flush happens, and the panic still reaches `join` exactly as before.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| emulator.tick()))
+            {
+                emulator.close_rom();
+                std::panic::resume_unwind(payload);
+            }
         } else {
             emulator.idle_maintenance();
             match commands.recv_timeout(IDLE_POLL) {
@@ -174,6 +192,13 @@ struct Emulator {
 
     pacer: Pacer,
     stats: StatsWindow,
+
+    /// Set by [`SessionCommand::TestPanicOnNextTick`], consumed by the next [`Emulator::tick`].
+    /// The panic has to originate inside `tick` rather than inside `handle` itself, since only
+    /// `tick` is wrapped in `catch_unwind` in [`run`] — panicking straight out of command
+    /// handling would prove nothing about the recovery path this exists to test.
+    #[cfg(test)]
+    test_panic_on_next_tick: bool,
 }
 
 /// The loaded machine and everything scoped to it.
@@ -308,6 +333,11 @@ impl Emulator {
     // --- the frame ------------------------------------------------------------------------
 
     fn tick(&mut self) {
+        #[cfg(test)]
+        if self.test_panic_on_next_tick {
+            self.test_panic_on_next_tick = false;
+            panic!("deliberate test panic from SessionCommand::TestPanicOnNextTick");
+        }
         if self.rewinding {
             self.rewind_tick();
         } else if self.needs_instruction_stepping() {
@@ -727,6 +757,8 @@ impl Emulator {
             }
 
             SessionCommand::Shutdown => return true,
+            #[cfg(test)]
+            SessionCommand::TestPanicOnNextTick => self.test_panic_on_next_tick = true,
         }
         false
     }

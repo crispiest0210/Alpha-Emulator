@@ -413,6 +413,8 @@ impl GbPpu {
                     // A Game Boy sprite is one tile wide and its rows are contiguous, so
                     // there is no arrangement to describe.
                     row_stride: 0,
+                    // No colour blending on this machine, so nothing can force one.
+                    forces_blend: false,
                 },
             );
             count += 1;
@@ -493,6 +495,8 @@ const PLACEHOLDER_SPRITE: Sprite = Sprite {
     flip_x: false,
     flip_y: false,
     behind_background: false,
+    // A Game Boy has no colour blending at all, so no sprite of its can force one.
+    forces_blend: false,
 };
 
 impl Savable for GbPpu {

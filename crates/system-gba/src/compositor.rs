@@ -16,8 +16,8 @@
 
 use core_common::{Framebuffer, Rgba8};
 use ppu_tile2d::{
-    render_sprites, render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource,
-    ScanlineBuffer, SpriteRule,
+    render_text_background, BackgroundParams, BitDepth, PaletteSource, PixelSource, ScanlineBuffer,
+    SpritePass, SpriteRule,
 };
 
 use crate::affine::transform_object_pixel;
@@ -117,27 +117,6 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let mut scanline = ScanlineBuffer::new(SCREEN_WIDTH as usize);
     scanline.clear();
 
-    // Sprites draw over a bitmap just as they draw over a tile layer, so both paths go through
-    // the same buffer — the bitmap is written straight to the row first and the sprites are
-    // composited on top of it afterwards.
-    if (3..=5).contains(&mode) {
-        let row = framebuffer.row_mut(line);
-        bitmap::render_scanline(
-            mode,
-            line,
-            frame.vram,
-            frame.palette,
-            frame.video.bitmap_frame_offset(),
-            row,
-        );
-        draw_sprites(frame, line, &mut scanline);
-        let palette = GbaPalette {
-            bytes: frame.palette,
-        };
-        overlay_sprites(&scanline, &palette, framebuffer.row_mut(line));
-        return;
-    }
-
     let kinds = layers_for_mode(mode);
     let enabled = [
         frame.video.dispcnt & (1 << 8) != 0,
@@ -147,40 +126,68 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     ];
     let present = std::array::from_fn(|i| enabled[i] && kinds[i].is_some());
 
+    // Both computed before anything composites, because a window decides which layers may *enter*
+    // priority resolution rather than what happens to the winner afterwards. The object window's
+    // own shape comes from a scratch render that is deliberately left unmasked — it is computing
+    // the mask, so it cannot be subject to it.
+    let object_window = object_window_mask(frame, line);
+    let visible = window_mask(frame, line, object_window.as_deref());
+    if let Some(visible) = &visible {
+        scanline.set_write_mask(layer_bits(visible));
+    }
+
     for index in frame.backgrounds.draw_order(present) {
         match kinds[index] {
             Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut scanline),
             Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut scanline),
-            _ => {}
+            Some(LayerKind::Bitmap) => draw_bitmap_layer(frame, mode, &mut scanline),
+            None => {}
         }
     }
-    draw_sprites(frame, line, &mut scanline);
+    draw_sprites(frame, line, SpriteSelection::Drawn, &mut scanline);
 
-    // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass with
-    // the first-target layers left out, rather than by widening `ScanlineBuffer` to keep a
-    // runner-up: that buffer is shared with the Game Boy, which has no colour effects at all and
-    // would carry the second slot on every line to no purpose. The pass only runs when an alpha
-    // blend is actually configured, which is a small minority of lines.
+    // What is *underneath* the winning pixel, for an alpha blend. Composed as a second pass that
+    // excludes, at each pixel, exactly the layer *that pixel's own winner* came from — not every
+    // layer `BLDCNT` declares a first target, which is a different and narrower question.
+    // Hardware picks the top two priority slots among BG0-3 and OBJ and blends the top into the
+    // second one, if both are flagged as the right kind of target; which slots are flagged plays
+    // no part in finding *which slot is second*. Excluding every declared first-target layer used
+    // to answer that as if it did — so wherever a layer was declared both a first and a second
+    // target, a common `BLDCNT` shape, it excluded itself from being the answer under its own
+    // winning pixel, and the pass fell through to whatever was third, or the backdrop. Excluding
+    // only the actual winner's own slot reproduces hardware's priority order for any stack, at the
+    // cost of one more pass over the same layers — which only runs when a blend could actually
+    // happen, a small minority of lines.
     //
-    // Exact whenever the layer directly beneath the top pixel is not itself a first target. Where
-    // two first-target layers stack, hardware blends the top with the second and this skips to the
-    // third. Nothing in the corpus does that, and the alternative is keeping every layer's pixel.
-    let under = (frame.effects.blend_mode() == BlendMode::Alpha).then(|| {
+    // A semi-transparent sprite forces an alpha blend whatever `BLDCNT`'s mode says, so the pass
+    // is needed whenever one is on this line too — not only when an alpha blend is configured.
+    // Without that, such a sprite would find nothing beneath it and render solid.
+    let needs_under =
+        frame.effects.blend_mode() == BlendMode::Alpha || has_semi_transparent_sprite(frame, line);
+    let under = needs_under.then(|| {
         let mut under = ScanlineBuffer::new(SCREEN_WIDTH as usize);
         under.clear();
+        // The same windows apply to what is underneath, and on top of them, each pixel's own
+        // winner is excluded: a layer a window excludes is not there at all, and a pixel's winner
+        // cannot also be what lies beneath itself.
+        let base = visible
+            .as_ref()
+            .map(|visible| layer_bits(visible))
+            .unwrap_or_else(|| vec![ppu_tile2d::ALL_LAYERS; SCREEN_WIDTH as usize]);
+        let mask: Vec<u8> = (0..SCREEN_WIDTH as usize)
+            .map(|x| base[x] & !scanline.get(x).layer_bit().unwrap_or(0))
+            .collect();
+        under.set_write_mask(mask);
+
         for index in frame.backgrounds.draw_order(present) {
-            if frame.effects.is_first_target(Layer::background(index)) {
-                continue;
-            }
             match kinds[index] {
                 Some(LayerKind::Text) => draw_text_layer(frame, index, line, &mut under),
                 Some(LayerKind::Affine) => draw_affine_layer(frame, index, &mut under),
-                _ => {}
+                Some(LayerKind::Bitmap) => draw_bitmap_layer(frame, mode, &mut under),
+                None => {}
             }
         }
-        if !frame.effects.is_first_target(Layer::Object) {
-            draw_sprites(frame, line, &mut under);
-        }
+        draw_sprites(frame, line, SpriteSelection::Drawn, &mut under);
         under
     });
 
@@ -190,25 +197,65 @@ pub fn render_scanline(frame: &Frame<'_>, line: u32, framebuffer: &mut Framebuff
     let backdrop = palette.lookup_bg(0, 0);
     let row = framebuffer.row_mut(line);
     scanline.resolve_into(&palette, backdrop, row);
-    let object_window = object_window_mask(frame, line);
     let composed = Composed {
         scanline: &scanline,
         under: under.as_ref(),
-        object_window: object_window.as_deref(),
+        visible: visible.as_deref(),
     };
-    apply_effects(frame, line, composed, &palette, backdrop, row);
+    apply_effects(frame, composed, &palette, backdrop, row);
+}
+
+/// Which layers each pixel of this line may draw, or `None` when no window is enabled.
+///
+/// Computed once per line and consumed twice: [`layer_bits`] narrows it to the write mask the
+/// scanline buffers enforce, and [`apply_effects`] reads bit 5 of the same value for the
+/// colour-effect enable. Those are two different questions about one register read, and asking
+/// `Effects::visible_layers` twice per pixel to answer them separately would be the only cost of
+/// keeping them apart.
+fn window_mask(frame: &Frame<'_>, line: u32, object_window: Option<&[bool]>) -> Option<Vec<u16>> {
+    let windows = [
+        frame.video.dispcnt & (1 << 13) != 0,
+        frame.video.dispcnt & (1 << 14) != 0,
+        frame.video.dispcnt & (1 << 15) != 0,
+    ];
+    // With every window disabled the registers are not consulted at all, which is what a game
+    // that never uses them relies on — and it keeps the buffers unmasked, so the mask check in
+    // `ScanlineBuffer::set` costs a single not-taken branch.
+    if !windows[0] && !windows[1] && !windows[2] {
+        return None;
+    }
+    Some(
+        (0..SCREEN_WIDTH)
+            .map(|x| {
+                let inside = object_window.is_some_and(|mask| mask[x as usize]);
+                frame.effects.visible_layers(x, line, windows, inside)
+            })
+            .collect(),
+    )
+}
+
+/// Narrow a per-pixel window mask to just the layer bits a [`ScanlineBuffer`] enforces.
+///
+/// Drops bit 5, which is the colour-effect enable rather than a sixth layer — the same bit
+/// position the backdrop occupies in `BLDCNT`, meaning two different things in two register sets.
+/// Handing it through as if it were a layer would let it mask a layer that does not exist.
+fn layer_bits(visible: &[u16]) -> Vec<u8> {
+    visible
+        .iter()
+        .map(|&v| (v & ppu_tile2d::ALL_LAYERS as u16) as u8)
+        .collect()
 }
 
 /// One composited line, and the two extra views of it the colour effects need.
 ///
 /// Grouped because they are three answers about the same line and always travel together: what won
-/// each pixel, what was beneath the winner, and which pixels an object window covers.
+/// each pixel, what was beneath the winner, and which layers each pixel permits.
 struct Composed<'a> {
     scanline: &'a ScanlineBuffer,
-    /// What lies under the winning pixel, composed only when an alpha blend is configured.
+    /// What lies under the winning pixel, composed only when an alpha blend could happen.
     under: Option<&'a ScanlineBuffer>,
-    /// Which pixels the object window covers, `None` when it is switched off.
-    object_window: Option<&'a [bool]>,
+    /// Per-pixel window mask, `None` when no window is enabled. See [`window_mask`].
+    visible: Option<&'a [u16]>,
 }
 
 /// Where the object window covers this line.
@@ -230,41 +277,16 @@ fn object_window_mask(frame: &Frame<'_>, line: u32) -> Option<Vec<bool>> {
         return None;
     }
     let oam = ObjectAttributeMemory::decode(frame.oam);
-    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
-    let shapes: Vec<_> = (0..crate::objects::OBJECT_COUNT)
-        .map(|i| oam.objects[i])
-        .filter(|object| {
-            object.graphics_mode == crate::objects::GraphicsMode::ObjectWindow
-                && object.mode != ObjectMode::Hidden
-                && object.covers_line(line as i32)
-        })
-        .collect();
-    if shapes.is_empty() {
-        return Some(vec![false; SCREEN_WIDTH as usize]);
-    }
-
     let mut scratch = ScanlineBuffer::new(SCREEN_WIDTH as usize);
     scratch.clear();
-    for object in shapes.iter().filter(|o| o.mode != ObjectMode::Normal) {
-        draw_affine_sprite(
-            frame,
-            &oam,
-            object,
-            line as i32,
-            one_dimensional,
-            &mut scratch,
-        );
-    }
-    let plain: Vec<_> = shapes
-        .iter()
-        .filter(|o| o.mode == ObjectMode::Normal)
-        .map(|object| object.to_sprite(one_dimensional))
-        .collect();
-    render_sprites(
-        &plain,
-        frame.vram,
+    // Deliberately unmasked: this scratch buffer is *computing* the window mask, so it cannot be
+    // subject to one. It also goes through the same merged pass as everything else, so an affine
+    // object-window sprite defines its region by exactly the rules an affine drawn sprite obeys.
+    compose_sprites(
+        frame,
+        &oam,
         line,
-        SpriteRule::ByPriority,
+        SpriteSelection::ObjectWindow,
         &mut scratch,
     );
 
@@ -279,19 +301,28 @@ fn object_window_mask(frame: &Frame<'_>, line: u32) -> Option<Vec<bool>> {
 fn layer_of(indexed: ppu_tile2d::IndexedPixel) -> Layer {
     match indexed.source {
         PixelSource::Sprite => Layer::Object,
-        PixelSource::Background => Layer::background(indexed.layer as usize),
+        // A bitmap mode's picture is background 2 wearing a different pixel format; it is
+        // selected as a blend or window target exactly as an indexed background 2 would be.
+        PixelSource::Background | PixelSource::DirectColor => {
+            Layer::background(indexed.layer as usize)
+        }
         PixelSource::Backdrop => Layer::Backdrop,
     }
 }
 
-/// Mask out layers a window excludes, then blend what remains.
+/// Blend the resolved line, where a colour effect is configured and the window allows it.
 ///
-/// Runs after the line is resolved rather than during it, because both questions are about the
-/// *winning* pixel: which layer produced it, and what is behind it. Threading them through the
-/// per-layer draw would mean asking them once per layer per pixel instead of once per pixel.
+/// Runs after the line is resolved because both its questions are about the *winning* pixel: which
+/// layer produced it, and what is behind it.
+///
+/// It no longer decides which layers are visible. That is a question about who may enter priority
+/// resolution, not about the winner, and answering it here — by overpainting the winner with the
+/// backdrop — produced hard-edged rectangles of flat backdrop wherever a window was used to reveal
+/// a *lower* layer rather than to hide everything. Hardware excludes the masked layer from the
+/// contest so the next one down wins; that now happens during compositing, in
+/// `ScanlineBuffer::set`. See the `ppu-tile2d` crate docs.
 fn apply_effects(
     frame: &Frame<'_>,
-    line: u32,
     composed: Composed<'_>,
     palette: &GbaPalette<'_>,
     backdrop: Rgba8,
@@ -300,15 +331,15 @@ fn apply_effects(
     let Composed {
         scanline,
         under,
-        object_window,
+        visible,
     } = composed;
-    let windows = [
-        frame.video.dispcnt & (1 << 13) != 0,
-        frame.video.dispcnt & (1 << 14) != 0,
-        frame.video.dispcnt & (1 << 15) != 0,
-    ];
     let mode = frame.effects.blend_mode();
-    if !windows[0] && !windows[1] && !windows[2] && mode == BlendMode::None {
+    // Windows have already been applied to the buffer, so with no colour effect there is normally
+    // nothing left for this pass to do. A semi-transparent sprite is the exception: it blends
+    // whatever `BLDCNT`'s mode says, including when that mode is "none", so its presence is what
+    // decides whether the pass can be skipped rather than the register alone. `under` is built
+    // exactly when a blend could happen, which makes it the cheap way to ask.
+    if mode == BlendMode::None && under.is_none() {
         return;
     }
 
@@ -316,24 +347,21 @@ fn apply_effects(
         let indexed = scanline.get(x);
         let layer = layer_of(indexed);
 
-        let in_object_window = object_window.is_some_and(|mask| mask[x]);
-        let visible = frame
-            .effects
-            .visible_layers(x as u32, line, windows, in_object_window);
-        // The backdrop is not maskable: bit 5 of a window register is the colour-effect enable,
-        // not a backdrop-enable, so testing it as a layer bit asks the wrong question entirely.
-        if layer != Layer::Backdrop && visible & layer.bit() == 0 {
-            write_pixel(pixel, backdrop);
+        // A semi-transparent sprite is a first target whatever `BLDCNT` selects, and forces an
+        // alpha blend even where `BLDCNT` asks for a brightness effect or for none at all. That is
+        // why it rides on the pixel: it varies per sprite, so no register consulted here could
+        // answer it. Games use it for shadows, water, reflections, and battle-move flashes, all of
+        // which rendered as solid blocks while the mode was decoded and never read.
+        let forced = indexed.forces_blend;
+        if !forced && !frame.effects.is_first_target(layer) {
             continue;
         }
-
-        if mode == BlendMode::None || !frame.effects.is_first_target(layer) {
-            continue;
-        }
-        // …and here it is asked the right one. A game darkening the world behind a menu switches
-        // the effect off inside the menu's window; honouring only the layer bits darkened the menu
-        // too, which is why its panels came out grey rather than white.
-        if visible & Layer::COLOUR_EFFECT == 0 {
+        // Bit 5 is the one thing a window still says about the *winner*: whether colour effects
+        // apply inside that region at all. It is not a sixth layer, which is why it survived the
+        // move of layer masking into compositing rather than going with it. A game darkening the
+        // world behind a menu switches the effect off inside the menu's window; honouring only the
+        // layer bits darkened the menu too, and its panels came out grey rather than white.
+        if visible.is_some_and(|mask| mask[x] & Layer::COLOUR_EFFECT == 0) {
             continue;
         }
         let top = Rgba8 {
@@ -342,10 +370,14 @@ fn apply_effects(
             b: pixel[2],
             a: pixel[3],
         };
+        // A forced blend is an *alpha* blend whatever the register says, which is what stops a
+        // semi-transparent sprite being brightened or darkened along with everything else.
+        let effective = if forced { BlendMode::Alpha } else { mode };
+
         // An alpha blend needs what is underneath, and hardware only blends when that lower pixel's
         // layer is a *second* target — otherwise the top pixel is written through unchanged. The
         // brightness effects have no lower layer at all, so they pass the top pixel twice.
-        let lower = match mode {
+        let lower = match effective {
             BlendMode::Alpha => {
                 let beneath =
                     under.map_or_else(ppu_tile2d::IndexedPixel::default, |buffer| buffer.get(x));
@@ -356,11 +388,14 @@ fn apply_effects(
                     PixelSource::Backdrop => backdrop,
                     PixelSource::Background => palette.lookup_bg(beneath.palette, beneath.color),
                     PixelSource::Sprite => palette.lookup_sprite(beneath.palette, beneath.color),
+                    PixelSource::DirectColor => {
+                        ppu_tile2d::bgr555_to_rgba(beneath.as_direct_color())
+                    }
                 }
             }
             _ => top,
         };
-        write_pixel(pixel, frame.effects.blend(mode, top, lower));
+        write_pixel(pixel, frame.effects.blend(effective, top, lower));
     }
 }
 
@@ -384,28 +419,77 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
         height,
         priority: layer.priority(),
     };
+
+    if !layer.mosaic() {
+        let params = BackgroundParams {
+            layer: index as u8,
+            // The layer's real size, not `full_line`'s 32x32 default. A background may be 64
+            // tiles wide, 64 tall, or both, and `render_text_background` wraps on *these*
+            // numbers — so leaving them at 32 made a larger map wrap at half its size and never
+            // reach its second screen block. Pokémon Emerald's battle menu lives in exactly that
+            // block, on a 32x64 background scrolled to 320: the whole bottom of the screen came
+            // out as backdrop.
+            map_width: width,
+            map_height: height,
+            // Index 0 is transparent on this machine: a background is one of four layers, and the
+            // one behind — or the backdrop — shows through. Writing it made the frontmost enabled
+            // text layer opaque across the whole screen, which covered the real picture with flat
+            // bands of one palette colour. The affine and sprite paths here have always skipped
+            // it.
+            transparent_index_zero: true,
+            ..BackgroundParams::full_line(
+                line,
+                layer.scroll_x as u32,
+                layer.scroll_y as u32,
+                layer.bit_depth(),
+            )
+        };
+        render_text_background(&map, frame.vram, &params, scanline);
+        return;
+    }
+
+    // Mosaic is a sample-and-hold: the screen is divided into `(h, v)`-pixel blocks and every
+    // pixel in a block shows the colour of the block's top-left one. Vertical is a held source
+    // *line*: quantizing `line` to the block boundary before rendering makes every screen line
+    // inside a block sample from the same source row, at no extra cost, because nothing about
+    // this renderer holds state across calls to begin with. Horizontal cannot be expressed the
+    // same way — a rendered row already commits to one colour per column by the time it reaches
+    // the shared buffer — so the row renders once at full resolution into a scratch buffer, and
+    // every real column re-samples its own block's leftmost column from it. Only text layers do
+    // this: an affine background's per-line state is accumulated externally across the whole
+    // frame rather than recomputed from `line`, so holding it across several output lines would
+    // need snapshotting that state at block boundaries, which nothing here does — affine
+    // background mosaic, and the bitmap layer's (modes 3-5 sample through the same accumulated
+    // affine state), are not implemented.
+    let (h_size, v_size) = frame.effects.bg_mosaic_size();
+    let effective_line = (line / v_size) * v_size;
     let params = BackgroundParams {
         layer: index as u8,
-        // The layer's real size, not `full_line`'s 32x32 default. A background may be 64 tiles
-        // wide, 64 tall, or both, and `render_text_background` wraps on *these* numbers — so
-        // leaving them at 32 made a larger map wrap at half its size and never reach its second
-        // screen block. Pokémon Emerald's battle menu lives in exactly that block, on a 32x64
-        // background scrolled to 320: the whole bottom of the screen came out as backdrop.
         map_width: width,
         map_height: height,
-        // Index 0 is transparent on this machine: a background is one of four layers, and the one
-        // behind — or the backdrop — shows through. Writing it made the frontmost enabled text
-        // layer opaque across the whole screen, which covered the real picture with flat bands of
-        // one palette colour. The affine and sprite paths here have always skipped it.
         transparent_index_zero: true,
         ..BackgroundParams::full_line(
-            line,
+            effective_line,
             layer.scroll_x as u32,
             layer.scroll_y as u32,
             layer.bit_depth(),
         )
     };
-    render_text_background(&map, frame.vram, &params, scanline);
+    let mut scratch = ScanlineBuffer::new(scanline.width());
+    scratch.clear();
+    render_text_background(&map, frame.vram, &params, &mut scratch);
+    for x in 0..scanline.width() {
+        let effective_x = (x as u32 / h_size) * h_size;
+        let pixel = scratch.get(effective_x as usize);
+        // A transparent source pixel must not be written at all: `set` treats a pixel with no
+        // layer bit as always committing, so writing the backdrop explicitly would paint over
+        // whatever a farther layer already drew here, rather than leaving it showing through as
+        // an untouched column would.
+        if pixel.source == PixelSource::Backdrop {
+            continue;
+        }
+        scanline.set(x, pixel);
+    }
 }
 
 /// Draw one affine background layer.
@@ -417,6 +501,13 @@ fn draw_text_layer(frame: &Frame<'_>, index: usize, line: u32, scanline: &mut Sc
 /// Affine layers are always 256-colour and have no per-tile attributes — the map is one byte per
 /// tile with no palette, flip, or priority bits, because the transform is doing the work those
 /// would have done.
+///
+/// Mosaic is not applied here even when `BGxCNT`'s bit is set. [`draw_text_layer`]'s vertical
+/// mosaic works by asking the renderer for an earlier line's state, which is free there because
+/// nothing survives between calls; this layer's `current_x`/`current_y` are instead accumulated
+/// once per real line by the system driver and never kept for any line but the latest, so holding
+/// several output lines to one source line would need snapshotting that state at every mosaic
+/// block boundary, which nothing here does.
 fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuffer) {
     let layer = frame.backgrounds.layers[index];
     let affine = &frame.affine[index - 2];
@@ -460,56 +551,231 @@ fn draw_affine_layer(frame: &Frame<'_>, index: usize, scanline: &mut ScanlineBuf
                 priority: layer.priority(),
                 layer: index as u8,
                 source: PixelSource::Background,
+                forces_blend: false,
             },
         );
     }
 }
 
-/// Draw the sprites covering this line, front-most first.
+/// Draw the bitmap that occupies background 2's slot in modes 3, 4, and 5.
 ///
-/// Only non-affine sprites for now: an affine one needs its matrix applied per pixel, which the
-/// shared compositor does not describe. They are skipped rather than drawn untransformed,
-/// because an untransformed rotated sprite looks like a deliberate picture that is simply wrong.
-fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
+/// A bitmap mode has no tile layers: the bitmap *is* background 2, sampled through the very same
+/// affine matrix and reference point as an affine tile background — [`draw_affine_layer`], which
+/// this mirrors almost line for line — and so subject to the same wraparound rule. It used to be
+/// written straight to the framebuffer and the whole scanline returned before anything else ran,
+/// which meant a rotated picture never rotated (the matrix was simply never consulted), a window
+/// over it did nothing, the blend unit never saw it, and every sprite pixel overwrote it with no
+/// priority comparison at all. Drawing it into the shared buffer instead puts it through the same
+/// `draw_order`, window mask, blend pass, and sprite-priority rule as any other layer.
+///
+/// Mode 4 is addressed exactly like an ordinary 256-colour background — one byte per pixel,
+/// looked up in palette RAM, index 0 transparent — so it reuses [`PixelSource::Background`]
+/// unchanged. Modes 3 and 5 have no palette indirection at all, a 15-bit colour directly in VRAM,
+/// which is what [`ppu_tile2d::IndexedPixel::direct_color`] exists to carry through the indexed
+/// pipeline; neither has a transparent index, so every in-bounds pixel is opaque.
+///
+/// Mosaic is not applied here for the same reason it is not applied to an affine tile
+/// background — see [`draw_affine_layer`] — this layer samples through the very same
+/// per-scanline accumulated affine state.
+fn draw_bitmap_layer(frame: &Frame<'_>, mode: u16, scanline: &mut ScanlineBuffer) {
+    let layer = frame.backgrounds.layers[2];
+    let affine = &frame.affine[0];
+    // The screen size bits of BG2CNT are not consulted here: a bitmap mode's picture size is
+    // fixed by the mode number, not by the affine background's usual size field.
+    let (width, height) = match mode {
+        5 => (bitmap::MODE5_WIDTH, bitmap::MODE5_HEIGHT),
+        _ => (SCREEN_WIDTH, SCREEN_HEIGHT),
+    };
+
+    for x in 0..SCREEN_WIDTH {
+        let (tx, ty) = affine.texture_at(x);
+
+        let (tx, ty) = if layer.affine_wraps() {
+            (tx.rem_euclid(width as i32), ty.rem_euclid(height as i32))
+        } else {
+            if tx < 0 || ty < 0 || tx >= width as i32 || ty >= height as i32 {
+                continue;
+            }
+            (tx, ty)
+        };
+
+        match mode {
+            4 => {
+                let stride = SCREEN_WIDTH as usize;
+                let offset = frame.video.bitmap_frame_offset() + ty as usize * stride + tx as usize;
+                let Some(&index) = frame.vram.get(offset) else {
+                    continue;
+                };
+                // Index zero is transparent here exactly as it is in a tile mode, so it shows
+                // whatever is behind background 2 rather than palette entry zero drawn over it.
+                if index == 0 {
+                    continue;
+                }
+                scanline.set(
+                    x as usize,
+                    ppu_tile2d::IndexedPixel {
+                        color: index,
+                        palette: 0,
+                        priority: layer.priority(),
+                        layer: 2,
+                        source: PixelSource::Background,
+                        forces_blend: false,
+                    },
+                );
+            }
+            _ => {
+                // Modes 3 and 5: a direct 15-bit colour, two bytes per pixel, no palette and no
+                // transparent index. Mode 3 has room for only one buffer, so the frame-select bit
+                // is ignored there exactly as it was in the direct-to-framebuffer path; mode 5
+                // buys double buffering by shrinking the picture instead of dropping colour
+                // depth, so it still needs it.
+                let base = if mode == 5 {
+                    frame.video.bitmap_frame_offset()
+                } else {
+                    0
+                };
+                let stride = width as usize * 2;
+                let offset = base + ty as usize * stride + tx as usize * 2;
+                let (Some(&low), Some(&high)) =
+                    (frame.vram.get(offset), frame.vram.get(offset + 1))
+                else {
+                    continue;
+                };
+                let colour = u16::from_le_bytes([low, high]);
+                scanline.set(
+                    x as usize,
+                    ppu_tile2d::IndexedPixel::direct_color(colour, layer.priority(), 2),
+                );
+            }
+        }
+    }
+}
+
+/// Whether any semi-transparent sprite covers this line.
+///
+/// Asked so the under-buffer can be built for it. Cheap enough to answer by decoding OAM again:
+/// it only runs on a line whose blend mode is not already alpha, and it stops at the first hit.
+fn has_semi_transparent_sprite(frame: &Frame<'_>, line: u32) -> bool {
+    if frame.video.dispcnt & dispcnt::OBJ == 0 {
+        return false;
+    }
+    let oam = ObjectAttributeMemory::decode(frame.oam);
+    oam.visible_on_line(line as i32)
+        .into_iter()
+        .any(|i| oam.objects[i].graphics_mode == crate::objects::GraphicsMode::SemiTransparent)
+}
+
+/// Which sprites a pass should draw.
+///
+/// The three passes differ only in this, which is why they share one routine: drawing them by
+/// three different code paths is how the affine and ordinary sprites came to disagree about
+/// priority in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpriteSelection {
+    /// Every sprite that draws: the main compositing pass.
+    Drawn,
+    /// Only sprites whose graphics mode makes them a window shape. These draw nothing; the
+    /// pixels they claim define a region.
+    ObjectWindow,
+}
+
+/// Draw the sprites covering this line into `scanline`, front-most first.
+///
+/// # One pass, both kinds of sprite
+///
+/// Ordinary and affine sprites are composited together in a single ordered pass over OAM, sharing
+/// one [`SpritePass`] and therefore one claimed-pixel mask and one priority rule. They were two
+/// passes, and the two could not see each other: the affine path wrote pixels unconditionally with
+/// no comparison against the background at all, and the ordinary path then overwrote every affine
+/// pixel because it treated only a *background* pixel as something it could lose to. So a rotating
+/// object punched through the text box in front of it, and a farther plain sprite erased a nearer
+/// rotated one — two symptoms of the same missing shared state.
+///
+/// Affine sprites are still drawn here rather than by the shared crate, which has no notion of a
+/// matrix; what moved into the shared crate is the *rule* they must obey. See [`SpritePass`].
+fn compose_sprites(
+    frame: &Frame<'_>,
+    oam: &ObjectAttributeMemory,
+    line: u32,
+    selection: SpriteSelection,
+    scanline: &mut ScanlineBuffer,
+) {
+    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
+    // Compare the sprite's priority against the background's, which is this machine's rule.
+    // `SpriteDecides` is the Game Boy's, and under it every GBA sprite won against every
+    // background — so a character walked over the text box in front of them.
+    let mut pass = SpritePass::new(SCREEN_WIDTH as usize, SpriteRule::ByPriority);
+
+    for index in sprite_order(oam, line, selection) {
+        let object = oam.objects[index];
+        if object.mode == ObjectMode::Normal {
+            if object.mosaic {
+                draw_mosaic_sprite(frame, &object, line, one_dimensional, &mut pass, scanline);
+                continue;
+            }
+            // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite
+            // decodes differently from a 16-colour one — but a scanline can hold both, so the
+            // depth rides on each sprite rather than on this call.
+            ppu_tile2d::render_sprite(
+                &object.to_sprite(one_dimensional),
+                frame.vram,
+                line,
+                &mut pass,
+                scanline,
+            );
+        } else {
+            draw_affine_sprite(
+                frame,
+                oam,
+                &object,
+                line as i32,
+                one_dimensional,
+                &mut pass,
+                scanline,
+            );
+        }
+    }
+}
+
+/// Which OAM entries a pass draws, front-most first.
+///
+/// Front-most first is what the shared claim rule expects: the first sprite to claim a pixel keeps
+/// it. [`ObjectAttributeMemory::visible_on_line`] already sorts by priority then OAM index, which
+/// is the tie-break hardware uses.
+fn sprite_order(oam: &ObjectAttributeMemory, line: u32, selection: SpriteSelection) -> Vec<usize> {
+    use crate::objects::GraphicsMode;
+    match selection {
+        SpriteSelection::Drawn => oam.visible_on_line(line as i32),
+        // `visible_on_line` deliberately excludes object-window sprites, since they do not draw,
+        // so this selection does its own scan. The same priority and index order is kept, so an
+        // object window built from overlapping shapes resolves the way a drawn sprite would.
+        SpriteSelection::ObjectWindow => {
+            let mut found: Vec<usize> = (0..crate::objects::OBJECT_COUNT)
+                .filter(|&i| {
+                    let object = oam.objects[i];
+                    object.graphics_mode == GraphicsMode::ObjectWindow
+                        && object.mode != ObjectMode::Hidden
+                        && object.covers_line(line as i32)
+                })
+                .collect();
+            found.sort_by_key(|&i| (oam.objects[i].priority, i));
+            found
+        }
+    }
+}
+
+/// Draw the sprites covering this line, if the object layer is enabled at all.
+fn draw_sprites(
+    frame: &Frame<'_>,
+    line: u32,
+    selection: SpriteSelection,
+    scanline: &mut ScanlineBuffer,
+) {
     if frame.video.dispcnt & dispcnt::OBJ == 0 {
         return;
     }
     let oam = ObjectAttributeMemory::decode(frame.oam);
-    let one_dimensional = frame.video.dispcnt & dispcnt::OBJ_1D_MAPPING != 0;
-
-    // Affine sprites are drawn here rather than handed to the shared compositor, which has no
-    // notion of a matrix. Back to front, so a nearer one overwrites a farther one — the shared
-    // path claims pixels front-first instead, and mixing the two orders would let a farther
-    // affine sprite cover a nearer ordinary one.
-    for index in oam.visible_on_line(line as i32).into_iter().rev() {
-        let object = oam.objects[index];
-        if object.mode == ObjectMode::Normal {
-            continue;
-        }
-        draw_affine_sprite(frame, &oam, &object, line as i32, one_dimensional, scanline);
-    }
-
-    let sprites: Vec<_> = oam
-        .visible_on_line(line as i32)
-        .into_iter()
-        .map(|index| oam.objects[index])
-        .filter(|object| object.mode == ObjectMode::Normal)
-        .map(|object| object.to_sprite(one_dimensional))
-        .collect();
-
-    // Sprite tile data is addressed from the object half of VRAM, and a 256-colour sprite decodes
-    // differently from a 16-colour one — but a scanline can hold both, so the depth rides on each
-    // sprite rather than on this call.
-    render_sprites(
-        &sprites,
-        frame.vram,
-        line,
-        // Compare the sprite's priority against the background's, which is this machine's rule.
-        // `SpriteDecides` is the Game Boy's, and under it every GBA sprite won against every
-        // background — so a character walked over the text box in front of them.
-        SpriteRule::ByPriority,
-        scanline,
-    );
+    compose_sprites(frame, &oam, line, selection, scanline);
 }
 
 /// Draw one rotated or scaled sprite.
@@ -518,12 +784,18 @@ fn draw_sprites(frame: &Frame<'_>, line: u32, scanline: &mut ScanlineBuffer) {
 /// matrix says which texture pixel it came from. A double-size sprite's box is twice its own
 /// size, which is what stops a rotation clipping against its own corners — the extra area is
 /// deliberately empty until the rotation moves something into it.
+///
+/// Mosaic is not applied even when the sprite's attribute bit is set. [`draw_mosaic_sprite`]
+/// quantizes the sprite's own local pixel coordinates directly, which only works because an
+/// ordinary sprite's local coordinate is a simple offset from its screen position; an affine
+/// sprite's local coordinate comes from the matrix instead, and mosaic there is not implemented.
 fn draw_affine_sprite(
     frame: &Frame<'_>,
     oam: &ObjectAttributeMemory,
     object: &Object,
     line: i32,
     one_dimensional: bool,
+    pass: &mut SpritePass,
     scanline: &mut ScanlineBuffer,
 ) {
     let matrix = &oam.matrices[object.matrix];
@@ -575,7 +847,11 @@ fn draw_affine_sprite(
             continue;
         }
 
-        scanline.set(
+        // Through the shared pass, not straight into the buffer. Writing directly is what let an
+        // affine sprite ignore the background's priority entirely and then be overwritten by any
+        // ordinary sprite regardless of which was in front.
+        pass.place(
+            scanline,
             x as usize,
             ppu_tile2d::IndexedPixel {
                 color: colour,
@@ -583,23 +859,72 @@ fn draw_affine_sprite(
                 priority: object.priority,
                 layer: 0,
                 source: PixelSource::Sprite,
+                forces_blend: object.graphics_mode == crate::objects::GraphicsMode::SemiTransparent,
             },
+            // The GBA compares priorities rather than consulting a "behind background" bit.
+            false,
         );
     }
 }
 
-/// Write the sprite pixels of a resolved buffer over an already-drawn row.
+/// Draw one ordinary (non-affine) sprite with mosaic applied.
 ///
-/// Used by the bitmap path, where the background is already RGBA in the row and only the sprite
-/// pixels need resolving.
-fn overlay_sprites(scanline: &ScanlineBuffer, palette: &GbaPalette<'_>, row: &mut [u8]) {
-    for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
-        let indexed = scanline.get(x);
-        if indexed.source != PixelSource::Sprite {
+/// Mosaic quantizes the sprite's own *local* pixel coordinates, not the screen ones it happens to
+/// land on: a sprite's blockiness has to look the same wherever it is positioned, or moving it one
+/// pixel would shift which of its own pixels share a block and the pattern would visibly swim.
+/// Sprite-local coordinates start at the sprite's own top-left corner, not the screen's.
+///
+/// Vertical is a held source *row*: [`ppu_tile2d::render_sprite`] samples strictly from
+/// `line - sprite.y`, so asking it for a quantized line produces the same row for every screen
+/// line inside a block, at no extra cost. Horizontal cannot be expressed the same way — a rendered
+/// row already commits to one colour per column by the time it reaches the shared buffer — so the
+/// sprite renders once at full resolution into a scratch buffer, and every real column re-samples
+/// its own block's leftmost column from it, the same trick [`draw_text_layer`] uses.
+///
+/// Affine (rotated or scaled) sprites are not covered: their local coordinate comes from the
+/// matrix rather than directly from the screen position, and mosaic there is not implemented.
+fn draw_mosaic_sprite(
+    frame: &Frame<'_>,
+    object: &Object,
+    line: u32,
+    one_dimensional: bool,
+    pass: &mut SpritePass,
+    scanline: &mut ScanlineBuffer,
+) {
+    let row = line as i32 - object.y;
+    if row < 0 || row >= object.height as i32 {
+        return;
+    }
+    let (h_size, v_size) = frame.effects.obj_mosaic_size();
+    let effective_row = (row / v_size as i32) * v_size as i32;
+    let effective_line = (object.y + effective_row) as u32;
+
+    let mut scratch = ScanlineBuffer::new(scanline.width());
+    scratch.clear();
+    let mut scratch_pass = SpritePass::new(scanline.width(), SpriteRule::ByPriority);
+    ppu_tile2d::render_sprite(
+        &object.to_sprite(one_dimensional),
+        frame.vram,
+        effective_line,
+        &mut scratch_pass,
+        &mut scratch,
+    );
+
+    for local_x in 0..object.width as i32 {
+        let x = object.x + local_x;
+        if x < 0 || x as usize >= scanline.width() {
             continue;
         }
-        let colour = palette.lookup_sprite(indexed.palette, indexed.color);
-        pixel.copy_from_slice(&[colour.r, colour.g, colour.b, colour.a]);
+        let effective_local_x = (local_x / h_size as i32) * h_size as i32;
+        let effective_x = object.x + effective_local_x;
+        if effective_x < 0 || effective_x as usize >= scanline.width() {
+            continue;
+        }
+        let pixel = scratch.get(effective_x as usize);
+        if pixel.source != PixelSource::Sprite {
+            continue;
+        }
+        pass.place(scanline, x as usize, pixel, false);
     }
 }
 

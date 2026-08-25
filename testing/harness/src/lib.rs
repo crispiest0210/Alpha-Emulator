@@ -32,7 +32,7 @@
 
 pub mod corpus;
 
-use core_common::{Framebuffer, InputState, RegisterValue, System};
+use core_common::{AudioSample, Framebuffer, InputState, RegisterValue, System};
 
 /// A system the harness can inspect beyond what [`System`] exposes.
 ///
@@ -318,6 +318,25 @@ pub fn framebuffer_hash(framebuffer: &Framebuffer) -> String {
     format!("{hash:016x}")
 }
 
+/// The same digest, over an audio buffer's raw sample bits rather than a framebuffer's pixels.
+///
+/// FNV-1a for the same reason as [`framebuffer_hash`]: this identifies a specific stream of
+/// samples so a later change is caught, not a cryptographic property. Left and right are hashed
+/// separately per sample rather than as a merged value, so a regression that swapped the two
+/// channels — a real, easy mistake in a panning path — still changes the digest.
+pub fn audio_hash(samples: &[AudioSample]) -> String {
+    let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
+    for sample in samples {
+        for value in [sample.left, sample.right] {
+            for byte in value.to_le_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+    }
+    format!("{hash:016x}")
+}
+
 // ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
@@ -490,6 +509,9 @@ impl SuiteReport {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod audio_golden;
+
 // ---------------------------------------------------------------------------
 // System adapters
 // ---------------------------------------------------------------------------
@@ -561,12 +583,32 @@ impl TestableSystem for system_gbc::GbcSystem {
     }
 }
 
+/// Where a `gba-suite` ROM's execution begins. A settle here, rather than somewhere inside the
+/// suite's own code, is the signature `run_gba_suite`'s regression check is built around.
+const GBA_CARTRIDGE_ENTRY: u64 = 0x0800_0000;
+
 /// Run a `gba-suite` ROM.
 ///
 /// Its convention is to leave the number of the failing sub-test in `r12` and spin, or zero if
 /// every one passed. There is no serial port and nothing written to memory, so "has it
 /// finished" is answered by the CPU no longer making progress — the program counter settling
 /// into the same place frame after frame.
+///
+/// # A settled `PC` and `r12 == 0` is not proof anything ran
+///
+/// `r12` stays at its power-on value of zero for the *entire* run of a genuine pass — checked by
+/// instrumenting all four ROMs currently in the corpus — so "was it ever non-zero" cannot tell a
+/// finished suite apart from one that never started. A machine wedged in a BIOS trap from its
+/// first instruction has exactly the same signature: settled `PC`, `r12 == 0`. What every real
+/// suite has and a trap does not is *movement*: each of the four settles somewhere inside its own
+/// code — `0x08001ec4`, `0x08000aac`, `0x080004c8`, `0x080003c0` — never back at
+/// `GBA_CARTRIDGE_ENTRY` itself, because no working test dispatcher spins at the address it
+/// booted from. A settle exactly there means the CPU is stuck before running anything, and is
+/// reported as a failure regardless of `r12`. This is a narrower guarantee than "the suite
+/// genuinely finished" — it catches the specific, easily-constructed shape of false pass this
+/// exists for, not every conceivable one — and is the reason `run_gba_suite_reports_failure_for_a_
+/// machine_that_never_left_its_entry_point` exists: proven against a real false positive, not
+/// reasoned about.
 pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32) -> TestOutcome {
     let register = |system: &S, name: &str| -> u64 {
         system
@@ -592,6 +634,15 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
         }
         if settled < 3 {
             continue;
+        }
+
+        if pc == GBA_CARTRIDGE_ENTRY {
+            return TestOutcome::Failed {
+                report: "settled at the cartridge entry point without ever leaving it — the CPU \
+                         is stuck before any test logic ran, not finished with it"
+                    .into(),
+                frames: frame,
+            };
         }
 
         let failed = register(system, "R12");

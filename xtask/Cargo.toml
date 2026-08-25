@@ -12,3 +12,6 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# Only for `corpus::all_roms()`'s static ROM list, so the fetcher and the accuracy suite read one
+# source of truth rather than a hand-copied second list that can drift from it.
+harness.workspace = true

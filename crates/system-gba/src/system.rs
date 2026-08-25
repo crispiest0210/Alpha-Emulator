@@ -26,6 +26,27 @@
 //! wrong does not fail a test: the emulator still produces frames at 100% speed, because a frame is
 //! a fixed number of cycles however few instructions fit inside it. What a game loses is processor
 //! time, and what that looks like is a title screen that never arrives.
+//!
+//! # There is no event scheduler here, and that is a decision rather than an omission
+//!
+//! `core_common::Scheduler` exists and `system-gb` uses it. This machine does not: the ARM core
+//! reports an instruction's cost by *returning* it, so an instruction runs to completion and
+//! [`GbaSystemBus::advance`] is called afterwards with the total. Nothing can therefore be
+//! scheduled *inside* an instruction, and everything that wants to happen mid-instruction has to
+//! be driven by hand from wherever the cycles are known.
+//!
+//! `GbaSystemBus::run_transfer` is that, done deliberately: DMA spends its cycles by calling
+//! `run_clocks` between units, so the display and the timers advance through a transfer instead of
+//! jumping over it. It is the shape a scheduler would give for free, written out once for the one
+//! caller that needed it.
+//!
+//! **Moving this machine onto the scheduler remains open**, and it is the right long-term
+//! direction — it would put DMA, the video edges, and the timers on one ordered queue rather than
+//! on a hand-written recursion whose ordering is a property of the call graph. It was deferred
+//! here because it is not a change to DMA: it means the CPU core reporting cycles as it spends
+//! them rather than at the end, which is a `cpu-arm7tdmi` change that `system-nds` also depends
+//! on. Doing it as part of giving DMA a duration would have made a bounded correctness fix into a
+//! rewrite of how the machine is clocked.
 
 use cart_common::GbaHeader;
 use core_common::{
@@ -43,13 +64,20 @@ use crate::effects::Effects;
 use crate::fifo::DirectSound;
 use crate::irq::{self, InterruptController};
 use crate::keypad::Keypad;
-use crate::memory::{GbaBus, Region};
+use crate::memory::{GbaBus, Region, BIOS_SIZE};
+use crate::psg::Psg;
 use crate::video::{VideoTiming, SCREEN_HEIGHT, SCREEN_WIDTH};
 use crate::waitstates::{Access, WaitControl};
 use crate::{background::Backgrounds, timers::Timers};
 
 /// Bumped on any change to what this system serializes.
-const STATE_VERSION: u32 = 1;
+///
+/// 2 added the in-progress `IntrWait` mask, which a state taken mid-wait needs to resume without
+/// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`. 4 added
+/// the PSG: three channels, its register block, and the divider and frame sequencer that clock
+/// them. 5 added the PSG's fourth channel, the wave channel and its two banks. 6 added raw
+/// `SOUNDBIAS` storage.
+const STATE_VERSION: u32 = 6;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;
@@ -57,11 +85,29 @@ pub const FRAME_CYCLES: u64 = 280_896;
 pub const CLOCK_HZ: u64 = 16_777_216;
 
 /// Where a cartridge's code begins.
-const CARTRIDGE_ENTRY: u32 = 0x0800_0000;
+///
+/// `pub(crate)`: `bios::soft_reset` jumps here too, since a `SoftReset` is documented as
+/// re-entering the machine exactly where a cold boot without a BIOS does.
+pub(crate) const CARTRIDGE_ENTRY: u32 = 0x0800_0000;
 /// Stacks the BIOS sets up before handing control to the game.
-const SP_SYSTEM: u32 = 0x0300_7F00;
-const SP_IRQ: u32 = 0x0300_7FA0;
-const SP_SUPERVISOR: u32 = 0x0300_7FE0;
+///
+/// `pub(crate)` for the same reason as [`CARTRIDGE_ENTRY`]: `SoftReset` sets up the identical
+/// three stacks, because a reset is documented as leaving the machine in the same state a cold
+/// boot does.
+pub(crate) const SP_SYSTEM: u32 = 0x0300_7F00;
+pub(crate) const SP_IRQ: u32 = 0x0300_7FA0;
+pub(crate) const SP_SUPERVISOR: u32 = 0x0300_7FE0;
+
+/// The four moments GBATEK documents a real BIOS's own last-fetched opcode for, and the constant
+/// value each one leaves — "the opcode at `[00DCh+8]` after startup and `SoftReset`, the opcode at
+/// `[0134h+8]` during IRQ execution, and opcode at `[013Ch+8]` after IRQ execution, and opcode at
+/// `[0188h+8]` after SWI execution." A no-BIOS machine never executes the real instructions that
+/// produce these, so the four HLE paths that stand in for those moments stamp the constant
+/// directly instead. See `memory::GbaBus::bios_open_bus`.
+const BIOS_OPCODE_AFTER_STARTUP: u32 = 0xE129_F000;
+const BIOS_OPCODE_AFTER_SWI: u32 = 0xE3A0_2004;
+const BIOS_OPCODE_DURING_IRQ: u32 = 0xE25E_F004;
+const BIOS_OPCODE_AFTER_IRQ: u32 = 0xE55E_C002;
 
 /// Everything the CPU can reach.
 pub struct GbaSystemBus {
@@ -80,6 +126,10 @@ pub struct GbaSystemBus {
     /// save states: it is a debugging aid, not machine state.
     pub watch: AccessLog,
     pub sound: DirectSound,
+    /// The other half of the sound unit: the four Game Boy channels behind the register block at
+    /// `0x0400_0060`. Separate from [`Self::sound`] because they share nothing but a master
+    /// enable and the final mix.
+    pub psg: Psg,
     pub waits: WaitControl,
 
     framebuffer: Framebuffer,
@@ -98,6 +148,18 @@ pub struct GbaSystemBus {
     pending_waits: u32,
     /// The address after the last access, for deciding whether the next one is sequential.
     next_sequential: u32,
+    /// Cycles DMA has stalled the CPU for, not yet reported to the caller.
+    dma_cycles: u32,
+    /// Whether a transfer is running, so nothing re-enters `run_pending_dma` inside one.
+    in_dma: bool,
+    /// Whether the next bus access is the CPU fetching its next instruction.
+    ///
+    /// Set just before [`Cpu::step`](core_common::Cpu) is called and consumed by the first
+    /// [`Self::charge`] that follows — an ARM or Thumb instruction is always exactly one fetch
+    /// before whatever data accesses it goes on to make, so "the first access this step" and "the
+    /// fetch" are the same thing. [`WaitControl::cost`] needs to tell fetches from data accesses
+    /// apart to answer whether the ROM prefetch buffer applies.
+    awaiting_fetch: bool,
 }
 
 impl GbaSystemBus {
@@ -115,6 +177,7 @@ impl GbaSystemBus {
             keypad: Keypad::new(),
             watch: AccessLog::new(),
             sound: DirectSound::new(),
+            psg: Psg::new(),
             waits: WaitControl::new(),
             framebuffer: Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT),
             samples: Vec::with_capacity(1024),
@@ -123,6 +186,9 @@ impl GbaSystemBus {
             frame_ready: false,
             pending_waits: 0,
             next_sequential: 0,
+            dma_cycles: 0,
+            in_dma: false,
+            awaiting_fetch: true,
         }
     }
 
@@ -157,7 +223,11 @@ impl GbaSystemBus {
         } else {
             Access::NonSequential
         };
-        self.pending_waits += self.waits.cost(addr, width, access).saturating_sub(1);
+        let is_fetch = std::mem::take(&mut self.awaiting_fetch);
+        self.pending_waits += self
+            .waits
+            .cost(addr, width, access, is_fetch)
+            .saturating_sub(1);
         self.next_sequential = addr.wrapping_add(width);
     }
 
@@ -175,51 +245,113 @@ impl GbaSystemBus {
     }
 
     /// Advance every clocked subsystem and act on what they report.
+    ///
+    /// A transfer started along the way spends cycles of its own on top of `cycles`; those are
+    /// reported separately through [`Self::take_dma_cycles`], because the CPU was stalled for them
+    /// and its own instruction cost cannot absorb them.
     pub fn advance(&mut self, cycles: u32) {
-        let overflowed = self.timers.tick(cycles);
-        if overflowed != 0 {
-            let asked = self.timers.interrupts(overflowed);
-            for channel in 0..4 {
-                if asked & (1 << channel) != 0 {
-                    self.irq.raise(irq::source::timer(channel));
+        self.run_clocks(cycles);
+    }
+
+    /// Cycles DMA has stalled the CPU for since the last call.
+    ///
+    /// Taken rather than read, and separate from the argument to [`Self::advance`], because a
+    /// transfer can begin in either of two places: inside `advance`, from an HBlank or a FIFO
+    /// request, or inside the CPU's own instruction, from the store that set an enable bit. Both
+    /// are time the machine spent with the CPU held off the bus.
+    pub fn take_dma_cycles(&mut self) -> u32 {
+        std::mem::take(&mut self.dma_cycles)
+    }
+
+    /// Advance timers and video by `cycles`, acting on every edge they report.
+    ///
+    /// Called re-entrantly by design: [`Self::run_transfer`] drives this once per unit it moves,
+    /// so a DMA burst worth several scanlines advances the display *through* the copy instead of
+    /// after it. `run_pending_dma`'s guard bounds the recursion at one level.
+    ///
+    /// `video.tick` never advances past the next line boundary, so a step spanning several lines
+    /// — a long CPU instruction or a DMA burst routinely covers more than one — is fed back in a
+    /// loop here rather than asked to report every edge from one call. That used to be a single
+    /// `VideoEvents` covering the whole span, which has no way to hold more than one scanline: a
+    /// three-line step rendered only the last of them, advanced the affine layers once instead of
+    /// three times, and armed HBlank DMA once instead of three times. Looping the small,
+    /// fixed-size event instead costs nothing extra on the overwhelmingly common case of a step
+    /// that does not cross a line at all — one call, one no-op check — and is exact on the rare
+    /// one that does.
+    fn run_clocks(&mut self, cycles: u32) {
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let (events, consumed) = self.video.tick(remaining);
+            remaining -= consumed;
+            // Ticked by the same chunk the display just took rather than by the whole span up
+            // front: a timer overflow three scanlines into a burst has to raise its interrupt
+            // three scanlines in, not before the first line was drawn.
+            self.tick_timers(consumed);
+            self.irq.raise(self.video.interrupt_sources(&events));
+
+            if events.frame_started {
+                // The reference point is reloaded from the registers at the top of a frame and
+                // accumulates from there; see the affine module for why that matters.
+                for layer in &mut self.affine {
+                    layer.begin_frame();
                 }
             }
-            // A timer overflow is what advances a direct-sound channel, and draining one may
-            // leave it needing a refill — which is a DMA request, not an audio event.
-            self.sound.on_timer_overflow(overflowed);
-            let requests: Vec<u32> = self.sound.refill_requests().collect();
-            for address in requests {
-                self.dma.on_fifo_empty(address);
+            if let Some(line) = events.scanline_ready {
+                self.render_line(line as u32);
+                // Advance *after* drawing: the line just drawn used the position it started with.
+                for layer in &mut self.affine {
+                    layer.advance_line();
+                }
             }
-        }
-
-        let events = self.video.tick(cycles);
-        self.irq.raise(self.video.interrupt_sources(&events));
-
-        if events.frame_started {
-            // The reference point is reloaded from the registers at the top of a frame and
-            // accumulates from there; see the affine module for why that matters.
-            for layer in &mut self.affine {
-                layer.begin_frame();
+            // Hardware does not run HBlank DMA during vertical blanking, only the interrupt fires
+            // there — and `entered_hblank` alone cannot tell the two apart, since it is set on
+            // all 228 lines. `scanline_ready` already carries the distinction: it is `Some`
+            // precisely when this hblank belongs to one of the 160 visible lines, computed by
+            // `video.tick` at the exact instant hblank was entered. Reusing it here is more
+            // robust than re-testing `vcount` after the fact, which by this point may already
+            // have been advanced onto the next line by `advance_line`.
+            if events.entered_hblank && events.scanline_ready.is_some() {
+                self.dma.on_hblank();
             }
-        }
-        if let Some(line) = events.scanline_ready {
-            self.render_line(line as u32);
-            // Advance *after* drawing: the line just drawn used the position it started with.
-            for layer in &mut self.affine {
-                layer.advance_line();
+            if events.entered_vblank {
+                self.dma.on_vblank();
+                self.frame_ready = true;
             }
-        }
-        if events.entered_hblank {
-            self.dma.on_hblank();
-        }
-        if events.entered_vblank {
-            self.dma.on_vblank();
-            self.frame_ready = true;
-        }
 
-        self.run_pending_dma();
+            // Run before the next line, not after the whole step: a scroll register an HBlank
+            // transfer just updated has to be in place before the line after it renders, and
+            // deferring every line's DMA to the end of a multi-line step would render all but the
+            // first from registers none of them had actually seen updated yet.
+            self.run_pending_dma();
+        }
+        // The PSG advances by the whole span at once rather than per line: nothing it does raises
+        // an interrupt or moves another subsystem, so the only thing that can observe where inside
+        // the span a duty step landed is the sample generator on the next line.
+        self.psg.tick(cycles);
         self.generate_samples(cycles as u64);
+    }
+
+    /// Advance the four timers and act on whatever overflowed.
+    fn tick_timers(&mut self, cycles: u32) {
+        let overflowed = self.timers.tick(cycles);
+        if !overflowed.any() {
+            return;
+        }
+        let asked = self.timers.interrupts(&overflowed);
+        for channel in 0..4 {
+            if asked & (1 << channel) != 0 {
+                self.irq.raise(irq::source::timer(channel));
+            }
+        }
+        // A timer overflow is what advances a direct-sound channel, and draining one may
+        // leave it needing a refill — which is a DMA request, not an audio event. Iterated
+        // directly rather than collected first: `refill_requests` borrows only `self.sound`,
+        // a different field from the `self.dma` the loop body needs mutably, so the borrow
+        // checker accepts the two side by side without a `Vec` to hold the gap open.
+        self.sound.on_timer_overflow(&overflowed);
+        for address in self.sound.refill_requests() {
+            self.dma.on_fifo_empty(address);
+        }
     }
 
     fn render_line(&mut self, line: u32) {
@@ -241,37 +373,125 @@ impl GbaSystemBus {
     }
 
     /// Perform every transfer that is ready, highest priority first.
+    ///
+    /// # Why this cannot re-enter itself
+    ///
+    /// Three separate paths lead here, and two of them can fire while a transfer is already
+    /// running: the write hook that starts an immediate transfer the instant an enable bit is set
+    /// — which a transfer whose destination lands in the DMA register block triggers on itself —
+    /// and [`Self::run_clocks`], which this now calls once per unit moved and which ends every
+    /// iteration by asking for pending DMA. Both used to recurse. The guard turns that into what
+    /// hardware does instead: the running transfer finishes, and the loop below picks up whatever
+    /// became ready in the meantime, still in channel-priority order because
+    /// [`DmaController::take_transfer`] rescans from channel 0 every call.
+    ///
+    /// What that does *not* model is preemption. A higher-priority channel arming mid-copy waits
+    /// for the block to finish rather than interrupting it; see the [`crate::dma`] module docs.
     fn run_pending_dma(&mut self) {
         // Asked after every instruction, and the answer is almost always no.
-        if !self.dma.any_armed() {
+        if !self.dma.any_armed() || self.in_dma {
             return;
         }
+        self.in_dma = true;
+
+        // A transfer's accesses are charged to the transfer, not to whatever the CPU does next.
+        // Every `read32`/`write32` below goes through `charge`, which accumulates wait states into
+        // `pending_waits` and moves `next_sequential`; leaving either alone handed the instruction
+        // *after* a copy the whole burst's wait states, and a spurious non-sequential fetch on top
+        // — the CPU's own access stream is continuous across a bus cycle it never made. The cost
+        // of the handover is charged where it belongs, in the transfer's startup latency.
+        let waits = self.pending_waits;
+        let sequential = self.next_sequential;
+
+        let mut spent = 0u32;
         while let Some(transfer) = self.dma.take_transfer() {
-            let mut source = transfer.source;
-            let mut destination = transfer.destination;
-            for _ in 0..transfer.words {
-                if transfer.unit == 4 {
-                    let value = self.read32(source);
-                    self.write32(destination, value);
-                } else {
-                    let value = self.read16(source);
-                    self.write16(destination, value);
-                }
-                source = step(source, transfer.source_step, transfer.unit);
-                destination = step(destination, transfer.destination_step, transfer.unit);
-            }
-            if transfer.raise_irq {
-                self.irq.raise(irq::source::dma(transfer.channel));
+            spent += self.run_transfer(&transfer);
+            // A repeating HBlank channel whose block is longer than a scanline re-arms itself
+            // faster than it drains, which on hardware is a machine that never gives the bus back.
+            // Bounded here so the emulator makes progress and can be traced instead of hanging:
+            // the channel stays armed and runs again at the next call.
+            if spent >= FRAME_CYCLES as u32 {
+                break;
             }
         }
+        self.dma_cycles += spent;
+
+        self.pending_waits = waits;
+        self.next_sequential = sequential;
+        self.in_dma = false;
     }
 
+    /// Move one block, advancing the machine through it. Returns the cycles it took.
+    ///
+    /// The clock runs between units rather than after the whole block, which is the entire point:
+    /// a 240-word copy is most of a scanline, and a display that stood still through it would put
+    /// every HBlank the copy spans at the wrong cycle — and with it every HDMA the game hangs off
+    /// one. Time is spent *after* each unit moves, so a scanline rendered inside the copy sees the
+    /// bytes that had actually arrived by then.
+    fn run_transfer(&mut self, transfer: &crate::dma::Transfer) -> u32 {
+        let mut source = transfer.source;
+        let mut destination = transfer.destination;
+
+        let startup = crate::dma::startup_cycles(source, destination);
+        self.run_clocks(startup);
+        let mut spent = startup;
+
+        // The first unit reads and writes non-sequentially; every unit after it walks on from
+        // where the last one left off, on both streams independently.
+        let mut access = Access::NonSequential;
+        for _ in 0..transfer.words {
+            let cost = crate::dma::unit_cycles(
+                &mut self.waits,
+                source,
+                destination,
+                transfer.unit,
+                access,
+            );
+            if transfer.unit == 4 {
+                let value = self.read32(source);
+                self.write32(destination, value);
+            } else {
+                let value = self.read16(source);
+                self.write16(destination, value);
+            }
+            self.run_clocks(cost);
+            spent += cost;
+            source = step(source, transfer.source_step, transfer.unit);
+            destination = step(destination, transfer.destination_step, transfer.unit);
+            access = Access::Sequential;
+        }
+
+        if transfer.raise_irq {
+            self.irq.raise(irq::source::dma(transfer.channel));
+        }
+        spent
+    }
+
+    /// Mix both halves of the sound unit into output samples.
+    ///
+    /// # Two volume controls in series, not one
+    ///
+    /// The PSG has already been scaled by its own master volume, `SOUNDCNT_L`'s three bits a side.
+    /// `SOUNDCNT_H` bits 0-1 then attenuate the whole PSG mix again — to a quarter, a half, or not
+    /// at all — before it meets direct sound. The two cascade on hardware, so they multiply here;
+    /// treating either as the volume would make a game that sets one to a quarter and the other to
+    /// full play at the wrong level in one direction or the other.
+    ///
+    /// The fourth `SOUNDCNT_H` setting is prohibited and [`crate::fifo::DirectSoundControl::psg_volume`]
+    /// reports it as silence, which is why the numerator is over four rather than a shift.
     fn generate_samples(&mut self, cycles: u64) {
         self.sample_accumulator += cycles * core_common::AUDIO_SAMPLE_RATE as u64;
         while self.sample_accumulator >= CLOCK_HZ {
             self.sample_accumulator -= CLOCK_HZ;
-            let (left, right) = self.sound.output();
-            self.samples.push(AudioSample { left, right });
+            let (direct_left, direct_right) = self.sound.output();
+            let (psg_left, psg_right) = self.psg.output();
+            let psg_scale = self.sound.control.psg_volume() as f32 / 4.0;
+            // Clamped only at the end: the two halves can each be at full scale, and a game
+            // mixing loud direct sound under loud PSG music really does saturate the DAC.
+            self.samples.push(AudioSample {
+                left: (direct_left + psg_left * psg_scale).clamp(-1.0, 1.0),
+                right: (direct_right + psg_right * psg_scale).clamp(-1.0, 1.0),
+            });
         }
     }
 
@@ -307,6 +527,9 @@ impl GbaSystemBus {
         if let Some(value) = self.sound.read16(addr) {
             return Some(value);
         }
+        if let Some(value) = self.psg.read16(addr) {
+            return Some(value);
+        }
         if WaitControl::owns(addr) {
             return Some(self.waits.read16());
         }
@@ -318,6 +541,14 @@ impl GbaSystemBus {
     }
 
     fn write_io16(&mut self, addr: u32, value: u16) {
+        // Taken out of the chain below because the answer has to be attributed: `SOUNDCNT_X`'s
+        // bit 7 is one master enable over the whole sound unit, and the register belongs to the
+        // direct-sound block. The PSG is told what it now reads rather than being given a second
+        // claim on the same address, which would make the order of these two calls load-bearing.
+        if self.sound.write16(addr, value).is_some() {
+            self.psg.set_power(self.sound.control.sound_enabled());
+            return;
+        }
         if self.video.write16(addr, value).is_some()
             || self.backgrounds.write16(addr, value).is_some()
             || self.timers.write16(addr, value).is_some()
@@ -325,7 +556,7 @@ impl GbaSystemBus {
             || self.effects.write16(addr, value).is_some()
             || self.irq.write16(addr, value).is_some()
             || self.keypad.write16(addr, value).is_some()
-            || self.sound.write16(addr, value).is_some()
+            || self.psg.write16(addr, value).is_some()
         {
             return;
         }
@@ -571,6 +802,18 @@ pub struct GbaSystem {
     cpu: Arm7Tdmi,
     bus: GbaSystemBus,
     save_ram_dirty: bool,
+    /// The mask of a BIOS `IntrWait` that has begun and not yet been satisfied.
+    ///
+    /// Machine state, not a cache: it is what tells a re-executed `SWI` that its discard has
+    /// already happened. A save state taken while a game sits in `VBlankIntrWait` — which is where
+    /// a game spends most of its time, so most quicksaves land here — restores into the wait
+    /// rather than into a call that would discard the flags a second time.
+    intr_wait: Option<u16>,
+    /// Forces the one-cycle-at-a-time halt path even when [`GbaSystem::halt_fast_forward_cycles`]
+    /// could predict the wake, so a test can run the same machine both ways and compare the
+    /// result instead of only trusting the fast path's own arithmetic.
+    #[cfg(test)]
+    disable_halt_fast_forward: bool,
 }
 
 impl GbaSystem {
@@ -581,8 +824,20 @@ impl GbaSystem {
             cpu: Arm7Tdmi::new(boot_state(has_bios)),
             bus: GbaSystemBus::new(cartridge, bios),
             save_ram_dirty: false,
+            intr_wait: None,
+            #[cfg(test)]
+            disable_halt_fast_forward: false,
         };
-        system.bus.memory.set_in_bios(has_bios);
+        // Computed rather than passed `has_bios` directly: the boot program counter is 0 (inside
+        // the BIOS) exactly when a BIOS was supplied and the cartridge entry (outside it)
+        // otherwise, so this agrees with `has_bios` here and stays correct once execution moves.
+        system.update_in_bios();
+        if !has_bios {
+            system
+                .bus
+                .memory
+                .set_bios_open_bus(BIOS_OPCODE_AFTER_STARTUP);
+        }
         system.apply_startup_state();
         Ok(system)
     }
@@ -611,6 +866,47 @@ impl GbaSystem {
         &mut self.cpu
     }
 
+    /// Approximate the bus's floating value from the instruction about to run.
+    ///
+    /// There is no such thing as an unmapped read on real hardware: it returns whatever was last
+    /// driven on the bus, and that is almost always the instruction fetch, because nothing else
+    /// contends for the bus as often. Modelled here rather than by instrumenting every access,
+    /// because the fetch this approximates is a property of *where the CPU is*, not of any one
+    /// read — an unmapped data read and the fetch that preceded it see the same value on real
+    /// hardware precisely because the fetch was the last thing to touch the bus.
+    ///
+    /// Peeked rather than read for the same reason [`Self::intercept_bios_call`] peeks: this is
+    /// answering a question about the word the CPU is about to fetch itself, and reading it a
+    /// second time through the bus would charge, latch, and log an access that never happened.
+    fn update_open_bus(&mut self) {
+        let pc = self.cpu.regs.pc();
+        if self.cpu.is_thumb() {
+            // A halfword bus duplicated into both halves of the word open-bus reads are
+            // reconstructed from, matching the width the fetch actually was.
+            if let Some(half) = self.bus.peek16(pc & !1) {
+                self.bus
+                    .memory
+                    .set_open_bus((half as u32) | ((half as u32) << 16));
+            }
+        } else if let Some(word) = self.bus.peek32(pc & !3) {
+            self.bus.memory.set_open_bus(word);
+        }
+    }
+
+    /// Gate BIOS reads on whether code is currently executing inside it.
+    ///
+    /// The BIOS is readable only by code running inside it — a real cartridge probing it from
+    /// outside gets open bus, which is exactly how some anti-piracy checks detect an emulator
+    /// that maps the region unconditionally. Latching this once at construction only got it right
+    /// for the very first instruction: a game that calls into the BIOS and returns crosses this
+    /// boundary constantly, and a flag fixed at boot answers every later read as if the machine
+    /// had never left its starting side of it. Recomputed every step from the program counter
+    /// instead, so the two stay in step with wherever the CPU actually is.
+    fn update_in_bios(&mut self) {
+        let in_bios = self.cpu.regs.pc() < BIOS_SIZE as u32;
+        self.bus.memory.set_in_bios(in_bios);
+    }
+
     /// Answer a `SWI` in place of the BIOS, when there is no BIOS to answer it.
     ///
     /// Intercepted *before* the instruction executes rather than by trapping the exception
@@ -630,6 +926,13 @@ impl GbaSystem {
     /// tenths of its processor.
     fn intercept_bios_call(&mut self) -> bool {
         if self.bus.memory.has_bios() {
+            return false;
+        }
+        // A halted core runs nothing, and this runs *before* the core, so without this a `SWI`
+        // sitting immediately after a `Halt` would be answered while the machine was supposed to be
+        // asleep. The exception is a wait in progress: re-running its `SWI` is precisely how the
+        // wait is spread across steps, and it is the only call allowed to execute while halted.
+        if self.cpu.is_halted() && self.intr_wait.is_none() {
             return false;
         }
         let pc = self.cpu.regs.pc();
@@ -665,13 +968,35 @@ impl GbaSystem {
             (((opcode >> 16) & 0xFF) as u8, 4)
         };
 
-        let effect = bios::dispatch(&mut self.cpu, &mut self.bus, comment);
-        if effect.halt {
-            self.cpu.halt();
+        match bios::dispatch(&mut self.cpu, &mut self.bus, &mut self.intr_wait, comment) {
+            // Step over the instruction the BIOS would have returned from — two bytes in Thumb,
+            // four in ARM.
+            //
+            // Waking the core here is what finishes an `IntrWait`: the only way to be executing a
+            // `SWI` while halted is a `Retry` below whose wait has just been satisfied.
+            bios::BiosEffect::Return => {
+                self.cpu.set_halted(false);
+                self.cpu.regs.set_pc(pc.wrapping_add(width));
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_SWI);
+            }
+            bios::BiosEffect::Halt => {
+                self.cpu.halt();
+                self.cpu.regs.set_pc(pc.wrapping_add(width));
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_SWI);
+            }
+            // Leave the program counter *on* the `SWI` so it runs again next step. That is how a
+            // wait hardware spends inside a BIOS loop is spread across steps here — see
+            // `bios::intr_wait`, which argues the choice and the alternative.
+            bios::BiosEffect::Retry => self.cpu.halt(),
+            // `SoftReset` already set the program counter to its own entry point and is
+            // documented as never returning to the caller, so there is nothing to step over —
+            // and what it leaves on the bus is the startup trace, not the generic post-SWI one,
+            // because GBATEK documents both as the same value.
+            bios::BiosEffect::Jump => {
+                self.cpu.set_halted(false);
+                self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_STARTUP);
+            }
         }
-        // Step over the instruction the BIOS would have returned from — two bytes in Thumb, four
-        // in ARM.
-        self.cpu.regs.set_pc(pc.wrapping_add(width));
         true
     }
 
@@ -704,6 +1029,18 @@ impl GbaSystem {
         if handler == 0 {
             return;
         }
+
+        // Record what is being serviced where `IntrWait` will look for it. `IF` cannot serve that
+        // purpose: the game's handler clears it as it works, long before the wait is re-tested.
+        //
+        // On hardware this word is written by the *game's* handler — the BIOS only supplies the
+        // convention, and every mainstream library's `IntrMain` maintains it. It is written here as
+        // well because the two are idempotent (both set the same bits) and a game whose handler
+        // does not keep the word would otherwise wait forever. Erring towards a wait that completes
+        // costs a game one early return; erring the other way is a hang.
+        let serviced = self.bus.irq.active();
+        let already = self.bus.read16(bios::INTRWAIT_FLAGS);
+        self.bus.write16(bios::INTRWAIT_FLAGS, already | serviced);
 
         // Enter the exception properly — banked registers, mode, and mask all change.
         let lr = self.cpu.regs.pc().wrapping_add(4);
@@ -740,6 +1077,73 @@ impl GbaSystem {
         self.cpu.regs.write(Mode::Irq, 14, HLE_IRQ_RETURN);
         self.cpu.regs.set_pc(handler);
         self.cpu.set_irq_line(false);
+        self.bus.memory.set_bios_open_bus(BIOS_OPCODE_DURING_IRQ);
+    }
+
+    /// How many cycles a halted CPU could fast-forward through in one step, or `None` if that
+    /// cannot be predicted and the ordinary one-cycle-at-a-time path has to run instead.
+    ///
+    /// Two things both have to hold. First, some enabled source needs a *computable* schedule:
+    /// the video edges (HBlank, VBlank, the VCOUNT match) and the four timers all do, because
+    /// their state is nothing but counters advancing at a known rate. The keypad, the serial
+    /// port, a cartridge GPIO line, and a completed DMA transfer do not — each depends on
+    /// something external to this prediction, or on code that only runs once the CPU is already
+    /// awake — so a halt that depends on only one of those still steps normally, and correctly:
+    /// it just gets no benefit from this.
+    ///
+    /// Second, and less obvious, no DMA channel may be armed to fire again on its own during the
+    /// interval — see [`DmaController::has_a_channel_that_could_fire_on_its_own`]. `run_clocks`
+    /// advances the video and timers by exactly the `cycles` it is given, unconditionally, and
+    /// does not stop early just because an interrupt became pending partway through — nothing
+    /// needs it to, since the ordinary path re-checks after every single cycle anyway. A DMA
+    /// transfer that fires during a *predicted* span is a different matter: its own cost is
+    /// *additional* video/timer advancement, spent through `run_clocks` a second time from
+    /// inside `run_pending_dma`, on top of whatever this predicted. A prediction blind to that
+    /// would send the outer call further than the interval it computed, and the acceptance test
+    /// for this exists specifically to catch that kind of drift. Modelling it exactly would mean
+    /// simulating the DMA controller too — simpler and still correct is to not predict at all
+    /// while any such channel is armed, and let DMA's own cost keep being accounted for the way
+    /// it already is.
+    fn halt_fast_forward_cycles(&self) -> Option<u32> {
+        if self.bus.dma.has_a_channel_that_could_fire_on_its_own() {
+            return None;
+        }
+        if !self.bus.irq.master_enabled() {
+            return None;
+        }
+        let ie = self.bus.irq.enabled_sources();
+        if ie == 0 {
+            return None;
+        }
+
+        // Probed on scratch copies of exactly the state that decides these two kinds of edge,
+        // reusing the real `VideoTiming::tick`/`interrupt_sources` and `Timers::tick`/
+        // `interrupts` rather than a second, hand-derived formula that could disagree with them.
+        let mut video = self.bus.video;
+        let mut timers = self.bus.timers;
+        let mut elapsed = 0u32;
+        // The same hang guard `step_frame` uses: if nothing wakes the CPU within two frames,
+        // there is nothing to predict, and stepping normally will discover that just as surely.
+        let bound = (FRAME_CYCLES * 2) as u32;
+        while elapsed < bound {
+            // Capped to `cycles_until_next_edge`, not just `bound - elapsed`: `tick` only stops at
+            // a line boundary, so an uncapped request here would sail straight past a mid-line
+            // `entered_hblank` to wherever the line ends, landing up to 272 cycles later than the
+            // real edge — see that method's doc comment.
+            let step = (bound - elapsed).min(video.cycles_until_next_edge());
+            let (events, consumed) = video.tick(step);
+            let overflowed = timers.tick(consumed);
+            elapsed += consumed;
+
+            if video.interrupt_sources(&events) & ie != 0 {
+                return Some(elapsed);
+            }
+            let asked = timers.interrupts(&overflowed);
+            if (0..4).any(|ch| asked & (1 << ch) != 0 && ie & irq::source::timer(ch) != 0) {
+                return Some(elapsed);
+            }
+        }
+        None
     }
 
     /// The other half of the wrapper: unwind and leave the exception.
@@ -769,6 +1173,7 @@ impl GbaSystem {
         // struck. Restoring `CPSR` is the step that unmasks interrupts again, so leaving it out
         // is what makes a machine take exactly one interrupt and then no more.
         self.cpu.exception_return(lr.wrapping_sub(4));
+        self.bus.memory.set_bios_open_bus(BIOS_OPCODE_AFTER_IRQ);
         true
     }
 }
@@ -818,20 +1223,81 @@ impl System for GbaSystem {
         if self.intercept_bios_irq_return() {
             return Cycles(3);
         }
+        // After any interrupt entry above, so both reflect the instruction genuinely about to
+        // run this step rather than the one interrupted.
+        self.update_in_bios();
+        self.update_open_bus();
+        // A CPU that is still halted at this point — `service_interrupt` above did not just wake
+        // it — is doing nothing until some event ends the halt. That covers two shapes on this
+        // machine, and both are pure overhead one cycle at a time: a plain `Halt`, and an
+        // `IntrWait`/`VBlankIntrWait` retry loop, which re-enters `intercept_bios_call` below on
+        // *every* step to re-read a flag word that nothing changes until some source fires. Real
+        // software spends most of a frame in the second shape — `VBlankIntrWait` once per frame is
+        // the standard idiom — so this has to run before `intercept_bios_call`, not only for a
+        // plain `Halt`, or the common case would never reach it at all. Either way `Cpu::step`
+        // returns `Cycles(1)` without touching the bus, so stepping through it was running up to a
+        // whole frame's worth of iterations, ~280,000 of them, that changed nothing. Skip straight
+        // to whichever wakes it first, when that is something this can predict, and return with
+        // exactly that many cycles reported — *without* also running `cpu.step` or
+        // `intercept_bios_call` on the same call.
+        //
+        // The predicted edge is the earliest source `IE` enables, not only the source a wait
+        // named: on real hardware a `VBlankIntrWait` sitting under an `HBlank`-enabled raster
+        // effect still takes the full detour through the game's handler on every `HBlank`, and
+        // only the wait's own mask actually ends it — see `bios::intr_wait`'s doc comment. Landing
+        // on any enabled edge and handing off to the ordinary `service_interrupt` /
+        // `intercept_bios_call` sequence reproduces exactly that: a wait not yet satisfied re-halts
+        // and this runs again for the next edge, just as the slow path would have found on its own.
+        //
+        // That hand-off deliberately does *not* try to also finish the wake-up here by poking
+        // `irq_line`, re-running `service_interrupt`, or calling `intercept_bios_call` after the
+        // jump: the HLE handshake is a multi-call sequence (one call masks `CPSR` and points `pc`
+        // at the game's handler; only the *next* call's `service_interrupt`, seeing the mask now
+        // set, lets `Cpu::step`'s own halt check clear `halted` and fall into running the handler,
+        // which itself takes several more calls before acknowledging `IF` and returning) and
+        // short-circuiting any of it here duplicates logic that already exists once, correctly, in
+        // `service_interrupt` and `intercept_bios_call`. Landing exactly on the wake edge and
+        // leaving the rest to those functions, one or more `step_instruction` calls away, costs a
+        // little more than the theoretical minimum but reuses their sequencing instead of
+        // re-deriving it.
+        //
+        // Re-triggering forever on that next call cannot happen: the jump above raised the very
+        // interrupt this predicted, so `self.bus.irq.pending()` is true by the time this next runs,
+        // and the guard below only fires while nothing is pending yet.
+        #[cfg(test)]
+        let fast_forward_allowed = !self.disable_halt_fast_forward;
+        #[cfg(not(test))]
+        let fast_forward_allowed = true;
+        if fast_forward_allowed && self.cpu.is_halted() && !self.bus.irq.pending() {
+            if let Some(distance) = self.halt_fast_forward_cycles() {
+                self.bus.advance(distance);
+                self.bus.take_pending_waits();
+                return Cycles((distance + self.bus.take_dma_cycles()) as u64);
+            }
+        }
         if self.intercept_bios_call() {
             // The call is answered without running the instruction, so it costs nothing beyond
             // a nominal cycle — the real BIOS is slower, and that will matter for a game timing
             // against it, but a wrong non-zero figure is no better than this one.
             self.bus.advance(1);
             self.bus.take_pending_waits();
-            return Cycles(1);
+            return Cycles(1 + self.bus.take_dma_cycles() as u64);
         }
+        // Armed immediately before the step that will consume it: an ARM or Thumb instruction
+        // makes exactly one fetch, always its first bus access, so this is reliably true for that
+        // access and false for every data access the instruction goes on to make. See
+        // `GbaSystemBus::awaiting_fetch`.
+        self.bus.awaiting_fetch = true;
         let cycles = self.cpu.step(&mut self.bus).get().max(1);
         // The instruction's own cost plus whatever its memory accesses waited for. Charged
         // together so a scheduled event cannot fire between two halves of one access.
         let total = cycles as u32 + self.bus.take_pending_waits();
         self.bus.advance(total);
-        Cycles(total as u64)
+        // Plus however long DMA held the bus. The transfer has already advanced the machine
+        // itself, so this only reports the time — but reporting it is what makes a game that
+        // copies a megabyte a frame get through proportionally less code, which is the whole
+        // observable effect of DMA having a duration.
+        Cycles((total + self.bus.take_dma_cycles()) as u64)
     }
 
     fn id(&self) -> &'static str {
@@ -927,6 +1393,7 @@ impl Savable for GbaSystemBus {
         self.irq.save(w);
         self.keypad.save(w);
         self.sound.save(w);
+        self.psg.save(w);
         self.waits.save(w);
         w.write_u64(self.sample_accumulator);
     }
@@ -945,6 +1412,7 @@ impl Savable for GbaSystemBus {
         self.irq.load(r)?;
         self.keypad.load(r)?;
         self.sound.load(r)?;
+        self.psg.load(r)?;
         self.waits.load(r)?;
         self.sample_accumulator = r.read_u64()?;
         Ok(())
@@ -955,11 +1423,18 @@ impl Savable for GbaSystem {
     fn save(&self, w: &mut StateWriter) {
         self.cpu.save(w);
         self.bus.save(w);
+        // Written as a present flag and a mask rather than a sentinel mask, because zero is a
+        // legal mask — a game can ask to wait for nothing, and hardware then never returns.
+        w.write_bool(self.intr_wait.is_some());
+        w.write_u16(self.intr_wait.unwrap_or(0));
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.cpu.load(r)?;
         self.bus.load(r)?;
+        let waiting = r.read_bool()?;
+        let mask = r.read_u16()?;
+        self.intr_wait = waiting.then_some(mask);
         Ok(())
     }
 }

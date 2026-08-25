@@ -20,6 +20,16 @@
 //! timer. Four timers, three of which can be chained, would need rescheduling on every write to
 //! any of them and on every overflow of a lower one. Counting cycles forward is simpler here
 //! and stays exact, because the prescalers are powers of two and the remainder is carried.
+//!
+//! # An overflow is counted, not flagged
+//!
+//! [`Timers::tick`] reports [`Overflows`] — a count per timer — rather than a bitmask. The
+//! distinction is invisible while the only caller is a CPU instruction worth a handful of cycles,
+//! because a timer at prescaler 1 needs 65 536 of them to overflow twice. It stops being invisible
+//! the moment a DMA transfer has a duration: a burst is thousands of cycles in one call, and a
+//! sound timer set to a short reload overflows repeatedly inside it. A bitmask collapses those
+//! into one, and the direct-sound FIFO then pops one sample where hardware popped twenty — audio
+//! that plays at a fraction of its rate and drifts further behind the longer a transfer runs.
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
 
@@ -90,6 +100,51 @@ impl Timer {
     }
 }
 
+/// How many times each timer overflowed during one [`Timers::tick`].
+///
+/// A count rather than a bitmask, for the reason in the module docs: two consumers want different
+/// things from it. The interrupt controller only wants to know *whether* a timer overflowed —
+/// `IF` is a latch, so two overflows before the CPU next looks are one flag on hardware too — and
+/// [`crate::DirectSound`] wants the number, because it advances one sample per overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Overflows([u32; CHANNELS]);
+
+impl Overflows {
+    /// Build a set of counts directly, for a caller standing in for a `tick`.
+    pub fn from_counts(counts: [u32; CHANNELS]) -> Self {
+        Self(counts)
+    }
+
+    /// How many times timer `channel` overflowed.
+    pub fn count(&self, channel: usize) -> u32 {
+        self.0[channel]
+    }
+
+    /// Whether anything overflowed at all.
+    ///
+    /// The check that skips the whole handling path, which is the common case: this is asked once
+    /// per video chunk of every advance.
+    #[inline]
+    pub fn any(&self) -> bool {
+        self.0.iter().any(|&count| count != 0)
+    }
+
+    /// Which timers overflowed at least once, as a bitmask.
+    pub fn mask(&self) -> u8 {
+        let mut out = 0;
+        for (index, &count) in self.0.iter().enumerate() {
+            if count != 0 {
+                out |= 1 << index;
+            }
+        }
+        out
+    }
+
+    fn record(&mut self, channel: usize) {
+        self.0[channel] += 1;
+    }
+}
+
 /// All four timers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Timers {
@@ -105,13 +160,12 @@ impl Timers {
         (BASE..BASE + (CHANNELS as u32 * 4)).contains(&addr)
     }
 
-    /// Advance every timer, returning which ones overflowed.
+    /// Advance every timer, reporting how many times each one overflowed.
     ///
-    /// The return is a bitmask rather than a count because two things want it and want it
-    /// differently: the interrupt controller cares only *that* a timer overflowed, and the sound
-    /// FIFOs care *which* one, since a game picks a timer to pace each channel.
-    pub fn tick(&mut self, cycles: u32) -> u8 {
-        let mut overflowed = 0u8;
+    /// Counts rather than flags: see [`Overflows`]. A single call can now cover a whole DMA burst,
+    /// which is long enough for a sound timer to overflow many times over.
+    pub fn tick(&mut self, cycles: u32) -> Overflows {
+        let mut overflowed = Overflows::default();
 
         for index in 0..CHANNELS {
             // A cascading timer is driven by the one below it, further down, not by the clock.
@@ -129,7 +183,7 @@ impl Timers {
 
             for _ in 0..(total >> shift) {
                 if self.channels[index].tick() {
-                    overflowed |= 1 << index;
+                    overflowed.record(index);
                     self.cascade_from(index, &mut overflowed);
                 }
             }
@@ -141,7 +195,7 @@ impl Timers {
     ///
     /// Recursive in effect but written as a loop: three chained overflows in one tick is rare
     /// but reachable, and a loop makes the termination obvious.
-    fn cascade_from(&mut self, mut index: usize, overflowed: &mut u8) {
+    fn cascade_from(&mut self, mut index: usize, overflowed: &mut Overflows) {
         while index + 1 < CHANNELS {
             index += 1;
             let above = &mut self.channels[index];
@@ -151,15 +205,19 @@ impl Timers {
             if !above.tick() {
                 return;
             }
-            *overflowed |= 1 << index;
+            overflowed.record(index);
         }
     }
 
-    /// Which of the overflows in `mask` should raise an interrupt.
-    pub fn interrupts(&self, mask: u8) -> u8 {
+    /// Which of these overflows should raise an interrupt.
+    ///
+    /// Answered as a mask because `IF` is one: a timer that overflowed five times inside one call
+    /// sets its flag once, exactly as it would on hardware where the CPU had no chance to look in
+    /// between.
+    pub fn interrupts(&self, overflowed: &Overflows) -> u8 {
         let mut out = 0;
         for index in 0..CHANNELS {
-            if mask & (1 << index) != 0 && self.channels[index].irq_enabled() {
+            if overflowed.count(index) != 0 && self.channels[index].irq_enabled() {
                 out |= 1 << index;
             }
         }
@@ -250,7 +308,7 @@ mod tests {
     fn a_disabled_timer_does_not_count() {
         let mut timers = Timers::new();
         timers.write16(reload_addr(0), 0);
-        assert_eq!(timers.tick(1000), 0);
+        assert_eq!(timers.tick(1000).mask(), 0);
         assert_eq!(timers.counter(0), 0);
     }
 
@@ -304,9 +362,9 @@ mod tests {
     fn an_overflow_reloads_rather_than_wrapping_to_zero() {
         let mut timers = Timers::new();
         start(&mut timers, 0, 0, 0xFFFE);
-        assert_eq!(timers.tick(1), 0);
+        assert_eq!(timers.tick(1).mask(), 0);
         assert_eq!(timers.counter(0), 0xFFFF);
-        assert_eq!(timers.tick(1), 1 << 0, "the overflow is reported");
+        assert_eq!(timers.tick(1).mask(), 1 << 0, "the overflow is reported");
         assert_eq!(timers.counter(0), 0xFFFE, "back to the reload, not to zero");
     }
 
@@ -334,7 +392,7 @@ mod tests {
         }
         // Every timer is one tick from overflowing, so one clock tick carries through all four.
         let overflowed = timers.tick(1);
-        assert_eq!(overflowed, 0b1111, "all four reported an overflow");
+        assert_eq!(overflowed.mask(), 0b1111, "all four reported an overflow");
     }
 
     #[test]
@@ -358,9 +416,9 @@ mod tests {
         );
 
         let overflowed = timers.tick(1);
-        assert_eq!(overflowed, 0b11, "both overflowed");
+        assert_eq!(overflowed.mask(), 0b11, "both overflowed");
         assert_eq!(
-            timers.interrupts(overflowed),
+            timers.interrupts(&overflowed),
             0b10,
             "but only the one that asked wants an interrupt"
         );

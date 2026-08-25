@@ -23,8 +23,34 @@
 //!
 //! Same split as the Game Boy's OAM and VRAM DMA in prompt 11: the copy crosses every region of
 //! the memory map, so the controller yields a [`Transfer`] and the bus performs it.
+//!
+//! # A transfer takes time, and the CPU does not run during it
+//!
+//! GBATEK gives the whole cost as `2N+2(n-1)S+xI`: a non-sequential read and a non-sequential
+//! write for the first unit, a sequential pair for each unit after it, and `x` internal cycles of
+//! startup — 2 normally, 4 when both ends are in cartridge space, because the bus has to be handed
+//! over twice. [`startup_cycles`] and [`unit_cycles`] are those two halves; the bus spends them by
+//! advancing the machine between units, so an HBlank or a timer overflow that falls inside a long
+//! transfer lands where it belongs rather than after the copy.
+//!
+//! This module used to say nothing at all about cycles, and the transfer ran in zero emulated
+//! time. See the crate docs for what that hid.
+//!
+//! # What is still not modelled
+//!
+//! **A running transfer is not preempted.** A higher-priority channel that becomes ready mid-copy
+//! waits for the current one to finish, and then runs before any lower-priority channel that also
+//! became ready — which is what [`DmaController::take_transfer`] scanning from 0 already gives.
+//! Hardware does arbitrate at a finer grain than that, and modelling it means suspending a
+//! transfer mid-block and resuming it, which needs the running unit index to become saved state.
+//!
+//! **A transfer does not observe `DISPCNT`'s HBlank-interval-free bit**, and video capture on
+//! channel 3 (`Special` timing) is not distinguished from an ordinary block copy.
 
 use core_common::{Savable, StateError, StateReader, StateWriter};
+
+use crate::memory::Region;
+use crate::waitstates::{Access, WaitControl};
 
 pub const CHANNELS: usize = 4;
 
@@ -97,6 +123,51 @@ pub struct Transfer {
     pub destination_step: AddressStep,
     /// Whether finishing this transfer should raise the channel's interrupt.
     pub raise_irq: bool,
+}
+
+/// Internal cycles before the first unit of a transfer moves.
+///
+/// GBATEK's `xI`. Two is the ordinary figure; it is doubled when both ends live in cartridge
+/// space, because the controller has to hand the one cartridge bus back and forth.
+pub const STARTUP_CYCLES: u32 = 2;
+/// The same, when both the source and the destination are in cartridge space.
+pub const STARTUP_CYCLES_BOTH_GAMEPAK: u32 = 4;
+
+/// Whether an address is served by the cartridge bus.
+fn is_gamepak(addr: u32) -> bool {
+    matches!(Region::of(addr), Region::Rom { .. } | Region::Sram)
+}
+
+/// What a transfer spends before moving anything.
+pub fn startup_cycles(source: u32, destination: u32) -> u32 {
+    if is_gamepak(source) && is_gamepak(destination) {
+        STARTUP_CYCLES_BOTH_GAMEPAK
+    } else {
+        STARTUP_CYCLES
+    }
+}
+
+/// What one unit of a transfer costs: a read and a write, each at the width being moved.
+///
+/// `access` is the *stream's* kind, not the bus's: the first unit reads and writes
+/// non-sequentially and every unit after it does both sequentially, because the two addresses walk
+/// forward independently of each other. Deriving it from the bus's `next_sequential` instead —
+/// which is what happens when a transfer is charged through [`crate::system::GbaSystemBus`]'s
+/// ordinary path — makes every access look like a jump, since the read and the write alternate
+/// between two unrelated addresses.
+///
+/// Neither access is a code fetch — a transfer moves data, never instructions — so neither can
+/// hit the CPU's prefetch buffer, and both invalidate it if either address happens to land in ROM.
+/// That is correct: a real transfer holds the one cartridge bus the buffer also needs, so a code
+/// fetch that follows it starts the run over exactly as a jump would.
+pub fn unit_cycles(
+    waits: &mut WaitControl,
+    source: u32,
+    destination: u32,
+    unit: u32,
+    access: Access,
+) -> u32 {
+    waits.cost(source, unit, access, false) + waits.cost(destination, unit, access, false)
 }
 
 mod control {
@@ -189,6 +260,22 @@ impl Channel {
     }
 }
 
+/// The address lines a channel actually drives.
+///
+/// Channel 0 cannot reach the cartridge at all — see the module docs — and 27 bits is exactly the
+/// window that excludes it; every other channel has 28. A game that sets a stray high bit above
+/// that window is not addressing a different region on hardware, because the pins to decode it do
+/// not exist: the address wraps within the window instead. Treating it as ordinary 32-bit
+/// arithmetic sends the access to whatever this codebase's flatter address space happens to have
+/// at that bit pattern, which is a real region here even though it is nothing on the console.
+fn address_mask(index: usize) -> u32 {
+    if index == 0 {
+        0x07FF_FFFF
+    } else {
+        0x0FFF_FFFF
+    }
+}
+
 /// All four channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DmaController {
@@ -202,6 +289,21 @@ impl DmaController {
 
     pub fn owns(addr: u32) -> bool {
         (BASE..BASE + (CHANNELS as u32 * 12)).contains(&addr)
+    }
+
+    /// Whether any channel could fire again purely from a video edge or a FIFO request, with no
+    /// CPU instruction involved.
+    ///
+    /// `Immediate` timing only ever fires once, synchronously, when the game's own store sets the
+    /// enable bit — which cannot happen with nothing executing. `VBlank`, `HBlank`, and `Special`
+    /// all re-arm themselves from [`Self::on_vblank`], [`Self::on_hblank`], and
+    /// [`Self::on_fifo_empty`] every time their trigger recurs, whether or not the CPU is awake to
+    /// see it — which is exactly what a halted CPU's fast-forward prediction cannot account for
+    /// without simulating this controller too. See `system::GbaSystem::halt_fast_forward_cycles`.
+    pub fn has_a_channel_that_could_fire_on_its_own(&self) -> bool {
+        self.channels
+            .iter()
+            .any(|c| c.enabled() && c.timing() != StartTiming::Immediate)
     }
 
     /// Note that vertical blanking began, arming any channel waiting for it.
@@ -290,13 +392,17 @@ impl DmaController {
 
         channel.armed = false;
 
-        // Walk the running addresses past what this transfer covered.
+        // Walk the running addresses past what this transfer covered, masked back into the
+        // channel's window so a step that would carry an address past it wraps there rather than
+        // running on into the full 32-bit space.
+        let mask = address_mask(index);
         let span = words as i64 * unit as i64;
-        channel.current_source = advance(channel.current_source, channel.source_step(), span);
+        channel.current_source =
+            advance(channel.current_source, channel.source_step(), span) & mask;
         channel.current_destination = match destination_step {
             // The reload variant snaps back so the next repeat refills the same buffer.
-            AddressStep::IncrementReload => channel.destination,
-            step => advance(channel.current_destination, step, span),
+            AddressStep::IncrementReload => channel.destination & mask,
+            step => advance(channel.current_destination, step, span) & mask,
         };
 
         if !channel.repeats() {
@@ -347,8 +453,9 @@ impl DmaController {
                 // adjusts the repeat or interrupt bit of a running transfer and must not have
                 // its addresses snap back to the start.
                 if !was_enabled && channel.enabled() {
-                    channel.current_source = channel.source;
-                    channel.current_destination = channel.destination;
+                    let mask = address_mask(index);
+                    channel.current_source = channel.source & mask;
+                    channel.current_destination = channel.destination & mask;
                     if channel.timing() == StartTiming::Immediate {
                         channel.armed = true;
                     }

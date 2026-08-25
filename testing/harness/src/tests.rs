@@ -5,10 +5,7 @@
 //! pass-detector that always says "pass" would make the whole suite green and meaningless.
 
 use super::*;
-use crate::corpus::{
-    Convention, Hardware, TestRom, CGB_ROMS, GBA_ROMS, GB_CPU_INSTRS_SUBTESTS,
-    GB_DMG_SOUND_SINGLES, GB_ROMS, NDS_ROMS,
-};
+use crate::corpus::{all_roms, Convention, Hardware, TestRom, GB_ROMS};
 use core_common::{AudioSample, CartridgeError, Cycles, FrameOutput, Savable, StateError};
 use core_common::{StateReader, StateWriter};
 
@@ -547,14 +544,11 @@ fn gb_accuracy_suite() {
     let mut known_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
 
-    for rom in GB_ROMS
-        .iter()
-        .chain(GB_CPU_INSTRS_SUBTESTS)
-        .chain(GB_DMG_SOUND_SINGLES)
-        .chain(CGB_ROMS)
-        .chain(GBA_ROMS)
-        .chain(NDS_ROMS)
-    {
+    // `all_roms` rather than a chain written out again here. The fetcher and this suite each
+    // keeping their own list is what let `CGB_ROMS` and `GBA_ROMS` go unfetchable for as long
+    // as they did, and a suite that silently ignores a corpus entry fails the same way round:
+    // the ROM is downloaded, nothing runs it, and the corpus looks like coverage it is not.
+    for rom in all_roms() {
         let Some((outcome, state)) = run_gb_rom(rom) else {
             report.skip(rom.name);
             continue;
@@ -604,6 +598,26 @@ fn gb_accuracy_suite() {
         "these ROMs are marked as expected failures but passed; remove the marker: {unexpected_passes:?}"
     );
     assert!(report.is_success(), "{summary}");
+}
+
+/// `run_gba_suite`'s pass detector used to be fooled by exactly this: a settled `PC` plus
+/// `r12 == 0` is also what a machine wedged at its own entry point looks like, and nothing
+/// distinguished "finished" from "never started". Constructed rather than reasoned about, per
+/// the acceptance criterion this pins: a ROM whose entry point is `b .` and nothing else. It
+/// settles on its very first instruction — never having run a single byte of test logic — with
+/// `r12` at its untouched reset value, which is indistinguishable from a genuine all-pass by
+/// register state alone.
+#[test]
+fn run_gba_suite_reports_failure_for_a_machine_that_never_left_its_entry_point() {
+    let mut rom = vec![0u8; 0x1000];
+    rom[0..4].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes()); // b . from the entry point
+    let mut system = system_gba::GbaSystem::new(rom, None).expect("the ROM parses");
+
+    let outcome = run_gba_suite(&mut system, 60);
+    assert!(
+        !outcome.passed(),
+        "a machine that never left its entry point must not be reported as a pass: {outcome:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

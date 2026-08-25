@@ -49,6 +49,7 @@
 //! | `corpus/dmg_acid2` | 243 µs | 69x |
 //! | `corpus/cgb_acid2` | 258 µs | 65x |
 //! | `gba/spin` | 1 372 µs | 12.2x |
+//! | `gba/vblank_wait` | 33 µs | 507x |
 //! | `corpus/gba_suite_arm` | 738 µs | 22.7x |
 //!
 //! **Where a Game Boy frame goes.** Baseline 210 µs; tile fetch and compositing add 36 µs (+17%);
@@ -150,10 +151,25 @@
 //!   controller scanned four channels to answer "nothing to do". Every prescaler is a power of two,
 //!   so the divisions are now shifts, and the DMA scan is inlined at the call site. `gba/spin`
 //!   −8.2%, `corpus/gba_suite_arm` −4.4%, framebuffer hash unchanged over 600 frames of a real ROM.
+//! - **The GBA's halted-CPU loop.** Before `GbaSystem::halt_fast_forward_cycles`, a halted core —
+//!   whether a plain `Halt` or an `IntrWait`/`VBlankIntrWait` retry loop, which is where real
+//!   software spends most of a frame — ran `step_instruction` once per cycle until something woke
+//!   it, up to 280 896 calls that touched nothing. Predicting the next enabled edge (video or
+//!   timer) from a scratch copy of the scheduler and jumping the bus straight there, then handing
+//!   off to the same interrupt-dispatch sequencing the slow path already used, cut `gba/vblank_wait`
+//!   — a `VBlankIntrWait` loop with `HBlank` also enabled, the standard idiom this exists for —
+//!   from **4.74 ms to 33 µs, a 145x reduction**, measured in one session with `--baseline`.
+//!   `gba/spin`, which never halts, is unaffected (±4%, within this machine's own noise floor).
+//!   The predictor has to land on the exact cycle an interrupt-driven event fires, not merely
+//!   nearby: `VideoTiming::tick` only stops at line boundaries, so an early version that asked it
+//!   for a whole frame in one call overshot every mid-line `HBlank` edge by up to 272 cycles before
+//!   `VideoTiming::cycles_until_next_edge` capped each request to the edge instead — caught by an
+//!   equivalence test asserting the fast and slow paths land on the identical cycle count and
+//!   register state, not merely that both eventually complete.
 //!
-//! Nothing else has been. Every system meets its target with 5x to 80x of margin.
+//! Nothing else has been. Every system meets its target with 5x to 507x of margin.
 
-use core_common::{InputState, System};
+use core_common::{Bus, InputState, System};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::path::PathBuf;
 
@@ -292,6 +308,47 @@ fn gba_spin_rom() -> Vec<u8> {
     rom
 }
 
+/// Where the benchmark's synthetic interrupt handler lives.
+const VBLANK_WAIT_HANDLER: u32 = 0x0300_0100;
+
+/// A GBA ROM of `SWI 0x05` (`VBlankIntrWait`) in a loop.
+///
+/// Real games spend most of a frame halted here rather than spinning: `gba/spin` never halts, so
+/// it cannot show what `GbaSystem::halt_fast_forward_cycles` is for. This can.
+fn gba_vblank_wait_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x1000];
+    rom[0x00..0x04].copy_from_slice(&0xEF05_0000u32.to_le_bytes()); // swi 0x05 (VBlankIntrWait)
+    rom[0x04..0x08].copy_from_slice(&0xEAFF_FFFDu32.to_le_bytes()); // b back to the swi
+    rom
+}
+
+/// Wire up the interrupt path a `VBlankIntrWait` loop depends on, the same way
+/// `system::tests::intr_wait::machine` does for the unit tests: a handler that acknowledges `IF`,
+/// `IE`/`IME`/`DISPSTAT` enabling vertical blank, and the IWRAM pointer the HLE dispatcher reads
+/// to find the handler. Skipping any one of these makes the wait never return, which would
+/// benchmark a hang rather than the intended workload.
+fn configure_vblank_wait(system: &mut system_gba::GbaSystem) {
+    let bus = system.bus_mut();
+    bus.write32(system_gba::irq::HLE_HANDLER_POINTER, VBLANK_WAIT_HANDLER);
+    bus.write16(
+        system_gba::video::reg::DISPSTAT,
+        system_gba::video::dispstat::VBLANK_IRQ,
+    );
+    bus.write16(system_gba::irq::reg::IE, system_gba::irq::source::VBLANK);
+    bus.write16(system_gba::irq::reg::IME, 1);
+    // ldr r0, [pc, #12] / ldrh r1, [r0] / strh r1, [r0] / bx lr, then the address of `IF`. Writing
+    // `IF` back over itself is how this hardware acknowledges: a one bit clears.
+    for (offset, word) in [
+        (0x00, 0xE59F_000Cu32),
+        (0x04, 0xE1D0_10B0),
+        (0x08, 0xE1C0_10B0),
+        (0x0C, 0xE12F_FF1E),
+        (0x14, system_gba::irq::reg::IF),
+    ] {
+        bus.write32(VBLANK_WAIT_HANDLER + offset, word);
+    }
+}
+
 /// A DS cartridge whose ARM9 half fills a VRAM bank through display mode 2 and then spins, and
 /// whose ARM7 half spins.
 ///
@@ -396,6 +453,13 @@ fn gba_frames(c: &mut Criterion) {
     let rom = gba_spin_rom();
     bench_frame(&mut group, "spin", || {
         Box::new(system_gba::GbaSystem::new(rom.clone(), None).expect("a hand-built cartridge"))
+    });
+    let wait_rom = gba_vblank_wait_rom();
+    bench_frame(&mut group, "vblank_wait", || {
+        let mut system =
+            system_gba::GbaSystem::new(wait_rom.clone(), None).expect("a hand-built cartridge");
+        configure_vblank_wait(&mut system);
+        Box::new(system)
     });
     group.finish();
 }

@@ -109,6 +109,20 @@ impl InterruptController {
         self.master_enable && (self.enable & self.flags) != 0
     }
 
+    /// The master switch alone, independent of `IE` or `IF`.
+    ///
+    /// A halted CPU can never wake while this is clear — [`Self::pending`] would stay `false`
+    /// whatever else happened — so a prediction of when it *will* wake needs to see this apart
+    /// from the combined answer.
+    pub fn master_enabled(&self) -> bool {
+        self.master_enable
+    }
+
+    /// Which sources `IE` currently enables, independent of whether any has fired.
+    pub fn enabled_sources(&self) -> u16 {
+        self.enable
+    }
+
     /// The sources that are both enabled and flagged.
     pub fn active(&self) -> u16 {
         self.enable & self.flags

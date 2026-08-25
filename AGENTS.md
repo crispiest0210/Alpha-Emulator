@@ -302,6 +302,18 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   interrupts. Jumping straight to the handler leaves its `bx lr` returning into the interrupted
   code while still in IRQ mode with interrupts masked: the machine takes exactly one interrupt,
   then runs on and wanders into unmapped memory.
+- **`IntrWait` is not `Halt`, and implementing it as one runs a game's main loop ~200 times a
+  frame.** `Halt` (SWI 0x02) wakes on any interrupt. `IntrWait` (0x04) and `VBlankIntrWait` (0x05)
+  wake only on the sources named in `r1`, which they decide by reading the BIOS's own flag word at
+  `0x0300_7FF8` — *not* `IF`, which the game's handler has already cleared by the time the wait is
+  re-tested. Collapsing all four calls into one `halt = true` meant a game that also enables HBlank
+  for raster effects, or a timer for its sound driver, got `VBlankIntrWait` back on the next HBlank:
+  measured at **618 returns across three frames where hardware gives 3**. Nothing errors and no test
+  fails; the game simply runs at the wrong rate, and every symptom downstream of frame pacing —
+  animation speed, input handling, anything read mid-frame — presents as a separate bug. **Suspect
+  this before diagnosing pixels.** The wait is spread across steps by leaving the program counter
+  *on* the `SWI` and re-executing it, because no CPU core here can be suspended mid-instruction;
+  `bios::intr_wait` argues that choice and the rejected alternative.
 - **A cycle-accounting bug fails no test and looks exactly like a hang.** The GBA charged every
   memory access three to six times over — an ARM instruction in IWRAM cost 13 cycles against
   hardware's 1, and 49 from ROM against 6. Every test passed and the emulator held a measured 100%
@@ -317,6 +329,168 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   display control register, the interrupt registers, and the handler pointer, on one page.
   `TRACE_ROM=<rom> cargo test -p system-gba --release -- --ignored --nocapture dump_state` prints
   it at four points in a run, which is what turned that black screen into three specific bugs.
+- **`entered_hblank` fires on all 228 lines; `scanline_ready` does not.** Hardware does not run
+  HBlank DMA during vertical blanking, only the interrupt fires there — and `entered_hblank` alone
+  cannot tell the two cases apart, since `video::VideoTiming::tick` sets it on every line including
+  the 68 in VBlank. `scanline_ready` is the field that already carries the distinction (`Some` only
+  for the 160 visible lines), computed at the exact instant hblank was entered rather than derived
+  from `vcount` afterwards — which matters, because by the time a caller could re-check `vcount`,
+  `advance_line` may already have moved it onto the next line in the same call. A per-scanline
+  scroll, gradient, or window effect corrupts progressively when this is missed, as its HDMA source
+  pointer advances 68 times too many per frame.
+- **GBA DMA used to be instantaneous and free, and three separate bugs were hiding behind that.**
+  A transfer copied its whole block in one `while` loop costing zero emulated cycles, so the wait
+  states its own accesses incurred sat in `pending_waits` until *the next instruction* paid them,
+  the bus latch it left behind made that instruction's fetch count as a jump, and `Timers::tick`
+  could return a bitmask because no caller ever passed enough cycles to overflow a timer twice.
+  That last one is the shape worth remembering: **a correctness shortcut that is safe only because
+  of how small its input happens to be**, with nothing anywhere saying so. Giving DMA a duration
+  made every one of them reachable in the same change. A transfer now costs 2 cycles of startup
+  (4 when both ends are in cartridge space) plus an N/S read and write per unit from
+  `waitstates.rs`, and it spends them by calling `run_clocks` *between* units so an HBlank or a
+  timer overflow inside a long copy lands where it belongs. Two things to know before touching it:
+  `run_pending_dma` has a re-entrancy guard because three paths lead into it and two of them can
+  fire mid-transfer — without it, a channel whose destination is its own control register
+  stack-overflows the process rather than failing an assertion — and **the full
+  `core_common::Scheduler` migration is still open**, deferred deliberately because it is a
+  `cpu-arm7tdmi` change (cycles reported as they are spent rather than at the end of an
+  instruction) rather than a DMA one. `system::GbaSystemBus`'s module docs argue that.
+- **DMA source and destination addresses are not full 32-bit values on this hardware.** Channel 0
+  drives 27 address lines and channels 1-3 drive 28; a stray high bit above that window does not
+  address a different region the way it would in ordinary 32-bit arithmetic, it wraps back inside
+  the window. `dma::address_mask` is applied twice — once when a transfer's addresses latch on the
+  enable edge, and again after every step — because masking only at latch time still lets a
+  repeating transfer's running address walk out through the top of the window one step later.
+- **`GbaBus::set_open_bus` had no caller.** The plumbing for open-bus reads existed — an unmapped
+  address was meant to return whatever the bus last carried — but nothing ever drove it, so it
+  stayed zero forever. `GbaSystem::update_open_bus` now sets it once per `step_instruction`, from
+  the instruction about to run: a `peek` of the same width the fetch will be (a word in ARM, a
+  halfword duplicated into both halves in Thumb), for the same reason `intercept_bios_call`'s own
+  peek exists — it is answering what the CPU is about to fetch itself, and reading it a second
+  time through the bus would charge, latch, and log an access that never happened.
+- **`in_bios` was set once at construction and never touched again.** With a BIOS loaded, a game
+  that calls into it and returns crosses the "am I inside the BIOS" boundary constantly, but the
+  flag gating BIOS reads was computed once from `has_bios` at boot and left there — so after the
+  very first instruction, a read of BIOS space from *outside* it returned real BIOS content
+  instead of open bus, for the rest of the run. `GbaSystem::update_in_bios` recomputes it every
+  step from the program counter (`pc < memory::BIOS_SIZE`), alongside `update_open_bus`, so the
+  flag tracks wherever the CPU actually is rather than where it started.
+- **A BIOS read from outside the BIOS is not the general open-bus rule.** GBATEK documents them as
+  two separate mechanisms: an ordinary unmapped read mirrors the pipeline's own most recent fetch
+  (`[$+8]` of the *reading* instruction), which changes on every instruction the CPU executes; a
+  BIOS read from outside the BIOS returns whatever the BIOS *itself* last fetched, which is sticky
+  across every instruction the game runs afterward, because none of them are BIOS fetches. Sharing
+  one `open_bus` field for both — this crate's first attempt — made a no-BIOS machine's very first
+  memory read fail an independent test ROM (`jsmolka/gba-tests`' `bios.gba`) at its very first
+  sub-test, because a handful of the game's own instructions ran before the read under test and
+  each one overwrote the shared field with its own opcode. `GbaBus::bios_open_bus` is the separate,
+  sticky field; since a no-BIOS machine never executes real BIOS code to update it naturally, the
+  four moments GBATEK documents a real BIOS's own trace for — startup, a completed `SWI`, IRQ
+  entry, and IRQ return — are each stamped with their literal documented constant
+  (`system::BIOS_OPCODE_AFTER_STARTUP` and its three neighbours) by the HLE path standing in for
+  that moment.
+- **A masked layer must be excluded from priority resolution, not painted over after it wins.**
+  The GBA compositor resolved the line first and then, for any pixel whose winning layer a window
+  excluded, wrote the backdrop over it. Hardware keeps the excluded layer out of the *contest*, so
+  the next enabled layer down wins — which is a different picture wherever a window is used to
+  filter rather than to hide: text-box interiors, battle HUDs, a cave's light radius, all rendered
+  as hard-edged rectangles of flat backdrop. The contract now lives in
+  `ppu_tile2d::ScanlineBuffer::set`, the single point every renderer commits a pixel through,
+  rather than in each renderer — deliberately, because the GBA composites through *four* paths and
+  the two system-specific ones (affine backgrounds, affine sprites) exist precisely because the
+  shared crate has no notion of a matrix, so a rule enforced per-renderer is a rule they cannot
+  see. That is how the after-the-fact masking got written in the first place.
+- **A compositor test with one drawing layer cannot test ordering.** "Show the layer beneath" and
+  "show the backdrop" are the same pixel when there is only one layer, so such a test passes under
+  either rule — which is why a window test sat green over the bug above. `Scene::two_layers` is the
+  helper; see CONTRIBUTING.md, which now makes two drawing layers a review rule for any test of
+  priority, windows, or blending.
+- **`cargo xtask bench` could not forward `--save-baseline` or `--baseline`.** It ran
+  `cargo bench --workspace`, which also benchmarks every crate's *lib* target, and an ordinary
+  libtest harness rejects criterion's flags outright — so the two flags the command exists to
+  forward, and that prompt 18 requires for any before/after claim, failed before a single benchmark
+  ran. It now names the one criterion target, `-p harness --bench systems`. `--benches` is not
+  enough: a lib target is benchmarked by default too.
+- **Two renderers for one layer must share their state, or they cannot compete.** The GBA drew
+  affine sprites itself (the shared crate has no notion of a matrix) and ordinary ones through
+  `ppu_tile2d::render_sprites`, which kept its claimed-pixel mask private. The two could not see
+  each other, and *three* symptoms followed from that one gap: affine sprites ignored background
+  priority entirely, every ordinary sprite overwrote every affine one whatever the OAM order, and
+  the affine pass ran back-to-front while the shared one ran front-to-back. `ppu_tile2d::SpritePass`
+  now holds the claim and the priority rule, and both renderers interleave in one ordered pass —
+  the same move as putting the window mask on `ScanlineBuffer`, for the same reason.
+- **A decoded field with no consumer is a silent gap, and `grep` is how you find it.**
+  `GraphicsMode::SemiTransparent` was decoded correctly and read nowhere outside its own unit test
+  for as long as it existed, so shadows, water, reflections and battle-move flashes rendered as
+  solid blocks. It is worth grepping any enum variant the decoder produces for a *use* rather than
+  a *match arm*. The rule it encodes: a semi-transparent OBJ is a blend first target whatever
+  `BLDCNT` selects, and forces an alpha blend even where `BLDCNT` asks for a brightness effect —
+  so `under` must be built for it too, not only when the blend mode is already alpha.
+- **The object sheet is 32-byte slots, and a slot does not scale with colour depth.** A 2D-mapping
+  row is 32 slots, so 1024 bytes for every sprite. Scaling by the sprite's own tile size gives 2048
+  at 256 colours — two rows on — and its top row decodes correctly while everything below comes
+  from the wrong place, which reads as scrambled artwork rather than a mapping bug. The same 32-byte
+  unit is what tile numbers count in, which is why a 256-colour sprite's numbers advance by two.
+- **A halted CPU stepping one cycle at a time is correct and up to 280,896 wasted calls a frame.**
+  Real software spends most of a frame in `VBlankIntrWait`, not a plain `Halt`, and the two look
+  identical from `Cpu::step`'s side: both return `Cycles(1)` without touching the bus until
+  something wakes them. `GbaSystem::halt_fast_forward_cycles` predicts the next cycle some enabled
+  source fires — from a scratch copy of the video and timer state, reusing their real `tick`
+  methods rather than a second formula that could disagree — and jumps the bus straight there,
+  then hands off to the same `service_interrupt`/`intercept_bios_call` sequencing the slow path
+  already used to actually dispatch. The one place that sequencing cannot be shortcut further: it
+  is a multi-call handshake (one call masks `CPSR` and points `pc` at the handler; only the *next*
+  call's `service_interrupt` lets `Cpu::step`'s own halt check clear `halted` and run it), so the
+  fast path returns immediately after the jump rather than also calling `cpu.step` on the same
+  call — doing so was tried, and cost an extra cycle relative to the slow path by attempting
+  dispatch a call early, before the jump had raised anything for `service_interrupt` to see.
+  **The predictor itself had the same shape of bug the DMA and video-collapse ones did: it asked
+  a coarser primitive for more than that primitive actually promises.**
+  `video::VideoTiming::tick` only ever stops at a line boundary, by design, because a real
+  instruction never asks it for more than a handful of cycles — but the predictor asks for a whole
+  frame at once, and an uncapped request sailed straight past a mid-line `HBlank` edge to wherever
+  the line ended, up to 272 cycles late. `video::VideoTiming::cycles_until_next_edge` caps each
+  request to the edge instead. An equivalence test running the fast and slow paths side by side and
+  asserting the identical cycle count *and* register state, not merely that both complete, is what
+  caught it — a weaker "does it eventually return" test passes with the overshoot still in it.
+  Measured on the workload this exists for, a `VBlankIntrWait` loop with `HBlank` also enabled:
+  4.74 ms to 33 µs, a 145x reduction; `gba/spin`, which never halts, is unaffected.
+- **The accuracy corpus had three structural holes that let ROMs go permanently untested without
+  anyone noticing, and fixing them immediately found two real GBA save-chip bugs.**
+  `corpus::all_roms()` chained only three of the five ROM lists — `CGB_ROMS` and `GBA_ROMS` were
+  excluded, so the corpus's own validation tests (`every_rom_is_fully_specified`,
+  `rom_names_are_unique`) had never inspected either. `xtask`'s `fetch-test-roms` held a second,
+  hand-copied URL list rather than reading `corpus::all_roms()`, so a ROM added to one and not the
+  other was silently never fetched — which is exactly how the gap above went unnoticed. `xtask` now
+  depends on `harness` for this one function, a real trade-off (it used to build even when the
+  workspace's other crates did not) accepted because a list that provably cannot drift is worth
+  more than that independence. Third: `run_gba_suite`'s pass detector read a settled `PC` plus
+  `R12 == 0` as "every sub-test passed" — but `R12` stays at its power-on value of zero for the
+  *entire* run of a genuine pass too (checked by instrumenting all four ROMs already in the
+  corpus), so a machine wedged at its own cartridge entry point from its very first instruction has
+  the identical signature and was reported as a pass. Fixed by rejecting a settle at the entry
+  point specifically — every real suite settles somewhere inside its own code — proven against a
+  constructed `b .`-from-the-entry-point ROM, not reasoned about.
+- **There was a fourth copy of that list, and it was the suite itself.** `gb_accuracy_suite` in
+  `testing/harness/src/tests.rs` chained the five constants by hand rather than calling
+  `all_roms()`, so a new corpus entry was fetched, validated, and then never run — the same
+  drift as before with the failure mode inverted, and harder to notice, because the ROM is
+  sitting on disk and the suite reports a clean pass without it. It calls `all_roms()` now.
+  Adding sixteen Mooneye entries is what surfaced it: they downloaded, and the suite's totals
+  did not move.
+- **Not every suite publishes per-file ROMs.** Mooneye's repository holds assembler source, it
+  cuts no GitHub releases, and its CI uploads each build as one dated archive, so
+  `fetch-test-roms` grew a `url#member-inside-the-archive` form that pulls a single file out of
+  a zip with `unzip -p`. The archive is downloaded once per run and cached inside the gitignored
+  corpus. The alternative was committing built ROMs, which is the one thing this corpus exists
+  to avoid.
+
+  Adding the `jsmolka/gba-tests` `save/` set once the fetcher could reach it immediately found what
+  it exists to find: `save_sram` fails its first access (fresh SRAM reads `0x00`, which the ROM
+  does not expect), and `save_flash64`/`save_flash128` both fail the same sub-test, consistent with
+  one shared bug in `cart_common::Flash`'s byte-granularity programming rather than two unrelated
+  ones. Diagnosed with an exact traced access sequence and register state in each ROM's
+  `expected_failure` — not root-caused to a specific fix yet, and said so rather than guessed at.
 - When a test fails, suspect the test first. Roughly half the failures in this project have been
   wrong expectations, and each one was worth correcting rather than working around — the
   corrected test usually says something true that the original did not.
@@ -410,31 +584,53 @@ GBA's PSG register layer was stuck on; that one turned out not to be a placement
 timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
 of structure for a little reuse. Worth doing only when a third caller appears.
 
-### The biggest gap
+### PSG audio on the Game Boy Advance is now done
 
-**PSG audio on the Game Boy Advance.** A commercial game now plays through its opening, overworld,
-menus and battles at a measured 100% speed with sound. The loudest thing still missing is that the
-GBA makes sound two ways and only direct sound is wired, so part of a game's mix is silent.
+Closed as of `system-gba::psg` plus `apu_shared::WaveChannel` growing GBA-only additive fields.
+All four PSG channels reach the mix alongside the two FIFO ones — squares 1 and 2, noise 4, and
+now wave channel 3 too, panned and scaled by `SOUNDCNT_L`'s own master volume and attenuated again
+by `SOUNDCNT_H` bits 0-1, the two cascading rather than one overriding the other. What this was
+recorded as for a long time — one decision blocked on moving a shared register layer out of
+`system-gb::apu` and resolving its `GbModel` gating — was **wrong on both counts**: the channels
+were already in `apu-shared` and directly usable, the actual work was a new address decode, and it
+needed none of that gating since the GBA follows the CGB rule throughout.
 
-This was recorded for a long time as blocked on a design decision, and **that framing was wrong**.
-The claim was that the `NR10`-`NR52` register layer is shared, lives in `system-gb::apu`, cannot be
-reached across a `system-*` boundary, and wants moving to `apu-shared` with its `GbModel` gating
-resolved. Checking it: the *channels* — `SquareChannel`, `WaveChannel`, `NoiseChannel`, `Envelope`,
-`Sweep`, `LengthCounter`, `Mixer` — are **already in `apu-shared` and directly usable**. What sits
-in `system-gb::apu` is the **address decode**, and the GBA's is genuinely a different thing: its
-registers are halfwords from `0x0400_0060` laid out with gaps rather than the Game Boy's contiguous
-block, its wave RAM is two banks of sixteen bytes with the CPU seeing whichever is not playing, and
-it has a 75% volume step the Game Boy lacks. So the work is a new register layer over shared
-channels, not a copy of an existing one, and the `GbModel` gating does not apply at all — the GBA
-follows the CGB rule throughout. No decision is needed; write `system-gba::psg`, mix its output into
-`generate_samples` alongside `DirectSound::output`, and scale by `SOUNDCNT_H` bits 0-1.
+Channel 3's one real judgement call, resolved: this machine's wave RAM is two sixteen-byte banks
+with the CPU seeing whichever is not selected for playback, and a 64-sample mode that plays both
+back to back — `apu_shared::WaveChannel` now carries `sample_count`, a second bank, `active_bank`,
+and `force_75_percent` as additive fields defaulting to exactly the Game Boy's single-bank
+behaviour, proven unchanged by `wave_channel_defaults_reproduce_game_boy_hardware_exactly`. Not
+independently verified: which bank the wave-RAM window exposes to the CPU while a 64-sample
+channel plays, where the "expose the bank not currently playing" idiom does not apply the same way
+as it does in 32-sample mode — documented in `psg`'s module docs rather than guessed at.
 
-The one judgement call inside it: the 64-sample wave mode spans both banks, and `apu_shared::WaveChannel`
-holds sixteen bytes and walks 32 samples. Either extend it with a sample count or implement the
-32-sample mode and say the other is not modelled. Prefer extending it — the Game Boy never changes
-the default, and "do not approximate a behaviour you have not modelled" applies to audio too.
+`SOUNDBIAS` is stored and round-trips (`fifo::DirectSound::soundbias`), but its bit-depth and
+sample-rate effect on final output is **not modelled** — this machine's mix has no PWM stage for
+that register to bias, and most games leave it at its default. An audio regression golden now
+exists too (`testing/harness/src/audio_golden.rs`), pinning a hash of each system's own output on
+a small deterministic ROM with a negative control proving an all-silent buffer would fail it — the
+same shape of check that would have caught direct sound's two-week silent outage. It is **not**
+validated against real hardware audio capture the way prompt 2's still-unbuilt framebuffer golden
+manifest is designed to require of picture hashes; said so in its own module docs rather than
+implied.
 
-Then, in order:
+**Save-durability under a panic is now closed, and it took two fixes, not one.** `Cargo.toml`'s
+`[profile.release]` was `panic = "abort"`, which silently voided the design `session.rs`'s
+`Session::stop` documented and relied on: `thread.join().is_err()` only means anything under
+unwinding, and under `abort` the whole process dies the instant any thread panics, before
+`close_rom`'s save-RAM flush gets a chance to run. Switching to `panic = "unwind"` alone was not
+enough, though — `emulation::run`'s loop calls `Emulator::tick` with nothing catching a panic out
+of it, so even with unwinding restored, a panic *during a frame* (the CPU/PPU "indexing bug" class
+this whole audit is chasing) still propagated straight out of `run` with no `close_rom` in between,
+losing whatever save RAM the current debounce window held. `run` now wraps that one call in
+`std::panic::catch_unwind`, flushes on `Err`, and re-raises the same panic with
+`std::panic::resume_unwind` so `join()` still observes and logs it exactly as before.
+`a_panic_mid_frame_still_flushes_dirty_save_ram` (`frontend-core/src/tests.rs`) is the test that
+would have caught either half missing on its own: it dirties SRAM through a real cartridge write
+(not a pre-seeded file, which would pass even with no flush at all), panics the thread on the next
+tick via a `#[cfg(test)]`-only command, and asserts the marker byte reached disk anyway.
+
+Smaller items, in order:
 
 - **Saving works and is confirmed by play**, as of 2026-08-11: a commercial game's in-game save,
   quicksave, and the save-state list were all exercised by hand and all three behave. The chip is
@@ -444,7 +640,10 @@ Then, in order:
   That is what real hardware with a dead battery does, so it is an accurate outcome rather than a
   bug, but time-of-day events never fire. The pins are at `0x080000C4`-`0x080000C8`, currently
   reading as ordinary ROM.
-- **EEPROM saves are reported absent rather than emulated**, and mosaic is not implemented.
+- **EEPROM saves are reported absent rather than emulated.** Mosaic is implemented for text
+  backgrounds and ordinary sprites, both axes; affine backgrounds, the modes 3-5 bitmap layer, and
+  affine sprites are not covered, because all three sample through per-scanline state that is
+  accumulated once and not kept for any line but the latest.
 
 ### The gaps behind it
 
@@ -544,16 +743,24 @@ before/after claim gets made, and prompt 18 requires one for every optimisation.
 
 Each is recorded in the relevant crate's `//!` docs along with why it is open:
 
-- **PSG mixing on the GBA** is now the biggest gap and is *not* blocked on a decision, though it
-  was recorded that way here for a long time. See "The biggest gap" above for why the blocker
-  dissolved on inspection: the channels are already shared, and only the address decode is
-  per-system — which the GBA needs its own of regardless.
-- **Alpha blending on the GBA** now composes its real lower layer, as a second pass over the line
-  with the first-target layers left out. A second `ScanlineBuffer` slot was rejected: that type is
-  shared with the Game Boy, which has no colour effects and would carry the runner-up pixel on every
-  line to no purpose. The pass runs only when an alpha blend is configured. It is exact unless two
-  first-target layers stack, where hardware blends the top with the second and this skips to the
-  third; nothing in the corpus does that.
+- **`SOUNDBIAS`'s bit-depth and sample-rate effect on the GBA** is stored and round-trips but not
+  applied to final output — this machine's mix has no PWM stage for it to bias, and most games
+  leave it at its default. See "PSG audio on the Game Boy Advance is now done" above.
+- **Alpha blending on the GBA** composes its real lower layer as a second pass over the line, with a
+  write mask that excludes — at each pixel — exactly the layer *that pixel's own winner* came from,
+  not every layer `BLDCNT` declares a first target. Excluding declared first targets wholesale was
+  tried first and is a different, narrower question: where a layer is declared both a first and a
+  second target, a common `BLDCNT` shape, it excluded itself from being the answer under its own
+  winning pixel and the pass fell through to whatever was third, or the backdrop — mixing a
+  translucent sprite with the backdrop instead of the artwork it was sitting on. A per-pixel
+  runner-up field on `ScanlineBuffer` was also tried and reverted: `cargo xtask bench --filter gb/`
+  showed even one unconditional `is_empty` check added to `ScanlineBuffer::set` cost the Game Boy a
+  reproducible 1.5-3% on `gb/rendering/frame`, for a branch it never takes — that function runs once
+  per pixel of every layer, densely enough that "one more comparison" is not free. The write-mask
+  approach touches nothing in `ppu-tile2d`, so the Game Boy's compiled code is unchanged by the file,
+  not merely benchmarked as unaffected. The second pass runs only when an alpha blend could actually
+  happen — a configured alpha blend or a semi-transparent sprite on the line — a small minority of
+  lines either way.
 - **`dmg_sound` 09/10/12 and `cgb_sound` 09** need the APU stepped finer than one machine cycle.
 - **`OPRI` is not modelled.** A real CGB can be asked through it to order sprites by X coordinate —
   the DMG rule — while running in colour mode. Nothing reads it, so a game that sets it gets
@@ -563,10 +770,19 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   compare. Two traps, both paid for: dmg-acid2's reference is 2-bit greyscale, so a decoder must
   *scale* samples to 8 bits rather than shifting them left; and screen tile rows are not map tile
   rows once `SCY` is non-zero, which had me reading the wrong 32 bytes of tilemap for a while.
-- Mosaic and EEPROM saves are not implemented. The GBA's object window now is: the mask is built by
-  rendering the `ObjectWindow`-mode sprites into a scratch scanline buffer rather than re-deriving
-  tile addressing, flips, depth and the affine transform a second time — each of which is a place
-  for two paths to drift apart.
+- **EEPROM saves are not implemented.**
+- **Mosaic is implemented for text backgrounds and ordinary sprites, both axes** — the
+  sample-and-hold hardware defines, holding a quantized source line by asking the renderer for it
+  directly (nothing survives between calls) and a quantized source column by resampling a
+  full-resolution scratch render. Affine backgrounds, the modes 3-5 bitmap layer, and affine
+  sprites are not covered: all three sample through per-scanline state accumulated once and kept
+  for no line but the latest, so holding several output lines to one source line would need
+  snapshotting that state at every mosaic block boundary. OBJ mosaic quantizes a sprite's own
+  *local* pixel coordinates rather than its screen position — anchoring the blockiness to the
+  sprite's own top-left corner is what keeps the pattern from visibly swimming as the sprite moves.
+- The GBA's object window is: the mask is built by rendering the `ObjectWindow`-mode sprites into a
+  scratch scanline buffer rather than re-deriving tile addressing, flips, depth and the affine
+  transform a second time — each of which is a place for two paths to drift apart.
 - **Sprite bit depth is per sprite, not per call.** It rides on `ppu_tile2d::Sprite` because bit 13
   of a GBA OAM entry selects 16 or 256 colours and one scanline can hold both. It used to be an
   argument to `render_sprites` and every GBA sprite was rendered as 16-colour; a 256-colour one came

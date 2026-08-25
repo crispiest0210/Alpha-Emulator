@@ -12,6 +12,19 @@ fn system() -> GbaSystem {
     GbaSystem::new(spin_rom(), None).expect("the synthetic ROM is valid")
 }
 
+/// A ROM holding `count` copies of `mov r0, r0` in a row from the entry point.
+///
+/// Cartridge ROM is read-only on real hardware — a bus write to it is a no-op — so a test that
+/// wants specific ROM-resident code has to bake it into the image at construction rather than
+/// writing it in afterward the way RAM tests do.
+fn nop_rom(count: usize) -> Vec<u8> {
+    let mut rom = vec![0u8; 0x1000];
+    for i in 0..count {
+        rom[i * 4..i * 4 + 4].copy_from_slice(&0xE1A0_0000u32.to_le_bytes()); // mov r0, r0
+    }
+    rom
+}
+
 #[test]
 fn a_machine_with_no_bios_starts_at_the_cartridge_entry_point() {
     // The documented post-boot state, so the emulator is usable without a BIOS to source.
@@ -87,6 +100,182 @@ fn audio_is_drained_exactly_once_per_frame() {
     assert!(gba.take_audio_samples().is_empty(), "already taken");
 }
 
+/// The two halves of the sound unit, set up one at a time so the mix can be checked.
+mod sound_mix {
+    use super::*;
+    use crate::fifo::reg as fifo_reg;
+    use crate::psg::reg as psg_reg;
+
+    /// Timer 0, which paces direct sound below.
+    const TIMER_RELOAD: u32 = crate::timers::BASE;
+    const TIMER_CONTROL: u32 = crate::timers::BASE + 2;
+    const TIMER_ENABLE: u16 = 1 << 7;
+
+    /// Channel A at full volume on both sides, paced by timer 0. Bits 0-1 are left clear so the
+    /// PSG's own scaling can be supplied per test.
+    const DIRECT_A_FULL: u16 = (1 << 2) | (1 << 8) | (1 << 9);
+
+    /// Long enough for several samples at 48 kHz — one every 350 CPU cycles or so — and for the
+    /// square wave to move through its duty cycle rather than being caught at one level.
+    const CYCLES: u32 = 20_000;
+
+    /// Arm channel 1 at full volume with a short period, panned to both sides.
+    fn start_psg(bus: &mut GbaSystemBus) {
+        bus.write16(psg_reg::SOUNDCNT_L, 0xFF77);
+        bus.write16(psg_reg::SOUND1CNT_H, 0xF080); // envelope full, no movement, duty 2
+        bus.write16(psg_reg::SOUND1CNT_X, (1 << 15) | 2044); // trigger, a 16 t-cycle period
+    }
+
+    /// Queue direct-sound samples and start the timer that drains them.
+    fn start_direct_sound(bus: &mut GbaSystemBus) {
+        bus.write32(fifo_reg::FIFO_A, 0x7F7F_7F7F);
+        bus.write16(TIMER_RELOAD, 0xFF00);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+    }
+
+    /// One run of the machine with the requested halves playing, returning what came out.
+    fn run(psg: bool, direct: bool, psg_volume_bits: u16) -> Vec<AudioSample> {
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        // The master enable gates both halves, so it goes first whichever is being tested.
+        bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+        bus.write16(fifo_reg::SOUNDCNT_H, DIRECT_A_FULL | psg_volume_bits);
+        if psg {
+            start_psg(bus);
+        }
+        if direct {
+            start_direct_sound(bus);
+        }
+        bus.advance(CYCLES);
+        bus.take_samples().to_vec()
+    }
+
+    fn peak(samples: &[AudioSample]) -> f32 {
+        samples.iter().fold(0.0f32, |m, s| m.max(s.left.abs()))
+    }
+
+    #[test]
+    fn a_sample_put_into_the_psg_comes_out_of_the_other_end_of_the_mix() {
+        // Written the way direct sound's own absence should have been. That channel accepted
+        // every byte DMA delivered and dropped it on the floor for two weeks, and nothing
+        // failed, because no test asserted that audio put in comes back out. The PSG had the
+        // same hole from the far end: four channels generating a waveform that
+        // `generate_samples` never summed, so `psg_volume` sat there with no caller at all.
+        let samples = run(true, false, 2);
+        assert!(!samples.is_empty(), "no samples at all");
+        assert!(
+            peak(&samples) > 0.0,
+            "the PSG was triggered and produced nothing"
+        );
+    }
+
+    #[test]
+    fn direct_sound_and_the_psg_both_appear_in_the_final_mix() {
+        // Each alone must be audible, and the two together must be the sum — not one of them
+        // winning, and not one of them quietly missing under the other.
+        let psg_only = run(true, false, 2);
+        let direct_only = run(false, true, 2);
+        let both = run(true, true, 2);
+
+        assert!(peak(&psg_only) > 0.0, "the PSG half is silent");
+        assert!(peak(&direct_only) > 0.0, "the direct-sound half is silent");
+        assert_eq!(both.len(), psg_only.len());
+
+        for (index, sample) in both.iter().enumerate() {
+            let summed = psg_only[index].left + direct_only[index].left;
+            assert!(
+                (sample.left - summed).abs() < 1e-6,
+                "sample {index}: {} is not {} + {}",
+                sample.left,
+                psg_only[index].left,
+                direct_only[index].left
+            );
+        }
+    }
+
+    #[test]
+    fn soundcnt_h_scales_the_psg_contribution_a_quarter_a_half_or_not_at_all() {
+        // Two cascaded volume controls: this one multiplies whatever `SOUNDCNT_L`'s master
+        // volume already produced, so the check is proportionality across the three settings
+        // rather than "louder than zero" at each.
+        let quarter = run(true, false, 0);
+        let half = run(true, false, 1);
+        let full = run(true, false, 2);
+        let prohibited = run(true, false, 3);
+
+        assert!(peak(&full) > 0.0);
+        for index in 0..full.len() {
+            let reference = full[index].left;
+            assert!(
+                (half[index].left * 2.0 - reference).abs() < 1e-6,
+                "sample {index}: {} is not half of {reference}",
+                half[index].left
+            );
+            assert!(
+                (quarter[index].left * 4.0 - reference).abs() < 1e-6,
+                "sample {index}: {} is not a quarter of {reference}",
+                quarter[index].left
+            );
+            // The fourth setting is prohibited on hardware and treated as silence rather than
+            // as full volume, so a game landing there by accident gets nothing, not a burst.
+            assert_eq!(prohibited[index].left, 0.0, "sample {index}");
+        }
+    }
+
+    #[test]
+    fn the_master_enable_gates_the_psg_as_well_as_direct_sound() {
+        // One bit in `SOUNDCNT_X` switches the whole sound unit off on hardware, and it lives in
+        // the direct-sound block — so the PSG has to be told, rather than owning the address a
+        // second time.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+        bus.write16(fifo_reg::SOUNDCNT_H, 2);
+        start_psg(bus);
+        bus.advance(CYCLES);
+        assert!(peak(bus.take_samples()) > 0.0);
+
+        bus.write16(fifo_reg::SOUNDCNT_X, 0);
+        assert!(!bus.psg.is_powered(), "the PSG followed the enable bit");
+        bus.advance(CYCLES);
+        assert_eq!(peak(bus.take_samples()), 0.0, "and went quiet with it");
+    }
+
+    #[test]
+    fn psg_register_state_survives_a_save_state_round_trip() {
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(fifo_reg::SOUNDCNT_X, 1 << 7);
+            bus.write16(fifo_reg::SOUNDCNT_H, 1);
+            start_psg(bus);
+            bus.write16(psg_reg::SOUND4CNT_L, 0xF000);
+            bus.write16(psg_reg::SOUND4CNT_H, (1 << 15) | 0x0042);
+            bus.advance(CYCLES);
+            bus.take_samples();
+        }
+        let state = gba.save_state();
+
+        let mut restored = system();
+        restored.load_state(&state).expect("the state is valid");
+        assert_eq!(restored.bus().psg, gba.bus().psg);
+        assert_eq!(
+            restored.bus().psg.read16(psg_reg::SOUNDCNT_L),
+            Some(0xFF77),
+            "the register block came back too, not just the channels"
+        );
+
+        // And the two must go on producing identical audio, which is what a field left out of
+        // `save` breaks even when the comparison above passes.
+        gba.bus_mut().advance(CYCLES);
+        restored.bus_mut().advance(CYCLES);
+        assert_eq!(
+            restored.bus_mut().take_samples(),
+            gba.bus_mut().take_samples()
+        );
+    }
+}
+
 #[test]
 fn the_cpu_reaches_every_region_through_one_bus() {
     let mut gba = system();
@@ -155,7 +344,15 @@ fn the_display_renders_through_the_compositor() {
     let mut gba = system();
     {
         let bus = gba.bus_mut();
-        bus.write16(crate::video::reg::DISPCNT, 3); // bitmap mode
+        bus.write16(crate::video::reg::DISPCNT, 3 | (1 << 10)); // bitmap mode, background 2 enabled
+                                                                // A bitmap mode is background 2 sampled through its affine transform, so a real game
+                                                                // sets it to the identity before relying on the picture landing where it was drawn — the
+                                                                // same registers an affine tile background uses.
+        bus.write16(crate::affine::BG2_BASE, 1 << crate::affine::FRACTIONAL_BITS); // pa
+        bus.write16(
+            crate::affine::BG2_BASE + 6,
+            1 << crate::affine::FRACTIONAL_BITS,
+        ); // pd
         for x in 0..240u32 {
             bus.write16(0x0600_0000 + x * 2, 0x001F); // red
         }
@@ -163,6 +360,42 @@ fn the_display_renders_through_the_compositor() {
     gba.step_frame(InputState::default());
     assert_eq!(gba.framebuffer().pixel(0, 0).r, 0xFF);
     assert_eq!(gba.framebuffer().pixel(239, 0).r, 0xFF);
+}
+
+#[test]
+fn a_multi_line_advance_renders_every_line_it_crosses_not_only_the_last() {
+    // `video::tests` checks this at the timing layer in isolation; this drives it through the
+    // real system, where a step spanning several lines used to render only the last of them —
+    // the same collapsed edge, but visible as stale or missing rows rather than a wrong count.
+    let mut gba = system();
+    {
+        let bus = gba.bus_mut();
+        bus.write16(crate::video::reg::DISPCNT, 3 | (1 << 10)); // bitmap mode 3, background 2 on
+        bus.write16(crate::affine::BG2_BASE, 1 << crate::affine::FRACTIONAL_BITS); // pa
+        bus.write16(
+            crate::affine::BG2_BASE + 6,
+            1 << crate::affine::FRACTIONAL_BITS,
+        ); // pd
+        for y in 0..3u32 {
+            for x in 0..240u32 {
+                bus.write16(0x0600_0000 + (y * 240 + x) * 2, 0x001F); // red
+            }
+        }
+        // Exactly three lines' worth of cycles, in one call.
+        bus.advance(crate::video::CYCLES_PER_LINE * 3);
+    }
+    for y in 0..3u32 {
+        assert_eq!(
+            gba.framebuffer().pixel(0, y).r,
+            0xFF,
+            "row {y} was rendered"
+        );
+    }
+    assert_eq!(
+        gba.framebuffer().pixel(0, 3).a,
+        0,
+        "row 3 was not reached by this step, so still untouched"
+    );
 }
 
 #[test]
@@ -426,6 +659,29 @@ fn an_instruction_costs_what_the_hardware_charges_for_it() {
     // The same instruction from external WRAM, which is a 16-bit bus with two wait states: two
     // accesses at three cycles each.
     assert_eq!(cost_at(0x0200_1000, 0xE080_0000), 6, "external WRAM");
+
+    // The prefetch case: a run of sequential fetches from ROM, with `WAITCNT`'s buffer bit set,
+    // costs full price once and then the minimum ever after — the same shape of bug as the rest
+    // of this test guards against, just the opposite direction. Overcharging every sequential ROM
+    // fetch is invisible the same way undercharging IWRAM was: no test fails and the speed reading
+    // stays at 100%, because a frame is still a fixed number of cycles. What a game loses is
+    // however much of its processor the buffer was supposed to give back.
+    let mut gba = GbaSystem::new(nop_rom(3), None).expect("the synthetic ROM is valid");
+    let base = 0x0800_0000u32;
+    gba.bus_mut().write16(crate::waitstates::WAITCNT, 1 << 14);
+    gba.cpu_mut().regs.set_pc(base);
+    gba.bus_mut().take_pending_waits();
+
+    let first = gba.step_instruction().get();
+    let second = gba.step_instruction().get();
+    let third = gba.step_instruction().get();
+    assert!(first > 1, "the first fetch of a run is never free: {first}");
+    // Exactly 1: the same free rate as the IWRAM case above, not merely "cheaper than the first" —
+    // a sequential ROM access is already cheaper than a jump even with no prefetch at all, so a
+    // weaker comparison here would not actually tell the buffer's discount from that baseline
+    // difference.
+    assert_eq!(second, 1, "primed by the first fetch, the second is free");
+    assert_eq!(third, 1, "and stays free as the run continues");
 }
 
 #[test]
@@ -658,5 +914,676 @@ fn disassemble_at(system: &GbaSystem, addr: u32, thumb: bool) -> String {
     match decoded {
         Some(i) => format!("{addr:08X}  {word}  {}", i.text),
         None => format!("{addr:08X}  {word}  ??"),
+    }
+}
+
+/// The `IntrWait` tests share one small machine: a main loop that waits and counts, and an
+/// interrupt handler that acknowledges `IF` the way a real one does.
+///
+/// Both halves matter. A handler that does not acknowledge leaves the source pending, so the
+/// machine re-enters it forever and no test below can distinguish a correct wait from a wrong one.
+mod intr_wait {
+    use super::*;
+
+    /// Where the game leaves its handler, and where these tests assemble one.
+    const HANDLER: u32 = 0x0300_0100;
+    /// The counter the main loop keeps. `r4` survives the interrupt wrapper, which pushes only the
+    /// registers the procedure standard lets a callee clobber.
+    const COUNTER: usize = 4;
+
+    /// A main loop of `SWI <call>; add r4, r4, #1; b .-16`.
+    ///
+    /// `r4` therefore counts *completed waits*, which is the one number every test here is about:
+    /// a wait that returns on the wrong interrupt shows up as a count in the hundreds.
+    fn rom_waiting_on(call: u8) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x1000];
+        for (index, word) in [
+            0xEF00_0000 | (call as u32) << 16, // swi <call>
+            0xE284_4001,                       // add r4, r4, #1
+            0xEAFF_FFFC,                       // b back to the swi
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            rom[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        rom
+    }
+
+    /// A machine running that loop, with an interrupt handler that acknowledges `IF`.
+    ///
+    /// `enabled` goes into `IE` and picks the matching `DISPSTAT` enables; `r0` and `r1` are the
+    /// call's arguments, which for `SWI 0x04` are the discard flag and the mask.
+    fn machine(call: u8, enabled: u16, r0: u32, r1: u32) -> GbaSystem {
+        let mut gba = GbaSystem::new(rom_waiting_on(call), None).expect("the ROM is valid");
+        {
+            let bus = gba.bus_mut();
+            bus.write32(crate::irq::HLE_HANDLER_POINTER, HANDLER);
+
+            let mut status = 0;
+            if enabled & crate::irq::source::VBLANK != 0 {
+                status |= crate::video::dispstat::VBLANK_IRQ;
+            }
+            if enabled & crate::irq::source::HBLANK != 0 {
+                status |= crate::video::dispstat::HBLANK_IRQ;
+            }
+            bus.write16(crate::video::reg::DISPSTAT, status);
+            bus.write16(crate::irq::reg::IE, enabled);
+            bus.write16(crate::irq::reg::IME, 1);
+
+            // ldr r0, [pc, #12] / ldrh r1, [r0] / strh r1, [r0] / bx lr, then the address of `IF`.
+            // Writing `IF` back over itself is how this hardware acknowledges: a one clears.
+            for (offset, word) in [
+                (0x00, 0xE59F_000C),
+                (0x04, 0xE1D0_10B0),
+                (0x08, 0xE1C0_10B0),
+                (0x0C, 0xE12F_FF1E),
+                (0x14, crate::irq::reg::IF),
+            ] {
+                bus.write32(HANDLER + offset, word);
+            }
+        }
+        gba.cpu.set_reg(0, r0);
+        gba.cpu.set_reg(1, r1);
+        gba
+    }
+
+    fn run_frames(gba: &mut GbaSystem, frames: usize) -> u32 {
+        for _ in 0..frames {
+            gba.step_frame(InputState::default());
+        }
+        gba.cpu().reg(COUNTER)
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_on_vertical_blank_and_not_on_the_horizontal_one() {
+        // The bug this whole change exists for. With `HBlank` also enabled — which is most
+        // commercial software, using it for raster effects — a `VBlankIntrWait` implemented as a
+        // plain halt returns on whichever interrupt happens to be next. That is up to 160 returns
+        // a frame instead of one, and every symptom downstream of frame pacing follows from it.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        let completed = run_frames(&mut gba, 3);
+        assert!(
+            (1..=3).contains(&completed),
+            "three frames should complete about three waits, not {completed} — \
+             a count in the hundreds means it returned on every HBlank"
+        );
+    }
+
+    #[test]
+    fn intr_wait_returns_on_a_source_it_named_and_not_on_one_it_did_not() {
+        // A multi-bit mask naming vertical blank and a timer, while horizontal blank is *enabled*
+        // but unnamed. Only the named one may end the wait.
+        let mask = crate::irq::source::VBLANK | crate::irq::source::TIMER0;
+        let mut gba = machine(
+            0x04,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            1,
+            mask as u32,
+        );
+        let completed = run_frames(&mut gba, 3);
+        assert!(
+            (1..=3).contains(&completed),
+            "{completed} completions means the unnamed HBlank was ending the wait"
+        );
+    }
+
+    #[test]
+    fn the_interrupt_path_records_what_it_serviced_and_the_wait_consumes_it() {
+        // The two halves of the flag word's contract, which only work as a pair: the interrupt
+        // path sets a bit, and the wait that was asking for it clears that bit and no other.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        assert_eq!(
+            gba.bus_mut().read16(crate::bios::INTRWAIT_FLAGS),
+            0,
+            "nothing has been serviced yet"
+        );
+
+        run_frames(&mut gba, 2);
+        let flags = gba.bus_mut().read16(crate::bios::INTRWAIT_FLAGS);
+        assert_eq!(
+            flags & crate::irq::source::HBLANK,
+            crate::irq::source::HBLANK,
+            "HBlank was serviced and nothing asked for it, so it stays set"
+        );
+        assert_eq!(
+            flags & crate::irq::source::VBLANK,
+            0,
+            "but VBlank was consumed by the wait that was asking for it"
+        );
+    }
+
+    #[test]
+    fn a_wait_for_an_interrupt_that_is_never_enabled_does_not_livelock() {
+        // Hardware hangs here, and so does this — deliberately. What must not happen is the
+        // frontend hanging with it: `step_frame` is bounded, so the frame comes back regardless
+        // and the machine is left visibly sitting on its `SWI` rather than wedging the process.
+        let mut gba = machine(
+            0x04,
+            crate::irq::source::VBLANK,
+            1,
+            crate::irq::source::SERIAL as u32,
+        );
+        let completed = run_frames(&mut gba, 2);
+        assert_eq!(completed, 0, "nothing can satisfy it, so it never returns");
+        assert!(
+            core_common::DebugTarget::is_halted(&gba),
+            "and it is sitting in the wait rather than having run off somewhere"
+        );
+    }
+
+    #[test]
+    fn a_state_saved_mid_wait_resumes_into_the_wait_rather_than_restarting_it() {
+        // Where a game spends most of its time is inside this call, so most quicksaves land here.
+        // Restoring into a *fresh* call would discard the flags the wait had already begun on,
+        // which costs a frame; restoring with the mask intact resumes the same wait.
+        let mut gba = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        gba.step_frame(InputState::default());
+        assert_eq!(
+            gba.intr_wait,
+            Some(crate::irq::source::VBLANK),
+            "the frame ended with the machine waiting"
+        );
+
+        let state = gba.save_state();
+        let mut restored = machine(
+            0x05,
+            crate::irq::source::VBLANK | crate::irq::source::HBLANK,
+            0,
+            0,
+        );
+        restored.load_state(&state).expect("the state is valid");
+        assert_eq!(restored.intr_wait, gba.intr_wait);
+
+        gba.step_frame(InputState::default());
+        restored.step_frame(InputState::default());
+        assert_eq!(
+            restored.cpu().reg(COUNTER),
+            gba.cpu().reg(COUNTER),
+            "and it completed the same number of waits from there"
+        );
+    }
+
+    #[test]
+    fn halt_still_wakes_on_any_interrupt_at_all() {
+        // Pinned because `Halt` used to share an arm with the two waits above, and splitting that
+        // arm is exactly the kind of change that quietly takes the other case with it. `Halt` has
+        // no mask: whatever the controller raises wakes it.
+        let mut gba = machine(0x02, crate::irq::source::HBLANK, 0, 0);
+        let completed = run_frames(&mut gba, 1);
+        assert!(
+            completed > 1,
+            "HBlank alone should wake a plain Halt many times a frame, not {completed}"
+        );
+    }
+
+    #[test]
+    fn the_fast_forward_halt_lands_at_the_same_state_as_the_one_cycle_slow_path() {
+        // Not just faster: this asserts the two paths agree, cycle for cycle and instruction
+        // count for instruction count, on where a halted machine ends up. A predictor that landed
+        // even one cycle short or long of the real wake edge would still pass every other test
+        // here, since they only check that a wait eventually completes, not exactly when.
+        let mut fast = machine(0x02, crate::irq::source::VBLANK, 0, 0);
+        let mut slow = machine(0x02, crate::irq::source::VBLANK, 0, 0);
+        slow.disable_halt_fast_forward = true;
+
+        let mut fast_calls = 0u32;
+        let mut fast_cycles = 0u64;
+        while fast.cpu().reg(COUNTER) < 3 {
+            fast_cycles += fast.step_instruction().get();
+            fast_calls += 1;
+            assert!(
+                fast_calls < 10_000,
+                "the fast path should reach three waits in far fewer calls than this"
+            );
+        }
+
+        let mut slow_calls = 0u32;
+        let mut slow_cycles = 0u64;
+        while slow.cpu().reg(COUNTER) < 3 {
+            slow_cycles += slow.step_instruction().get();
+            slow_calls += 1;
+        }
+
+        assert_eq!(
+            fast_cycles, slow_cycles,
+            "the two paths must land on the same total cycle count"
+        );
+        assert_eq!(
+            fast.cpu().regs,
+            slow.cpu().regs,
+            "and the same register state"
+        );
+        assert!(
+            fast_calls < slow_calls / 100,
+            "the whole point is skipping the one-cycle-at-a-time calls: {fast_calls} fast \
+             vs {slow_calls} slow"
+        );
+    }
+
+    #[test]
+    fn the_fast_forward_reaches_a_vblank_intr_wait_the_same_way_it_reaches_a_plain_halt() {
+        // `VBlankIntrWait` under an also-enabled `HBlank` is the case the fast path has to get
+        // right and a plain `Halt` cannot exercise: `intercept_bios_call` re-enters `bios::dispatch`
+        // on every step while the wait is in progress, so the fast path has to run *before* that
+        // interception or it never reaches this call shape at all — the bug this test would have
+        // caught, since `Halt` alone cannot see it (a `Halt` never calls `intercept_bios_call` a
+        // second time). And the machine still has to take the same repeated detours through the
+        // handler that HBlank forces on real hardware, landing on the same state either way.
+        let enabled = crate::irq::source::VBLANK | crate::irq::source::HBLANK;
+        let mut fast = machine(0x05, enabled, 0, 0);
+        let mut slow = machine(0x05, enabled, 0, 0);
+        slow.disable_halt_fast_forward = true;
+
+        let mut fast_calls = 0u32;
+        let mut fast_cycles = 0u64;
+        while fast.cpu().reg(COUNTER) < 2 {
+            fast_cycles += fast.step_instruction().get();
+            fast_calls += 1;
+            assert!(
+                fast_calls < 100_000,
+                "the fast path should reach two waits in far fewer calls than this"
+            );
+        }
+
+        let mut slow_calls = 0u32;
+        let mut slow_cycles = 0u64;
+        while slow.cpu().reg(COUNTER) < 2 {
+            slow_cycles += slow.step_instruction().get();
+            slow_calls += 1;
+        }
+
+        assert_eq!(
+            fast_cycles, slow_cycles,
+            "the two paths must land on the same total cycle count"
+        );
+        assert_eq!(
+            fast.cpu().regs,
+            slow.cpu().regs,
+            "and the same register state"
+        );
+        assert!(
+            fast_calls < slow_calls / 50,
+            "the whole point is skipping the one-cycle-at-a-time calls: {fast_calls} fast \
+             vs {slow_calls} slow"
+        );
+    }
+}
+
+/// HBlank DMA does not run during vertical blanking, only the interrupt does.
+///
+/// Driven straight at `GbaSystemBus::advance` rather than through the CPU: one call per scanline
+/// gives exactly one hblank edge per call, which is what a real instruction stream also produces
+/// — no instruction costs anywhere near the 272 cycles between hblank start and a line's end, so
+/// `video::VideoTiming::tick` never has to fold more than one edge into a single report outside a
+/// test built to call it a whole line at a time, as this one deliberately does.
+mod hblank_dma {
+    use super::*;
+
+    /// Channel 0's registers, and the control bits this test needs. `dma::control` is private to
+    /// that module, so the bits actually in use are named here instead of imported.
+    const SOURCE: u32 = crate::dma::BASE;
+    const DESTINATION: u32 = crate::dma::BASE + 4;
+    const WORD_COUNT: u32 = crate::dma::BASE + 8;
+    const CONTROL: u32 = crate::dma::BASE + 10;
+    /// Source fixed (bits 7-8 = 2), repeat (bit 9), HBlank timing (bits 12-13 = 2), enable (bit
+    /// 15). Destination step is left at its default, `Increment`.
+    const ARM_HBLANK_REPEATING_FIXED_SOURCE: u16 = 0x0100 | 0x0200 | 0x2000 | 0x8000;
+
+    /// A single halfword this test recognises, so counting how many destination slots hold it
+    /// counts how many transfers actually ran — the closest a test outside `dma.rs` can get to
+    /// counting `DmaController::take_transfer` calls directly.
+    const MARK: u16 = 0xAAAA;
+    const SOURCE_ADDR: u32 = 0x0200_0000;
+    const DEST_BASE: u32 = 0x0200_1000;
+
+    /// Arm channel 0 to copy [`MARK`] into successive halfwords on every HBlank, repeating.
+    fn arm_marking_channel(gba: &mut GbaSystem) {
+        let bus = gba.bus_mut();
+        bus.memory.write16(SOURCE_ADDR, MARK);
+        bus.write32(SOURCE, SOURCE_ADDR);
+        bus.write32(DESTINATION, DEST_BASE);
+        bus.write16(WORD_COUNT, 1);
+        bus.write16(CONTROL, ARM_HBLANK_REPEATING_FIXED_SOURCE);
+    }
+
+    /// How many consecutive marked halfwords sit at `DEST_BASE`, i.e. how many transfers ran.
+    fn marks_written(gba: &mut GbaSystem) -> u32 {
+        let mut count = 0u32;
+        while gba.bus_mut().memory.read16(DEST_BASE + count * 2) == Some(MARK) {
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn hblank_dma_runs_on_the_hundred_and_sixty_visible_lines_and_no_more() {
+        let mut gba = system();
+        arm_marking_channel(&mut gba);
+
+        // Driven a dot at a time and counted by `VCOUNT` rather than as a fixed number of
+        // line-sized advances. Each transfer now costs cycles of its own, so 228 calls of one
+        // line each land eight cycles per visible line past the frame boundary — well into line 0
+        // of the next frame, whose HBlank then writes a hundred and sixty-first mark.
+        let mut lines = 0;
+        while lines < crate::video::LINES_PER_FRAME {
+            let before = gba.bus().video.vcount();
+            gba.bus_mut().advance(crate::video::CYCLES_PER_DOT);
+            if gba.bus().video.vcount() != before {
+                lines += 1;
+            }
+        }
+
+        assert_eq!(
+            marks_written(&mut gba),
+            crate::video::SCREEN_HEIGHT,
+            "one transfer per visible line, none during the 68 lines of vertical blanking"
+        );
+    }
+
+    #[test]
+    fn the_hblank_interrupt_still_fires_during_vertical_blanking() {
+        // DMA arming is gated on the visible lines; the interrupt line is a separate signal and
+        // must not be, or a game using HBlank purely for an interrupt-driven effect during
+        // VBlank — rare, but real — would stop being told about it.
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(
+                crate::video::reg::DISPSTAT,
+                crate::video::dispstat::HBLANK_IRQ,
+            );
+            bus.write16(crate::irq::reg::IE, crate::irq::source::HBLANK);
+            bus.write16(crate::irq::reg::IME, 1);
+        }
+
+        // Every visible line's own HBlank interrupt fires along the way; run past all of them and
+        // acknowledge before isolating a line that is entirely inside vertical blanking.
+        for _ in 0..crate::video::SCREEN_HEIGHT {
+            gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        }
+        gba.bus_mut()
+            .irq
+            .write16(crate::irq::reg::IF, crate::irq::source::ALL);
+        assert_eq!(gba.bus_mut().irq.read16(crate::irq::reg::IF), Some(0));
+
+        // One more full line: entirely inside VBlank, so this is the interrupt under test.
+        gba.bus_mut().advance(crate::video::CYCLES_PER_LINE);
+        assert_eq!(
+            gba.bus_mut().irq.read16(crate::irq::reg::IF).unwrap() & crate::irq::source::HBLANK,
+            crate::irq::source::HBLANK,
+            "HBlank still interrupts in VBlank even though its DMA no longer arms there"
+        );
+    }
+}
+
+/// A transfer takes time, and the machine runs *through* it rather than around it.
+///
+/// DMA used to copy its whole block inside one `while` loop in zero emulated cycles: the display
+/// stood still, no timer ticked, and the CPU paid nothing for a burst that on hardware holds the
+/// bus for most of a scanline. The tests here pin the cost and the three things that were wrong
+/// downstream of it.
+mod dma_timing {
+    use super::*;
+
+    /// Channel 0's registers. `dma::control` is private to that module, so the bits in use are
+    /// named here rather than imported.
+    const SOURCE: u32 = crate::dma::BASE;
+    const DESTINATION: u32 = crate::dma::BASE + 4;
+    const WORD_COUNT: u32 = crate::dma::BASE + 8;
+    const CONTROL: u32 = crate::dma::BASE + 10;
+    /// Enable (bit 15) and 32-bit units (bit 10). Timing bits clear, so it starts immediately.
+    const START_NOW_IN_WORDS: u16 = 0x8000 | 0x0400;
+
+    /// Timer 0's two registers, and the two control bits these tests need.
+    const TIMER_RELOAD: u32 = crate::timers::BASE;
+    const TIMER_CONTROL: u32 = crate::timers::BASE + 2;
+    const TIMER_ENABLE: u16 = 1 << 7;
+    const TIMER_IRQ: u16 = 1 << 6;
+
+    const IWRAM: u32 = 0x0300_0000;
+    const VRAM: u32 = 0x0600_0000;
+
+    /// The transfer under test: 240 32-bit units from internal WRAM to video RAM, which is one
+    /// scanline of a mode 3 bitmap and the shape a game's per-frame blit actually has.
+    ///
+    /// Two cycles of startup, then a 1-cycle IWRAM read and a 2-cycle VRAM write for each unit —
+    /// VRAM being on a 16-bit bus, so a word is two accesses there and one here.
+    const WORDS: u16 = 240;
+    const EXPECTED_CYCLES: u32 = 2 + WORDS as u32 * (1 + 2);
+
+    /// Arm channel 0 for that transfer. The final store is what runs it, immediately.
+    fn run_the_transfer(bus: &mut GbaSystemBus) {
+        bus.write32(SOURCE, IWRAM);
+        bus.write32(DESTINATION, VRAM);
+        bus.write16(WORD_COUNT, WORDS);
+        bus.write16(CONTROL, START_NOW_IN_WORDS);
+    }
+
+    #[test]
+    fn a_transfer_costs_startup_plus_a_read_and_a_write_for_every_unit() {
+        // Measured with timer 0 at prescaler 1, which is a cycle counter with hardware's name on
+        // it: if the machine did not advance, neither did the count.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(TIMER_RELOAD, 0);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+
+        run_the_transfer(bus);
+        assert_eq!(
+            bus.timers.counter(0) as u32,
+            EXPECTED_CYCLES,
+            "722 cycles: two of startup and three for each of the 240 units"
+        );
+    }
+
+    #[test]
+    fn a_transfer_advances_the_display_through_itself() {
+        // The acceptance question in its plainest form: does `VCOUNT` move? Parked 600 cycles
+        // into line 0 first, so the 722 the transfer takes have to carry the beam over the
+        // 1232-cycle line boundary rather than merely along it.
+        let mut gba = system();
+        gba.bus_mut().advance(600);
+        assert_eq!(gba.bus().video.vcount(), 0, "still on the first line");
+
+        run_the_transfer(gba.bus_mut());
+        assert_eq!(
+            gba.bus().video.vcount(),
+            1,
+            "600 + 722 cycles is past the end of line 0"
+        );
+    }
+
+    #[test]
+    fn a_timer_overflow_inside_a_transfer_lands_where_it_falls_rather_than_after_it() {
+        // Sixteen cycles from overflowing, reloading to zero, asking for an interrupt. The
+        // interrupt is the visible half; the counter afterwards is what says *when*.
+        let mut gba = system();
+        {
+            let bus = gba.bus_mut();
+            bus.write16(crate::irq::reg::IE, crate::irq::source::timer(0));
+            bus.write16(crate::irq::reg::IME, 1);
+            bus.write16(TIMER_RELOAD, 0xFFF0);
+            bus.write16(TIMER_CONTROL, TIMER_ENABLE | TIMER_IRQ);
+            bus.write16(TIMER_RELOAD, 0);
+        }
+
+        run_the_transfer(gba.bus_mut());
+        let bus = gba.bus_mut();
+        assert_ne!(
+            bus.irq.read16(crate::irq::reg::IF).unwrap() & crate::irq::source::timer(0),
+            0,
+            "the overflow raised its interrupt"
+        );
+        assert_eq!(
+            bus.timers.counter(0) as u32,
+            EXPECTED_CYCLES - 16,
+            "sixteen cycles into the transfer, not at the end of it"
+        );
+    }
+
+    #[test]
+    fn n_timer_overflows_in_one_advance_pop_n_fifo_samples() {
+        // A reload of 0xFFFF at prescaler 1 overflows on every single cycle, which is the
+        // cheapest way to ask for more than one overflow in one call. It is also what a bitmask
+        // return cannot express: four overflows arrive as one bit, and channel A advances by one
+        // sample where hardware advanced by four.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write16(crate::fifo::reg::SOUNDCNT_X, 1 << 7);
+        for _ in 0..2 {
+            bus.write32(crate::fifo::reg::FIFO_A, 0x0403_0201);
+        }
+        assert_eq!(bus.sound.a.len(), 8, "eight samples queued");
+
+        bus.write16(TIMER_RELOAD, 0xFFFF);
+        bus.write16(TIMER_CONTROL, TIMER_ENABLE);
+        bus.advance(4);
+
+        assert_eq!(
+            bus.sound.a.len(),
+            4,
+            "four overflows in one call, four samples popped"
+        );
+    }
+
+    #[test]
+    fn a_transfer_does_not_charge_its_wait_states_to_whatever_runs_next() {
+        // External WRAM is the expensive end of the map — six cycles for a word — so a burst of
+        // it is unmistakable if it lands on the wrong account. It used to: every wait state a
+        // transfer incurred sat in `pending_waits` until the *next instruction* took the lot,
+        // and the latch it left behind made that instruction's fetch look like a jump too.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        bus.write32(SOURCE, 0x0200_0000);
+        bus.write32(DESTINATION, 0x0200_2000);
+        bus.write16(WORD_COUNT, 64);
+        bus.take_pending_waits();
+
+        bus.write16(CONTROL, START_NOW_IN_WORDS);
+        assert_eq!(
+            bus.take_pending_waits(),
+            0,
+            "an I/O store waits for nothing, and the transfer's accesses are the transfer's"
+        );
+        assert_eq!(
+            bus.next_sequential_address(),
+            CONTROL + 2,
+            "the latch sits just past the store the CPU made, not inside the copy"
+        );
+    }
+
+    #[test]
+    fn a_transfer_that_re_arms_itself_terminates_instead_of_recursing() {
+        // The pathological input the re-entrancy guard exists for: a channel whose destination is
+        // its own control register, copying an enable bit into it. Every completed block arms the
+        // same channel again from inside `write16_routed`'s DMA hook, which used to call straight
+        // back into `run_pending_dma` — unbounded recursion, and a stack overflow rather than a
+        // failed assertion. It now finishes the block, picks the re-armed channel up from the
+        // drain loop, and gives the bus back after a frame's worth of cycles so the machine can
+        // be traced rather than hung.
+        let mut gba = system();
+        let bus = gba.bus_mut();
+        // Immediate, 16-bit units, enabled: the value the copy will keep writing to CONTROL.
+        bus.memory.write16(0x0200_0000, 0x8000);
+        bus.write32(SOURCE, 0x0200_0000);
+        bus.write32(DESTINATION, CONTROL);
+        bus.write16(WORD_COUNT, 1);
+        // Source and destination both fixed (bits 7-8 and 5-6 = 2), enabled, immediate.
+        bus.write16(CONTROL, 0x0100 | 0x0040 | 0x8000);
+
+        assert!(
+            bus.take_dma_cycles() >= FRAME_CYCLES as u32,
+            "it ran until the progress bound rather than for ever"
+        );
+    }
+}
+
+/// There is no floating bus on a `None`-typed emulated read: an unmapped address, or the BIOS
+/// read from outside it, has to answer *something*, and hardware answers with whatever it last
+/// fetched. Driven from `GbaSystem::update_open_bus`, called once per `step_instruction` from the
+/// program counter about to run.
+mod open_bus {
+    use super::*;
+
+    /// A physical address nothing in this crate maps, so a read here can only be open bus.
+    const UNMAPPED: u32 = 0x1000_0000;
+
+    #[test]
+    fn an_unmapped_read_returns_the_last_arm_word_fetched() {
+        // `system()`'s ROM is `b .` (0xEAFF_FFFE) at the cartridge entry, in ARM state.
+        let mut gba = system();
+        gba.step_instruction();
+        assert_eq!(
+            gba.bus_mut().memory.read32(UNMAPPED),
+            Some(0xEAFF_FFFE),
+            "open bus mirrors the last instruction fetched"
+        );
+    }
+
+    #[test]
+    fn an_unmapped_read_returns_the_last_thumb_halfword_duplicated_into_both_halves() {
+        let mut gba = system();
+        {
+            gba.cpu.cpsr.set_thumb(true);
+            // Internal WRAM rather than the cartridge entry: ROM writes are no-ops, and this test
+            // needs to plant its own instruction.
+            gba.cpu.regs.set_pc(0x0300_0000);
+            gba.bus_mut().write16(0x0300_0000, 0xE7FE); // Thumb `b .`
+        }
+        gba.step_instruction();
+        assert_eq!(
+            gba.bus_mut().memory.read32(UNMAPPED),
+            Some(0xE7FE_E7FE),
+            "a Thumb fetch is a halfword; open bus duplicates it into both halves of the word"
+        );
+    }
+}
+
+/// The BIOS is visible only to code executing inside it, and `GbaSystem::update_in_bios`
+/// recomputes that per step rather than trusting a flag latched once at construction.
+mod in_bios {
+    use super::*;
+
+    #[test]
+    fn a_read_of_bios_space_from_outside_it_is_refused_even_with_a_bios_loaded() {
+        let mut bios = vec![0u8; 0x4000];
+        // A byte only the real BIOS image has, so a leak is unmistakable.
+        bios[0] = 0x5A;
+        let mut gba = GbaSystem::new(spin_rom(), Some(bios)).unwrap();
+
+        // Sanity check: the boot state starts at the reset vector, inside the BIOS, so its
+        // content is visible from there.
+        assert_eq!(
+            gba.bus_mut().memory.read8(0),
+            Some(0x5A),
+            "the BIOS is visible to code running inside it"
+        );
+
+        // Move execution to the cartridge — well outside the BIOS's 16 KiB — and take one step,
+        // which is what `update_in_bios` keys off.
+        gba.cpu.regs.set_pc(CARTRIDGE_ENTRY);
+        gba.step_instruction();
+
+        assert_ne!(
+            gba.bus_mut().memory.read8(0),
+            Some(0x5A),
+            "BIOS content leaked to code running outside the BIOS"
+        );
     }
 }

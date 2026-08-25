@@ -200,6 +200,29 @@ pub struct WaveChannel {
     /// [`WaveChannel::wave_ram_access`].
     since_fetch: u32,
     pub length: LengthCounter,
+
+    // -- GBA-only fields, additive with Game Boy defaults --------------------------------------
+    //
+    // A GBA channel 3 is genuinely different hardware: two 16-byte banks rather than one, a
+    // 64-sample mode that plays both back to back, and a fourth volume step the Game Boy lacks.
+    // Rather than a second, parallel implementation that would drift from this one, these are
+    // added as fields that default to exactly what a Game Boy always has — one bank, 32 samples,
+    // no 75% step — so a caller that never touches them, `system-gb::apu` included, cannot
+    // observe any difference. `wave_channel_defaults_reproduce_game_boy_hardware_exactly` in this
+    // module's tests is the check that keeps that true.
+    /// The second 16-byte bank. Unused, and always zero, on a Game Boy — which has one.
+    pub wave_ram_bank1: [u8; WAVE_RAM_BYTES],
+    /// Samples in one waveform cycle: 32 on a Game Boy, or a GBA channel playing one bank; 64 on
+    /// a GBA channel playing both banks back to back. `position` walks `0..sample_count` instead
+    /// of the fixed `0..32` a Game Boy always has.
+    pub sample_count: u8,
+    /// GBA only: which bank plays when `sample_count` is 32. Ignored once `sample_count` is 64,
+    /// where playback always walks bank 0 then bank 1 in that order. Always `false` (bank 0) on a
+    /// Game Boy, which has no second bank to select.
+    pub active_bank: bool,
+    /// GBA only: force 75% output regardless of `volume_shift` — the fourth volume step the Game
+    /// Boy's two-bit field cannot reach. Always `false` on a Game Boy, which has no such bit.
+    pub force_75_percent: bool,
 }
 
 impl Default for WaveChannel {
@@ -220,6 +243,10 @@ impl WaveChannel {
             timer: 1,
             since_fetch: 0,
             length: LengthCounter::new(256),
+            wave_ram_bank1: [0; WAVE_RAM_BYTES],
+            sample_count: 32,
+            active_bank: false,
+            force_75_percent: false,
         }
     }
 
@@ -235,7 +262,10 @@ impl WaveChannel {
         self.since_fetch = self.since_fetch.saturating_add(cycles);
         while self.timer <= 0 {
             self.timer += self.period();
-            self.position = (self.position + 1) % 32;
+            // `sample_count` rather than a fixed 32: a Game Boy never changes it from that
+            // default, so this is exactly the old behaviour there, and a GBA channel in
+            // 64-sample mode walks twice as far before wrapping.
+            self.position = (self.position + 1) % self.sample_count;
             self.since_fetch = 0;
         }
     }
@@ -282,18 +312,42 @@ impl WaveChannel {
         if !self.enabled || !self.dac_enabled {
             return 0;
         }
-        let byte = self.wave_ram[(self.position / 2) as usize];
+        // In 64-sample mode the first half of the cycle is bank 0 and the second is bank 1,
+        // regardless of `active_bank`; in 32-sample mode `active_bank` alone picks which bank
+        // plays. A Game Boy always takes the `else` branch of both, with `sample_count` fixed
+        // at 32 and `active_bank` fixed at `false` — exactly the single-bank lookup this had
+        // before either field existed.
+        let bank = if self.sample_count > 32 {
+            if self.position < 32 {
+                &self.wave_ram
+            } else {
+                &self.wave_ram_bank1
+            }
+        } else if self.active_bank {
+            &self.wave_ram_bank1
+        } else {
+            &self.wave_ram
+        };
+        let index_in_bank = self.position % 32;
+        let byte = bank[(index_in_bank / 2) as usize];
         // The high nibble is the *earlier* sample of the pair.
-        let sample = if self.position.is_multiple_of(2) {
+        let sample = if index_in_bank.is_multiple_of(2) {
             byte >> 4
         } else {
             byte & 0x0F
         };
-        match self.volume_shift {
-            0 => 0,
-            1 => sample,
-            2 => sample >> 1,
-            _ => sample >> 2,
+        if self.force_75_percent {
+            // GBA only: overrides `volume_shift` entirely rather than becoming a fifth match arm
+            // on it, because that is what the hardware bit does — a fourth volume step the Game
+            // Boy's two-bit field has no code point for at all.
+            (sample * 3) / 4
+        } else {
+            match self.volume_shift {
+                0 => 0,
+                1 => sample,
+                2 => sample >> 1,
+                _ => sample >> 2,
+            }
         }
     }
 
@@ -314,6 +368,16 @@ impl Savable for WaveChannel {
         w.write_i32(self.timer);
         w.write_u32(self.since_fetch);
         self.length.save(w);
+        // Added for the GBA's channel 3. Written even for a Game Boy, at their fixed defaults,
+        // rather than skipped: a caller-conditional field layout is exactly the kind of thing
+        // that silently drifts between a struct's shape and what it actually serializes. Every
+        // caller of this type must bump its own top-level state version alongside this change,
+        // since the byte layout changed for all of them — `system-gb::system::STATE_VERSION`'s
+        // history is the precedent to follow.
+        w.write_bytes(&self.wave_ram_bank1);
+        w.write_u8(self.sample_count);
+        w.write_bool(self.active_bank);
+        w.write_bool(self.force_75_percent);
     }
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.enabled = r.read_bool()?;
@@ -325,6 +389,10 @@ impl Savable for WaveChannel {
         self.timer = r.read_i32()?;
         self.since_fetch = r.read_u32()?;
         self.length.load(r)?;
+        r.read_bytes(&mut self.wave_ram_bank1)?;
+        self.sample_count = r.read_u8()?;
+        self.active_bank = r.read_bool()?;
+        self.force_75_percent = r.read_bool()?;
         Ok(())
     }
 }
@@ -656,6 +724,123 @@ mod tests {
         let mut ch = WaveChannel::new();
         ch.length.write_length(0);
         assert_eq!(ch.length.counter, 256);
+    }
+
+    #[test]
+    fn wave_channel_defaults_reproduce_game_boy_hardware_exactly() {
+        // The check the GBA-only fields' whole design rests on: `sample_count`, `active_bank`,
+        // and `force_75_percent` at their `WaveChannel::new` defaults must be provably invisible
+        // to a Game Boy caller, not merely "probably fine because the other wave tests still
+        // pass" — those tests exercise the same code paths the defaults do and would not catch a
+        // default that quietly changed, only one that broke outright. This pins the full
+        // thirty-two-sample cycle against a hand-computed reference built the same way
+        // `armed_wave` is, independently of any of `output`'s own branches, so a mistake in the
+        // bank-selection logic that happened to leave a Game Boy's *simple* cases unaffected
+        // still shows up here.
+        let mut ch = armed_wave();
+        assert_eq!(ch.sample_count, 32, "the Game Boy's only mode");
+        assert!(!ch.active_bank, "there is no second bank to select");
+        assert!(!ch.force_75_percent, "no such bit exists on this hardware");
+
+        // Reference built from the raw wave-RAM byte pattern `armed_wave` documents (sample n
+        // holds value n % 16), independently of `output()` itself.
+        let mut levels = Vec::with_capacity(32);
+        let period = (2048 - ch.frequency as u32) * 2;
+        levels.push(ch.output());
+        for _ in 0..31 {
+            ch.tick(period);
+            levels.push(ch.output());
+        }
+        let full_volume: Vec<u8> = (0..32).map(|i: usize| (i % 16) as u8).collect();
+        assert_eq!(levels, full_volume, "volume_shift 1 is full, unattenuated");
+
+        ch.volume_shift = 2;
+        ch.trigger();
+        let mut halved = Vec::with_capacity(32);
+        halved.push(ch.output());
+        for _ in 0..31 {
+            ch.tick(period);
+            halved.push(ch.output());
+        }
+        let expected_halved: Vec<u8> = full_volume.iter().map(|&v| v >> 1).collect();
+        assert_eq!(
+            halved, expected_halved,
+            "volume_shift 2 halves every sample"
+        );
+    }
+
+    #[test]
+    fn a_gba_channel_in_sixty_four_sample_mode_plays_bank_zero_then_bank_one() {
+        let mut ch = WaveChannel::new();
+        ch.dac_enabled = true;
+        ch.volume_shift = 1;
+        ch.sample_count = 64;
+        ch.wave_ram = [0x11; WAVE_RAM_BYTES]; // every bank-0 sample is 1
+        ch.wave_ram_bank1 = [0x22; WAVE_RAM_BYTES]; // every bank-1 sample is 2
+        ch.frequency = 2046;
+        ch.trigger();
+
+        let period = (2048 - ch.frequency as u32) * 2;
+        assert_eq!(ch.output(), 1, "sample 0 is bank 0");
+        for _ in 0..31 {
+            ch.tick(period);
+        }
+        assert_eq!(ch.output(), 1, "sample 31 is still bank 0");
+        ch.tick(period);
+        assert_eq!(ch.output(), 2, "sample 32 crosses into bank 1");
+        for _ in 0..31 {
+            ch.tick(period);
+        }
+        assert_eq!(ch.output(), 2, "sample 63 is still bank 1");
+        ch.tick(period);
+        assert_eq!(ch.output(), 1, "sample 64 wraps back to bank 0");
+    }
+
+    #[test]
+    fn active_bank_only_matters_in_thirty_two_sample_mode() {
+        let mut ch = WaveChannel::new();
+        ch.dac_enabled = true;
+        ch.volume_shift = 1;
+        ch.wave_ram = [0x11; WAVE_RAM_BYTES];
+        ch.wave_ram_bank1 = [0x22; WAVE_RAM_BYTES];
+        ch.frequency = 2046;
+
+        ch.active_bank = true;
+        ch.trigger();
+        assert_eq!(ch.output(), 2, "32-sample mode: active_bank picks bank 1");
+
+        ch.sample_count = 64;
+        ch.trigger();
+        assert_eq!(
+            ch.output(),
+            1,
+            "64-sample mode always starts from bank 0, active_bank or not"
+        );
+    }
+
+    #[test]
+    fn force_75_percent_overrides_volume_shift_entirely() {
+        let mut ch = WaveChannel::new();
+        ch.dac_enabled = true;
+        ch.wave_ram = [0xFF; WAVE_RAM_BYTES]; // every sample is 15, the loudest nibble
+        ch.trigger();
+
+        for shift in [0u8, 1, 2, 3] {
+            ch.volume_shift = shift;
+            ch.force_75_percent = true;
+            assert_eq!(
+                ch.output(),
+                11,
+                "shift {shift}: 15 * 3 / 4 regardless of the two-bit field"
+            );
+        }
+
+        ch.force_75_percent = false;
+        assert_eq!(
+            ch.output(),
+            3,
+            "shift 3 (quarter) applies once the override is off"
+        );
     }
 
     // -- Noise ---------------------------------------------------------------

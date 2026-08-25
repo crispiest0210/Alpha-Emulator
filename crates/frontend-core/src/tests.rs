@@ -69,6 +69,25 @@ impl Fixture {
         path
     }
 
+    /// An MBC1 cartridge with battery-backed RAM whose entry point actually writes to it, unlike
+    /// [`Self::battery_rom`]'s plain spin loop — needed to put dirty save RAM behind a debounce
+    /// for a test to catch mid-flush, rather than only ever exercising an already-clean save.
+    fn battery_writing_rom(&self, name: &str, marker: u8) -> PathBuf {
+        let path = self.dir.join(name);
+        let mut rom = spin_rom("BATTERYWRITE", 0x03, 0x02);
+        let code: &[u8] = &[
+            0x3E, 0x0A, //       ld a, $0A
+            0xEA, 0x00, 0x00, // ld ($0000), a  ; MBC1 RAM enable
+            0x3E, marker, //     ld a, marker
+            0xEA, 0x00, 0xA0, // ld ($A000), a  ; dirty one byte of SRAM
+            0x18, 0xFE, //       jr -2          ; spin
+        ];
+        rom[0x0100..0x0100 + code.len()].copy_from_slice(code);
+        rom[0x014D] = cart_common::GbHeader::header_checksum(&rom);
+        std::fs::write(&path, rom).unwrap();
+        path
+    }
+
     fn session(&self) -> Session {
         Session::spawn(SessionOptions::new(self.paths.clone(), Config::default()))
     }
@@ -595,6 +614,88 @@ fn a_save_file_of_the_wrong_size_is_reported_and_does_not_stop_the_load() {
     });
     // The cartridge still runs; a mismatched save is not a reason to refuse to play.
     wait_frame(&mut session, 3);
+}
+
+#[test]
+fn an_untouched_save_file_survives_an_explicit_close() {
+    // Not a panic-recovery test: this ROM never touches SRAM, so nothing here is dirty and
+    // `close_rom` has nothing to flush. What it checks is narrower and still worth pinning —
+    // that closing a ROM does not truncate or corrupt a save file already on disk.
+    // `a_panic_mid_frame_still_flushes_dirty_save_ram` below is the actual crash-recovery test.
+    let fixture = Fixture::new("saveramclose");
+    let rom = fixture.battery_rom("battery.gb");
+    let save = fixture.paths.save_file(&rom);
+
+    let save_data = vec![0x42u8; 8192];
+    std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+    std::fs::write(&save, &save_data).unwrap();
+
+    let session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom.clone(),
+        rom_id: None,
+    });
+    wait_status(&session, SessionStatus::Running);
+
+    session.send(SessionCommand::CloseRom);
+    wait_event(&session, "RomClosed", |event| {
+        matches!(event, SessionEvent::RomClosed).then_some(())
+    });
+
+    assert!(
+        save.exists(),
+        "an existing save file must survive an explicit ROM close"
+    );
+    assert_eq!(
+        std::fs::read(&save).unwrap(),
+        save_data,
+        "the save file contents must be preserved"
+    );
+}
+
+#[test]
+fn a_panic_mid_frame_still_flushes_dirty_save_ram() {
+    // The actual property prompt 17 exists for: a core panic during `Emulator::tick` — the
+    // "PPU indexing bug" class this project's audit is chasing — must not take a dirty,
+    // not-yet-debounced save-RAM write down with it. `battery_writing_rom` dirties SRAM through
+    // real cartridge writes (not a pre-seeded file, which would pass even with `close_rom`
+    // never called at all), `TestPanicOnNextTick` panics the very next `tick`, and the assertion
+    // is that the marker byte the ROM wrote reaches disk anyway, via the `catch_unwind` in `run`.
+    let fixture = Fixture::new("savarampanic");
+    let rom = fixture.battery_writing_rom("batterywrite.gb", 0x77);
+    let save = fixture.paths.save_file(&rom);
+    assert!(!save.exists(), "nothing on disk yet");
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom.clone(),
+        rom_id: None,
+    });
+    wait_status(&session, SessionStatus::Running);
+    // A few frames so the entry point's RAM-enable and write have certainly executed at least
+    // once before the panic lands.
+    wait_frame(&mut session, 3);
+
+    session.send(SessionCommand::TestPanicOnNextTick);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.is_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        !session.is_alive(),
+        "the emulation thread should have panicked and died"
+    );
+
+    assert!(
+        save.exists(),
+        "dirty save RAM must reach disk even though the thread that owned it panicked"
+    );
+    let contents = std::fs::read(&save).unwrap();
+    assert_eq!(
+        contents[0], 0x77,
+        "the marker byte the ROM wrote before the panic must be the one on disk"
+    );
 }
 
 // --- rewind ---------------------------------------------------------------------------------

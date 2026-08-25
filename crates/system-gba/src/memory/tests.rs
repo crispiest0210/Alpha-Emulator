@@ -115,10 +115,12 @@ fn the_bios_answers_only_code_running_inside_it() {
 }
 
 #[test]
-fn a_machine_with_no_bios_reads_the_region_as_open_bus() {
+fn a_machine_with_no_bios_reads_the_region_as_bios_open_bus() {
+    // Not the general open-bus field: BIOS reads from outside the BIOS are the BIOS's *own*
+    // sticky last-fetched value, a separate mechanism — see `bios_open_bus`.
     let mut bus = GbaBus::new(None);
     bus.set_in_bios(true);
-    bus.set_open_bus(0xDEAD_BEEF);
+    bus.set_bios_open_bus(0xDEAD_BEEF);
     assert_eq!(bus.read8(0x00), Some(0xEF));
 }
 

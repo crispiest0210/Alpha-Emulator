@@ -175,6 +175,11 @@ pub enum SessionCommand {
     SetProgramCounter(u32),
     /// Stop the thread. Sent automatically when the `Session` is dropped.
     Shutdown,
+    /// Test-only: panic the emulation thread deliberately, in [`Emulator::tick`](crate::emulation),
+    /// to verify that `run`'s panic recovery still flushes save RAM before the thread dies. Does
+    /// not exist in a release build — there is no other way to reach this from outside the crate.
+    #[cfg(test)]
+    TestPanicOnNextTick,
 }
 
 /// Notifications from the emulation thread.
@@ -332,7 +337,10 @@ impl Session {
         let _ = self.commands.send(SessionCommand::Shutdown);
         if let Some(thread) = self.thread.take() {
             // A panicked emulation thread must not take the frontend down with it during a
-            // window close; the panic has already been reported by the default hook.
+            // window close; with panic = "unwind" (see Cargo.toml [profile.release]), the panic
+            // unwinds through the thread and is reported by the default hook. The frontend survives
+            // to log the panic via join().is_err() and clean up gracefully, including flushing
+            // save RAM before exit.
             if thread.join().is_err() {
                 tracing::error!("the emulation thread panicked");
             }

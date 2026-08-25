@@ -39,11 +39,19 @@ use crate::apu::GbApu;
 use crate::cgb::CgbState;
 use crate::joypad::{Joypad, JOYP};
 use crate::memory::{io, GbBus, GbModel};
+use crate::oam_dma::{MemoryBus, OamDma, DMA as OAM_DMA};
 use crate::ppu::{self, GbPpu};
-use crate::timing::{interrupt, reg as timing_reg, GbTiming, TimingOutput, CLOCK_HZ};
+use crate::timing::{interrupt, reg as timing_reg, GbTiming, PpuMode, TimingOutput, CLOCK_HZ};
 
 /// Bumped on any change to what this system serializes, including in a subsystem it owns.
-const STATE_VERSION: u32 = 2;
+///
+/// 2 added the CGB-specific state. 3 is `apu_shared::WaveChannel` gaining GBA-only fields
+/// (a second wave-RAM bank, a sample count, a 75% volume step) that this system's own channel
+/// always writes at their fixed Game Boy defaults — the fields change nothing this machine does,
+/// but the byte layout every save state carries changed for every caller of that type at once.
+/// 4 is the OAM DMA becoming a transfer that takes time: a state saved mid-transfer has to
+/// carry how far through it is, where before there was no such moment to be in.
+const STATE_VERSION: u32 = 4;
 
 /// Everything the CPU can reach, plus the subsystems that run on their own schedule.
 pub struct GbSystemBus {
@@ -54,6 +62,9 @@ pub struct GbSystemBus {
     pub joypad: Joypad,
     /// The CGB-only register blocks. Inert on a DMG, where nothing routes to them.
     pub cgb: CgbState,
+
+    /// The sprite-memory transfer behind `FF46`, which runs while the CPU does.
+    pub oam_dma: OamDma,
 
     /// The debugger's access recorder. Records nothing until a watchpoint arms it.
     ///
@@ -83,10 +94,6 @@ pub struct GbSystemBus {
 const SERIAL_DATA: u16 = 0xFF01;
 const SERIAL_CONTROL: u16 = 0xFF02;
 
-/// `0xFF46`: writing a page number copies 160 bytes into OAM.
-const OAM_DMA: u16 = 0xFF46;
-const OAM_BYTES: u16 = 0xA0;
-
 impl GbSystemBus {
     fn new(model: GbModel, mapper: Box<dyn cart_common::Mapper>) -> Self {
         Self {
@@ -96,6 +103,7 @@ impl GbSystemBus {
             apu: GbApu::for_model(model),
             joypad: Joypad::new(),
             cgb: CgbState::new(),
+            oam_dma: OamDma::new(),
             watch: AccessLog::new(),
             serial_output: Vec::new(),
             speed_remainder: 0,
@@ -103,17 +111,79 @@ impl GbSystemBus {
         }
     }
 
-    /// Copy 160 bytes into OAM.
+    /// Move the OAM DMA along by `cycles` t-cycles of CPU time.
     ///
-    /// On hardware this takes 640 cycles, during which the CPU can only reach HRAM — which is
-    /// why games jump to a routine there and spin. The copy is performed at once here: the
-    /// bytes that land are identical, and the only observable difference is for code that
-    /// reads OAM *during* the transfer, which is undefined behavior no game relies on.
-    fn oam_dma(&mut self, page: u8) {
-        let source = (page as u32) << 8;
-        for offset in 0..OAM_BYTES {
-            let byte = self.read8(source + offset as u32);
-            self.memory.oam_mut()[offset as usize] = byte;
+    /// Driven by the CPU's own clock rather than by [`GbSystemBus::advance`], because the
+    /// transfer is tied to the CPU and not to the machine: it is 160 machine cycles at either
+    /// speed, which is 640 dots on a DMG and 320 on a CGB running double-speed. Feeding it the
+    /// halved machine clock instead would make it take twice as long in CPU terms up there.
+    ///
+    /// The DMA reads through the memory map directly rather than through [`Bus::read8`]. It is
+    /// not a CPU access: it must not be recorded by a watchpoint, it must not be answered by an
+    /// I/O register, and above all it must not be blocked by the very lockout it is causing.
+    fn step_oam_dma(&mut self, cycles: u64) {
+        if self.oam_dma.is_idle() {
+            return;
+        }
+        for _ in 0..cycles {
+            if let Some(copy) = self.oam_dma.step() {
+                let byte = self.memory.read8(copy.source as u32);
+                self.memory.oam_mut()[copy.offset as usize] = byte;
+            }
+        }
+    }
+
+    /// Whether the CPU is locked out of `addr` at this instant.
+    ///
+    /// Two independent mechanisms land here because they answer the same question and the CPU
+    /// cannot tell them apart: a read that is locked out reads `0xFF` and a write that is
+    /// locked out is dropped, whichever one is responsible.
+    fn cpu_locked_out(&self, addr: u16) -> bool {
+        self.dma_locks_out(addr) || self.ppu_locks_out(addr)
+    }
+
+    /// Lockout from a running OAM DMA.
+    ///
+    /// A transfer occupies one of the two memory buses — whichever its source is on — and only
+    /// contending accesses are locked out. This is not a detail: mooneye's `oam_dma_start`
+    /// starts a VRAM-sourced transfer and then runs its `RST $38` handler out of the cartridge
+    /// while that transfer is still going, which is only possible because a video-bus transfer
+    /// leaves the external bus alone.
+    ///
+    /// OAM is locked out regardless of source, because the DMA is writing it.
+    fn dma_locks_out(&self, addr: u16) -> bool {
+        let Some(busy) = self.oam_dma.busy_bus() else {
+            return false;
+        };
+        match MemoryBus::of(addr) {
+            // I/O and HRAM are internal to the CPU, which is why the wait loop every game uses
+            // can sit in HRAM and still reach `FF46` while its own transfer runs.
+            MemoryBus::Internal => false,
+            MemoryBus::Video if (0xFE00..=0xFE9F).contains(&addr) => true,
+            bus => bus == busy,
+        }
+    }
+
+    /// Lockout from the PPU's current mode.
+    ///
+    /// The PPU has priority over the CPU for the memory it is reading, so the CPU is shut out
+    /// of VRAM while pixels are being transferred, and out of OAM for that plus the sprite
+    /// scan that precedes it. With the LCD off the PPU reads nothing and everything is open,
+    /// which is why a game's setup code can fill VRAM freely before switching the display on.
+    fn ppu_locks_out(&self, addr: u16) -> bool {
+        if !self.timing.ppu.lcd_enabled {
+            return false;
+        }
+        let mode = self.timing.ppu.mode;
+        match addr {
+            0x8000..=0x9FFF => mode == PpuMode::Drawing,
+            0xFE00..=0xFE9F => matches!(mode, PpuMode::OamScan | PpuMode::Drawing),
+            // Colour palette RAM is read by the PPU only while it draws. Its index registers
+            // `BCPS`/`OCPS` stay reachable throughout; only the data ports close.
+            crate::cgb::palettes::reg::BCPD | crate::cgb::palettes::reg::OCPD => {
+                self.memory.model.uses_colour_palettes() && mode == PpuMode::Drawing
+            }
+            _ => false,
         }
     }
 
@@ -132,8 +202,8 @@ impl GbSystemBus {
     /// Move one 16-byte block, then charge the time it took.
     fn copy_dma_block(&mut self, block: crate::cgb::Block) {
         for offset in 0..block.length {
-            let byte = self.read8((block.source + offset) as u32);
-            self.write8((block.destination + offset) as u32, byte);
+            let byte = self.dma_read8((block.source + offset) as u32);
+            self.dma_write8((block.destination + offset) as u32, byte);
         }
         // Eight machine cycles per block at single speed. It is charged rather than ignored
         // because a game that streams a tile set during HBlank is budgeting against it: an
@@ -201,7 +271,13 @@ impl Bus for GbSystemBus {
     /// `record` call inside each of the eight arms it dispatches to — one of those would eventually
     /// be forgotten, and a watchpoint that misses one region is worse than no watchpoint at all.
     fn read8(&mut self, addr: u32) -> u8 {
-        let value = self.read_routed(addr);
+        // Recorded even when locked out, and recorded as the `0xFF` the CPU actually saw: a
+        // watchpoint that stayed silent here would hide the most confusing reads on the machine.
+        let value = if self.cpu_locked_out(addr as u16) {
+            0xFF
+        } else {
+            self.read_routed(addr)
+        };
         self.watch.record(addr, AccessKind::Read, value);
         value
     }
@@ -213,7 +289,11 @@ impl Bus for GbSystemBus {
     /// ignores half its bits those are different answers.
     fn write8(&mut self, addr: u32, value: u8) {
         self.watch.record(addr, AccessKind::Write, value);
-        self.write_routed(addr, value);
+        // Dropped rather than deferred. Hardware gives the write nowhere to wait: the memory it
+        // was aimed at belongs to the PPU or to a DMA for as long as the lockout lasts.
+        if !self.cpu_locked_out(addr as u16) {
+            self.write_routed(addr, value);
+        }
     }
 
     /// The CPU reports each machine cycle here as it happens.
@@ -235,6 +315,11 @@ impl Bus for GbSystemBus {
         // Every SM83 access is four t-cycles, so the halving is exact and the remainder below
         // stays at zero on real code paths. It is carried anyway, because silently dropping a
         // cycle would show up as slow clock drift that is very hard to trace back to here.
+        // Before the clock is halved, and before the access this cycle is reporting happens:
+        // the transfer runs on the CPU's clock, and whether it has the bus is decided by where
+        // it has got to by the time the access lands.
+        self.step_oam_dma(cycles.get());
+
         let divisor = self.cgb.speed.cpu_multiplier();
         let total = cycles.get() + self.speed_remainder;
         self.speed_remainder = total % divisor;
@@ -273,6 +358,21 @@ impl Bus for GbSystemBus {
 /// The address routing, split out so [`Bus::read8`] and [`Bus::write8`] can record every
 /// access in one place each.
 impl GbSystemBus {
+    /// A hardware transfer's read: routed and recorded exactly like the CPU's, but not subject
+    /// to the lockouts, because the lockouts are what a transfer *does* to the CPU rather than
+    /// something it obeys itself.
+    fn dma_read8(&mut self, addr: u32) -> u8 {
+        let value = self.read_routed(addr);
+        self.watch.record(addr, AccessKind::Read, value);
+        value
+    }
+
+    /// The write half of [`GbSystemBus::dma_read8`].
+    fn dma_write8(&mut self, addr: u32, value: u8) {
+        self.watch.record(addr, AccessKind::Write, value);
+        self.write_routed(addr, value);
+    }
+
     fn read_routed(&mut self, addr: u32) -> u8 {
         let addr16 = addr as u16;
         match addr16 {
@@ -330,8 +430,10 @@ impl GbSystemBus {
                 }
             }
             OAM_DMA => {
+                // The register keeps the written page whatever the transfer then does with it,
+                // which is the whole of what mooneye's `oam_dma/reg_read` checks.
                 self.memory.write8(addr, value);
-                self.oam_dma(value);
+                self.oam_dma.request(value);
             }
             _ if self.memory.model.has_cgb_hardware() && CgbState::owns(addr16) => {
                 if self.cgb.write_register(addr16, value) {
@@ -371,6 +473,7 @@ impl Savable for GbSystemBus {
         // depend on the model would mean a state file whose shape you cannot know until you
         // have already read part of it.
         self.cgb.save(w);
+        self.oam_dma.save(w);
         w.write_u64(self.speed_remainder);
     }
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -380,6 +483,7 @@ impl Savable for GbSystemBus {
         self.apu.load(r)?;
         self.joypad.load(r)?;
         self.cgb.load(r)?;
+        self.oam_dma.load(r)?;
         self.speed_remainder = r.read_u64()?;
         Ok(())
     }
@@ -574,6 +678,8 @@ impl System for GbSystem {
         self.bus.ppu.reset();
         self.bus.apu.reset();
         self.bus.joypad = Joypad::new();
+        // Otherwise a reset mid-transfer leaves the new machine copying the old one's sprites.
+        self.bus.oam_dma = OamDma::new();
         self.bus.serial_output.clear();
         self.save_ram_dirty = false;
         self.apply_startup_state();

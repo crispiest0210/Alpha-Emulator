@@ -44,6 +44,12 @@ impl Scene {
     }
 
     /// Fill tile 1 with colour index 1 and point layer `index`'s map cell (0,0) at it.
+    ///
+    /// **One drawing layer, so this cannot test ordering.** With a single layer, "show the layer
+    /// beneath" and "show the backdrop" are the same pixel — which is exactly how a window test
+    /// passed for months while the compositor masked layers *after* resolving the line instead of
+    /// excluding them from resolution. Any test about priority, windows, or blending wants
+    /// [`Scene::two_layers`]; this one is for scenes where only one layer is the point.
     fn simple_layer(&mut self, index: usize, priority: u16, screen_block: usize) {
         for row in 0..8 {
             self.vram[0x20 + row * 4] = 0x11;
@@ -60,6 +66,50 @@ impl Scene {
         );
         self.video
             .write16(reg::DISPCNT, self.video.dispcnt | (1 << (8 + index)));
+    }
+
+    /// Two text layers covering the same eight pixels, in different palettes.
+    ///
+    /// `front` is given priority 0 and `behind` priority 1, so `front` wins wherever both draw.
+    /// They share one solid tile but their map cells name different palettes, so the rendered
+    /// colour says *which layer won* rather than merely that something drew — the distinction a
+    /// one-layer scene cannot make, and the reason the compositor's ordering bug went unseen.
+    ///
+    /// `front` renders as palette entry 1 and `behind` as entry 17; a caller sets those two
+    /// colours to tell them apart, and palette entry 0 to see the backdrop.
+    fn two_layers(&mut self, front: usize, behind: usize) {
+        // One solid tile of colour index 1, shared by both layers.
+        for row in 0..8 {
+            self.vram[0x20 + row * 4..0x20 + row * 4 + 4].copy_from_slice(&[0x11; 4]);
+        }
+        for (priority, (index, palette)) in [(front, 0u16), (behind, 1u16)].into_iter().enumerate()
+        {
+            // Distinct screen blocks so the two map cells cannot collide.
+            let block = 8 + priority;
+            let cell = block * SCREEN_BLOCK;
+            // Tile 1, with the palette number in bits 12-15 of the map entry.
+            self.vram[cell..cell + 2].copy_from_slice(&(1u16 | (palette << 12)).to_le_bytes());
+            self.backgrounds.write16(
+                crate::background::CONTROL_BASE + index as u32 * 2,
+                priority as u16 | ((block as u16) << 8),
+            );
+            self.video
+                .write16(reg::DISPCNT, self.video.dispcnt | (1 << (8 + index)));
+        }
+    }
+
+    /// Enable background 2 — the bitmap's slot in modes 3-5 — and give it the identity transform,
+    /// which is what every game that does not mean to rotate its bitmap sets up before relying on
+    /// the picture landing where it was drawn.
+    ///
+    /// Mode and the background 2 enable bit are genuinely separate registers on hardware, so this
+    /// only sets the enable bit; a caller picks the mode through [`Scene::new`] as usual, and a
+    /// test that wants to check the enable bit's own effect writes `DISPCNT` directly instead of
+    /// calling this.
+    fn enable_bitmap(&mut self) {
+        self.video
+            .write16(reg::DISPCNT, self.video.dispcnt | (1 << 10));
+        self.affine[0].matrix = crate::affine::IDENTITY;
     }
 
     fn frame(&self) -> Frame<'_> {
@@ -209,8 +259,154 @@ fn forced_blank_shows_white_and_ignores_every_layer() {
 #[test]
 fn a_bitmap_mode_draws_the_bitmap_rather_than_a_tile_layer() {
     let mut scene = Scene::new(3);
+    scene.enable_bitmap();
     scene.vram[0..2].copy_from_slice(&GREEN.to_le_bytes());
     assert_eq!(scene.render(0).pixel(0, 0).g, 0xFF);
+}
+
+#[test]
+fn a_rotated_mode_three_bitmap_samples_a_different_texture_pixel_per_column() {
+    // A bitmap mode is background 2 wearing a direct-colour format; it is sampled through the
+    // very same affine transform an affine tile background is, so a matrix other than the
+    // identity must visibly rotate the picture. Writing the bitmap straight to the framebuffer —
+    // what this used to do — could never produce that: the matrix would simply never be
+    // consulted, whatever the registers held.
+    let mut scene = Scene::new(3);
+    scene.enable_bitmap();
+    // Swap the axes: screen column x samples texture row x of column 0, instead of column x of
+    // row 0 as the identity transform would.
+    scene.affine[0].matrix.pa = 0;
+    scene.affine[0].matrix.pc = 1 << crate::affine::FRACTIONAL_BITS;
+    // A marker at texture column 0, row 5 — screen column 5 finds it only through the rotation;
+    // under the identity transform screen column 5 would instead read texture column 5, row 0,
+    // which is untouched.
+    let offset = 5 * (SCREEN_WIDTH as usize * 2);
+    scene.vram[offset..offset + 2].copy_from_slice(&GREEN.to_le_bytes());
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(5, 0).g,
+        0xFF,
+        "screen column 5 sampled texture row 5 through the rotated transform"
+    );
+    assert_eq!(
+        frame.pixel(0, 0).g,
+        0,
+        "screen column 0 sampled texture row 0, where nothing was drawn"
+    );
+}
+
+#[test]
+fn a_priority_three_sprite_is_hidden_behind_a_mode_three_bitmap() {
+    // On hardware a bitmap mode is background 2 with an ordinary priority, so a sprite compares
+    // against it exactly as it would against any other background — including losing. The bitmap
+    // path used to write every sprite pixel over the bitmap unconditionally, with no comparison
+    // at all, so a farther sprite always won.
+    let mut scene = Scene::new(3);
+    scene.enable_bitmap();
+    // Background 2's own priority, lower numbers nearer: give it the frontmost priority so a
+    // priority-3 (furthest) sprite loses to it everywhere the bitmap actually drew.
+    scene
+        .backgrounds
+        .write16(crate::background::CONTROL_BASE + 2 * 2, 0);
+    for x in 0..SCREEN_WIDTH as usize {
+        scene.vram[x * 2..x * 2 + 2].copy_from_slice(&RED.to_le_bytes());
+    }
+    scene.colour(257, GREEN);
+    scene.sprite_tiles();
+    // Priority 3, attribute 2 bits 10-11.
+    scene.set_sprite(0, 0, 0, 3 << 10);
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "the bitmap, at background 2's priority 0, hid the priority-3 sprite"
+    );
+}
+
+#[test]
+fn a_window_excluding_background_two_reveals_the_backdrop_inside_it_in_mode_four() {
+    // A bitmap mode's picture is background 2, so a window that excludes it does exactly what it
+    // would to any other background: the pixel is kept out of priority resolution entirely and
+    // the backdrop shows, rather than the bitmap being drawn regardless and the window doing
+    // nothing at all — which is what writing it straight to the framebuffer, bypassing the
+    // compositor, used to mean.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(4);
+    scene.enable_bitmap();
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // mode 4 palette entry 1
+    for x in 0..SCREEN_WIDTH as usize {
+        scene.vram[x] = 1;
+    }
+
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4.. outside
+    scene.effects.write16(ereg::WIN0V, 160);
+    scene.effects.write16(ereg::WININ, 0); // background 2 excluded inside the window
+    scene.effects.write16(ereg::WINOUT, Layer::Bg2.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13)); // window 0 enabled
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(2, 0).b,
+        0xFF,
+        "the backdrop shows inside the window"
+    );
+    assert_eq!(
+        frame.pixel(6, 0).r,
+        0xFF,
+        "and the bitmap still shows outside it"
+    );
+}
+
+#[test]
+fn the_frame_select_bit_still_picks_the_hidden_buffer_through_the_compositor_in_mode_four() {
+    // Double buffering is the whole point of mode 4's page-flip bit, so routing the bitmap
+    // through the ordinary compositor path must not lose it.
+    use crate::video::dispcnt;
+    let mut scene = Scene::new(4);
+    scene.enable_bitmap();
+    scene.colour(1, RED); // frame 0's pixel
+    scene.colour(2, GREEN); // frame 1's pixel
+    scene.vram[0] = 1; // frame 0, at (0, 0)
+    scene.vram[0xA000] = 2; // frame 1, at (0, 0)
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "frame 0 shows first");
+
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::FRAME_SELECT);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the frame-select bit flips to the hidden buffer"
+    );
+}
+
+#[test]
+fn the_frame_select_bit_still_picks_the_hidden_buffer_through_the_compositor_in_mode_five() {
+    // Mode 5 buys its double buffering by shrinking the picture instead of dropping colour depth,
+    // but the page-flip bit is the same register and must still work once routed through the
+    // ordinary compositor path.
+    use crate::video::dispcnt;
+    let mut scene = Scene::new(5);
+    scene.enable_bitmap();
+    scene.vram[0..2].copy_from_slice(&RED.to_le_bytes()); // frame 0, at (0, 0)
+    scene.vram[0xA000..0xA002].copy_from_slice(&GREEN.to_le_bytes()); // frame 1, at (0, 0)
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "frame 0 shows first");
+
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::FRAME_SELECT);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "the frame-select bit flips to the hidden buffer"
+    );
 }
 
 #[test]
@@ -315,7 +511,51 @@ impl Scene {
             self.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
         );
     }
+
+    /// Fill the first object tile slot with colour index 1 and enable objects.
+    ///
+    /// Unlike [`Scene::simple_sprite`] this writes no OAM entry, so a test can place several
+    /// sprites itself with [`Scene::set_sprite`].
+    fn sprite_tiles(&mut self) {
+        let base = crate::objects::OBJ_TILE_BASE;
+        for row in 0..8 {
+            for byte in 0..4 {
+                self.vram[base + row * 4 + byte] = 0x11;
+            }
+        }
+        self.video.write16(
+            reg::DISPCNT,
+            self.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+        );
+    }
+
+    /// Write one OAM entry's three attribute halfwords.
+    ///
+    /// Leaves the fourth halfword alone: it is not part of the sprite but one sixteenth of an
+    /// affine matrix, which [`Scene::identity_matrix`] writes separately.
+    fn set_sprite(&mut self, index: usize, attr0: u16, attr1: u16, attr2: u16) {
+        let base = index * 8;
+        self.oam[base..base + 2].copy_from_slice(&attr0.to_le_bytes());
+        self.oam[base + 2..base + 4].copy_from_slice(&attr1.to_le_bytes());
+        self.oam[base + 4..base + 6].copy_from_slice(&attr2.to_le_bytes());
+    }
+
+    /// Make matrix 0 the identity, so an affine sprite lands exactly where a plain one would.
+    ///
+    /// That is what lets a test compare the two paths at the same pixel: any difference is the
+    /// compositing rule, not the transform.
+    fn identity_matrix(&mut self) {
+        for (n, value) in [0x0100u16, 0x0000, 0x0000, 0x0100].iter().enumerate() {
+            self.oam[n * 8 + 6..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    }
 }
+
+/// Attribute-0 bits these tests set by name rather than by number.
+const AFFINE: u16 = 1 << 8;
+const SEMI_TRANSPARENT: u16 = 1 << 10;
+/// Attribute-2 bit 12: the low bit of the 16-colour palette number.
+const PALETTE_1: u16 = 1 << 12;
 
 #[test]
 fn a_sprite_draws_over_a_text_layer() {
@@ -337,6 +577,7 @@ fn a_sprite_draws_over_a_text_layer() {
 fn a_sprite_draws_over_a_bitmap_mode_too() {
     // Bitmap modes are not a separate world: sprites compose over them the same way.
     let mut scene = Scene::new(3);
+    scene.enable_bitmap();
     // The whole first line, so there is bitmap either side of the eight-pixel sprite.
     for x in 0..SCREEN_WIDTH as usize {
         scene.vram[x * 2..x * 2 + 2].copy_from_slice(&RED.to_le_bytes());
@@ -405,28 +646,171 @@ fn a_sprite_off_this_line_is_not_drawn() {
 // -- Windows and blending --------------------------------------------------
 
 #[test]
-fn a_window_masks_out_the_layers_it_excludes() {
-    // The layer that drew is masked away and the backdrop shows through, rather than the whole
-    // region being cleared.
+fn a_window_excludes_a_layer_from_resolution_rather_than_painting_over_the_winner() {
+    // The contract, and the bug this file's window tests could not previously see. Hardware keeps
+    // an excluded layer out of the priority contest, so the next enabled layer down wins the
+    // pixel. Masking after the fact — letting the front layer win and then overwriting it with the
+    // backdrop — is a different picture: hard-edged rectangles of flat backdrop wherever a window
+    // was used to *filter* rather than to hide, which is text-box interiors, battle HUDs, and a
+    // cave's light radius.
+    //
+    // The window edge runs through the middle of the drawn tile, so one assertion covers each side
+    // and both are pixels the layers actually cover.
     use crate::effects::{reg as ereg, Layer};
     let mut scene = Scene::new(0);
-    scene.colour(0, BLUE);
-    scene.colour(1, RED);
-    scene.simple_layer(0, 0, 8);
+    scene.colour(0, BLUE); // backdrop
+    scene.colour(1, RED); // BG0, in front
+    scene.colour(17, GREEN); // BG1, behind
+    scene.two_layers(0, 1);
 
-    // The layer draws one 8-pixel tile, so the window edge goes through the middle of it:
-    // x in 0..4 is inside, 4..8 is outside, and both halves are drawn pixels.
-    scene.effects.write16(ereg::WIN0H, 4);
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4..8 outside
     scene.effects.write16(ereg::WIN0V, 160);
+    // Inside, only the layer behind may draw; outside, both may.
     scene.effects.write16(ereg::WININ, Layer::Bg1.bit());
-    scene.effects.write16(ereg::WINOUT, Layer::Bg0.bit());
+    scene
+        .effects
+        .write16(ereg::WINOUT, Layer::Bg0.bit() | Layer::Bg1.bit());
     scene
         .video
         .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
 
     let framebuffer = scene.render(0);
-    assert_eq!(framebuffer.pixel(2, 0).b, 0xFF, "masked inside the window");
-    assert_eq!(framebuffer.pixel(6, 0).r, 0xFF, "and drawn outside it");
+    let inside = framebuffer.pixel(2, 0);
+    assert_eq!(
+        inside.g, 0xFF,
+        "inside the window the excluded front layer steps aside and BG1 wins"
+    );
+    assert_eq!(
+        inside.b, 0x00,
+        "and it is BG1's colour, not the backdrop showing through a hole"
+    );
+    assert_eq!(
+        framebuffer.pixel(6, 0).r,
+        0xFF,
+        "outside it BG0 is permitted and still wins"
+    );
+}
+
+#[test]
+fn a_window_that_permits_no_layer_at_all_still_shows_the_backdrop() {
+    // The other half of the contract: excluding every layer is what *does* leave the backdrop, and
+    // the backdrop itself is never maskable — bit 5 is the colour-effect enable, not a
+    // backdrop-enable.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+
+    scene.effects.write16(ereg::WIN0H, 0x00F0);
+    scene.effects.write16(ereg::WIN0V, 0x00A0);
+    scene.effects.write16(ereg::WININ, 0); // nothing may draw
+    scene
+        .effects
+        .write16(ereg::WINOUT, Layer::Bg0.bit() | Layer::Bg1.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).b,
+        0xFF,
+        "with every layer excluded there is nothing left but the backdrop"
+    );
+}
+
+#[test]
+fn winout_excludes_a_layer_outside_the_window_and_reveals_the_one_beneath() {
+    // `WINOUT` is a separate register from `WININ` and takes the same path, so it needs its own
+    // check that it excludes rather than overpaints.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+
+    scene.effects.write16(ereg::WIN0H, 4); // x in 0..4 inside, 4..8 outside
+    scene.effects.write16(ereg::WIN0V, 160);
+    scene
+        .effects
+        .write16(ereg::WININ, Layer::Bg0.bit() | Layer::Bg1.bit());
+    scene.effects.write16(ereg::WINOUT, Layer::Bg1.bit());
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    let framebuffer = scene.render(0);
+    assert_eq!(framebuffer.pixel(2, 0).r, 0xFF, "inside, BG0 still wins");
+    let outside = framebuffer.pixel(6, 0);
+    assert_eq!(outside.g, 0xFF, "outside, BG1 wins in BG0's place");
+    assert_eq!(outside.b, 0x00, "rather than the backdrop");
+}
+
+#[test]
+fn an_object_window_excluding_a_layer_reveals_the_one_beneath() {
+    // The object window reaches the same masking path by a different route — its region comes from
+    // a sprite's shape rather than a rectangle — so it gets the same two-layer check. This is the
+    // case Pokémon Emerald's battle screen actually hits.
+    use crate::effects::{reg as ereg, Layer};
+    const OBJECT_WINDOW: u16 = 2 << 10;
+
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(17, GREEN);
+    scene.two_layers(0, 1);
+    scene.simple_sprite(OBJECT_WINDOW, 0); // covers x 0..8 on line 0
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 15));
+
+    // Inside the sprite's shape only the layer behind may draw; outside it, both may.
+    scene.effects.write16(
+        ereg::WINOUT,
+        (Layer::Bg1.bit() << 8) | Layer::Bg0.bit() | Layer::Bg1.bit(),
+    );
+
+    let framebuffer = scene.render(0);
+    let inside = framebuffer.pixel(0, 0);
+    assert_eq!(inside.g, 0xFF, "inside the object window BG1 wins");
+    assert_eq!(inside.b, 0x00, "not the backdrop");
+    assert_eq!(
+        framebuffer.pixel(6, 0).g,
+        0xFF,
+        "the sprite is 8 wide, so this is still inside it"
+    );
+}
+
+#[test]
+fn a_window_can_exclude_the_sprite_layer_and_let_a_background_win() {
+    // Sprites are masked by their own bit, not by a background's, and excluding them must let the
+    // background underneath win rather than punching a backdrop hole through it.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0
+    scene.colour(257, GREEN); // sprite palette 0, colour 1
+    scene.simple_layer(0, 0, 8);
+    scene.simple_sprite(0, 0);
+
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "with no window the sprite is in front"
+    );
+
+    scene.effects.write16(ereg::WIN0H, 0x00F0);
+    scene.effects.write16(ereg::WIN0V, 0x00A0);
+    scene.effects.write16(ereg::WININ, Layer::Bg0.bit()); // sprites excluded
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 13));
+
+    let masked = scene.render(0).pixel(0, 0);
+    assert_eq!(masked.r, 0xFF, "excluding the sprite lets BG0 win");
+    assert_eq!(masked.b, 0x00, "rather than showing the backdrop");
 }
 
 #[test]
@@ -575,6 +959,33 @@ fn an_alpha_blend_is_skipped_when_the_layer_underneath_is_not_a_second_target() 
         0xFF,
         "with both weights at zero, a blend that happened would be black"
     );
+}
+
+#[test]
+fn an_alpha_blend_uses_the_layer_beneath_even_when_it_is_itself_a_first_target() {
+    // BLDCNT 1st{OBJ, BG0} 2nd{BG0}: the very common shape where a layer is declared both a blend
+    // source and a blend destination. A second pass that composed "what is underneath" by
+    // skipping every declared first-target layer treated that as "BG0 does not count" and found
+    // nothing beneath the sprite but the backdrop, so a translucent sprite over artwork mixed
+    // with black rather than with the artwork it was actually sitting on.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE); // backdrop; must not appear in the blend
+    scene.colour(1, GREEN); // BG0, directly beneath the sprite
+    scene.colour(257, RED); // the sprite: palette 0, colour index 1
+    scene.simple_layer(0, 1, 8); // BG0 at priority 1, behind the sprite
+    scene.sprite_tiles();
+    scene.set_sprite(0, 0, 0, 0); // an ordinary sprite at (0, 0), priority 0
+
+    scene.effects.write16(
+        ereg::BLDCNT,
+        Layer::Object.bit() | Layer::Bg0.bit() | (1 << 6) | (Layer::Bg0.bit() << 8),
+    );
+    scene.effects.write16(ereg::BLDALPHA, 8 | (8 << 8)); // half and half
+
+    let px = scene.render(0).pixel(0, 0);
+    assert!(px.g > 0, "the sprite should have blended with BG0: {px:?}");
+    assert_eq!(px.b, 0, "the backdrop took no part in the mix: {px:?}");
 }
 
 #[test]
@@ -781,4 +1192,393 @@ fn a_background_larger_than_one_screen_block_reaches_its_other_blocks() {
         0xFF,
         "scrolled into the second screen block, its tile should be what draws"
     );
+}
+
+// -- Affine and plain sprites in one pass ----------------------------------
+
+#[test]
+fn an_affine_sprite_obeys_background_priority_in_both_directions() {
+    // The affine path wrote pixels straight into the buffer with no comparison against the
+    // background at all, so a rotated object punched through whatever was in front of it. Both
+    // directions are asserted because only writing unconditionally passes one of them.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0
+    scene.colour(257, GREEN); // the sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    // BG0 at priority 0, affine sprite at priority 3: the background is in front.
+    scene.simple_layer(0, 0, 8);
+    scene.set_sprite(0, AFFINE, 0, 3 << 10);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).r,
+        0xFF,
+        "a priority-3 affine sprite is behind a priority-0 background"
+    );
+
+    // The other way round: BG0 at priority 3, sprite at priority 0.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(257, GREEN);
+    scene.sprite_tiles();
+    scene.identity_matrix();
+    scene.simple_layer(0, 3, 8);
+    scene.set_sprite(0, AFFINE, 0, 0);
+    assert_eq!(
+        scene.render(0).pixel(0, 0).g,
+        0xFF,
+        "and a priority-0 affine sprite is in front of a priority-3 background"
+    );
+}
+
+#[test]
+fn a_plain_sprite_does_not_overwrite_an_affine_one_that_wins_on_oam_order() {
+    // The two paths could not see each other: the shared renderer treated only a *background*
+    // pixel as something it could lose to, so an affine sprite's pixel was overwritten by any
+    // plain sprite regardless of which was in front. Equal priority, so OAM index decides.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // palette 0 — the affine sprite
+    scene.colour(273, RED); // palette 1 — the plain sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    scene.set_sprite(0, AFFINE, 0, 0); // affine, OAM 0
+    scene.set_sprite(4, 0, 0, PALETTE_1); // plain, OAM 4
+    let px = scene.render(0).pixel(0, 0);
+    assert_eq!(px.g, 0xFF, "the lower OAM index wins, affine or not");
+    assert_eq!(px.r, 0x00, "the farther plain sprite did not overwrite it");
+}
+
+#[test]
+fn an_affine_sprite_does_not_overwrite_a_plain_one_that_wins_on_oam_order() {
+    // The same rule the other way, which is the half that a back-to-front affine pass got wrong:
+    // it drew affine sprites *over* everything already placed.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // palette 0 — the affine sprite
+    scene.colour(273, RED); // palette 1 — the plain sprite
+    scene.sprite_tiles();
+    scene.identity_matrix();
+
+    scene.set_sprite(0, 0, 0, PALETTE_1); // plain, OAM 0
+    scene.set_sprite(4, AFFINE, 0, 0); // affine, OAM 4
+    let px = scene.render(0).pixel(0, 0);
+    assert_eq!(
+        px.r, 0xFF,
+        "the plain sprite at the lower index keeps the pixel"
+    );
+    assert_eq!(px.g, 0x00, "the farther affine sprite did not overwrite it");
+}
+
+#[test]
+fn a_semi_transparent_sprite_blends_even_when_objects_are_not_a_declared_blend_source() {
+    // The force path. A semi-transparent OBJ is a first target whatever `BLDCNT` selects and
+    // blends whatever mode it asks for — here the mode is "none" and the OBJ first-target bit is
+    // clear, so nothing but the graphics mode can be producing a blend. The mode was decoded and
+    // never read, and these sprites — shadows, water, reflections, battle-move flashes — came out
+    // as solid blocks.
+    use crate::effects::{reg as ereg, Layer};
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED); // BG0, underneath
+    scene.colour(257, GREEN); // the sprite
+    scene.simple_layer(0, 1, 8); // BG0 at priority 1, behind the sprite
+    scene.sprite_tiles();
+    scene.set_sprite(0, SEMI_TRANSPARENT, 0, 0);
+
+    // BG0 is a second target; OBJ is *not* a first target and the mode is none.
+    scene.effects.write16(ereg::BLDCNT, Layer::Bg0.bit() << 8);
+    scene.effects.write16(ereg::BLDALPHA, 8 | (8 << 8)); // half and half
+
+    let px = scene.render(0).pixel(0, 0);
+    assert!(
+        px.g > 0 && px.r > 0,
+        "the sprite blended with BG0 rather than replacing it: {px:?}"
+    );
+    assert!(px.g < 0xFF, "and it is a mix, not the sprite's own colour");
+}
+
+#[test]
+fn a_semi_transparent_sprite_is_not_brightened_by_an_active_brightness_effect() {
+    // Semi-transparency forces an *alpha* blend, which is what stops a brightness effect applying
+    // to it. With no second target declared there is nothing to blend with, so the sprite keeps
+    // its own colour — while an otherwise identical normal sprite is taken to white.
+    use crate::effects::{reg as ereg, Layer};
+    let build = |semi: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(257, GREEN);
+        scene.sprite_tiles();
+        scene.set_sprite(0, if semi { SEMI_TRANSPARENT } else { 0 }, 0, 0);
+        // Brighten, with OBJ as the first target and no second target at all.
+        scene
+            .effects
+            .write16(ereg::BLDCNT, Layer::Object.bit() | (2 << 6));
+        scene.effects.write16(ereg::BLDY, 16); // fully toward white
+        scene
+    };
+
+    let normal = build(false).render(0).pixel(0, 0);
+    assert_eq!(
+        (normal.r, normal.g, normal.b),
+        (0xFF, 0xFF, 0xFF),
+        "a normal sprite is taken to white"
+    );
+
+    let semi = build(true).render(0).pixel(0, 0);
+    assert_eq!(
+        (semi.r, semi.g, semi.b),
+        (0x00, 0xFF, 0x00),
+        "a semi-transparent one keeps its colour instead of being brightened"
+    );
+}
+
+#[test]
+fn an_eight_bit_sprite_in_two_dimensional_mapping_finds_its_second_row() {
+    // In 2D mapping the object sheet is 32 *slots* wide and a slot is 32 bytes whatever the
+    // depth, so one row down is 1024 bytes for every sprite. Scaling by the sprite's own tile size
+    // gave 2048 for a 256-colour sprite: its top row decoded correctly and every row below came
+    // from the wrong place, which reads as scrambled artwork rather than a mapping bug.
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, GREEN); // 8bpp forces palette 0, so colour 1 is entry 257
+    scene.colour(258, RED); // and colour 2 is entry 258
+
+    let base = crate::objects::OBJ_TILE_BASE;
+    for byte in 0..8 {
+        scene.vram[base + byte] = 1; // the sprite's first row
+        scene.vram[base + 1024 + byte] = 2; // one sheet row on, not two
+    }
+
+    // 8x16 (shape 2, size 0), 256 colours, at the origin.
+    scene.set_sprite(0, (2 << 14) | (1 << 13), 0, 0);
+    // Objects on, and *two*-dimensional mapping: no OBJ_1D_MAPPING bit.
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | dispcnt::OBJ);
+
+    assert_eq!(scene.render(0).pixel(0, 0).g, 0xFF, "the first tile row");
+    assert_eq!(
+        scene.render(8).pixel(0, 8).r,
+        0xFF,
+        "and the second comes from 1024 bytes on"
+    );
+}
+
+// -- Mosaic ---------------------------------------------------------------
+
+/// A 4bpp tile whose eight columns read 1, 2, 3, 1, 2, 3, 1, 2 in every row.
+///
+/// Backgrounds and sprites are both 4bpp or 8bpp on this machine — there is no 2bpp mode, unlike
+/// the Game Boy — so one striped tile shape serves both. Index 0 is deliberately absent: it is
+/// this machine's transparency, and a mosaic block that happened to land on it would be
+/// indistinguishable from a hole rather than a held colour.
+fn striped_tile_4bpp() -> [u8; 32] {
+    let mut tile = [0u8; 32];
+    for row in 0..8 {
+        tile[row * 4] = 0x21; // pixel0=1 (low nibble), pixel1=2 (high nibble)
+        tile[row * 4 + 1] = 0x13; // pixel2=3, pixel3=1
+        tile[row * 4 + 2] = 0x32; // pixel4=2, pixel5=3
+        tile[row * 4 + 3] = 0x21; // pixel6=1, pixel7=2
+    }
+    tile
+}
+
+const WHITE: u16 = 0x7FFF;
+
+#[test]
+fn horizontal_bg_mosaic_holds_each_source_column_across_its_block() {
+    // Hardware's sample-and-hold: with a horizontal block size of two, screen columns 0-1 must
+    // both show source column 0's colour and 2-3 must both show column 2's.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(2, GREEN);
+    scene.colour(3, WHITE);
+    scene.vram[0x20..0x40].copy_from_slice(&striped_tile_4bpp());
+    let cell = 8 * SCREEN_BLOCK;
+    scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+    scene.backgrounds.write16(
+        crate::background::CONTROL_BASE,
+        (8 << 8) | 1 << 6, /* BGxCNT mosaic bit */
+    );
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+    scene.effects.write16(ereg::MOSAIC, 1); // BG H-size field 1 -> block size 2
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "column 0, unmosaiced source colour"
+    );
+    assert_eq!(frame.pixel(1, 0).r, 0xFF, "held to column 0's colour");
+    assert_eq!(frame.pixel(2, 0), Rgba8::WHITE, "column 2, its own block");
+    assert_eq!(frame.pixel(3, 0), Rgba8::WHITE, "held to column 2's colour");
+}
+
+#[test]
+fn vertical_bg_mosaic_holds_each_source_row_across_its_block() {
+    // The same effect down the screen: with a vertical block size of two, line 1 must show line
+    // 0's row rather than its own, because a rendered line has no notion of "next" to hold from
+    // — the previous rendered line simply keeps being redrawn until the block ends.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(1, RED);
+    scene.colour(2, GREEN);
+    // Row 0 solid colour 1, row 1 solid colour 2 (4bpp: one byte holds two same-index pixels).
+    scene.vram[0x20..0x24].copy_from_slice(&[0x11; 4]);
+    scene.vram[0x24..0x28].copy_from_slice(&[0x22; 4]);
+    let cell = 8 * SCREEN_BLOCK;
+    scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+    scene.backgrounds.write16(
+        crate::background::CONTROL_BASE,
+        (8 << 8) | 1 << 6, /* BGxCNT mosaic bit */
+    );
+    scene
+        .video
+        .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+    scene.effects.write16(ereg::MOSAIC, 1 << 4); // BG V-size field 1 -> block size 2
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "line 0 samples row 0");
+    assert_eq!(
+        scene.render(1).pixel(0, 1).r,
+        0xFF,
+        "line 1 is held to row 0's colour, not row 1's"
+    );
+}
+
+#[test]
+fn a_bg_mosaic_size_of_zero_is_exactly_the_unmosaiced_picture() {
+    // The regression that matters: the mosaic bit being *on* with every size field at zero must
+    // produce the identical picture to mosaic being off, since a one-pixel block changes nothing.
+    use crate::effects::reg as ereg;
+    let build = |mosaic_on: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(1, RED);
+        scene.colour(2, GREEN);
+        scene.colour(3, WHITE);
+        scene.vram[0x20..0x40].copy_from_slice(&striped_tile_4bpp());
+        let cell = 8 * SCREEN_BLOCK;
+        scene.vram[cell..cell + 2].copy_from_slice(&1u16.to_le_bytes());
+        let control = (8u16 << 8)
+            | if mosaic_on {
+                1 << 6 /* BGxCNT mosaic bit */
+            } else {
+                0
+            };
+        scene
+            .backgrounds
+            .write16(crate::background::CONTROL_BASE, control);
+        scene
+            .video
+            .write16(reg::DISPCNT, scene.video.dispcnt | (1 << 8));
+        scene.effects.write16(ereg::MOSAIC, 0);
+        scene
+    };
+
+    let plain = build(false).render(0);
+    let mosaiced = build(true).render(0);
+    for x in 0..8 {
+        assert_eq!(
+            plain.pixel(x, 0),
+            mosaiced.pixel(x, 0),
+            "column {x}: a zero-size block must not change anything"
+        );
+    }
+}
+
+#[test]
+fn horizontal_obj_mosaic_holds_each_local_column_across_its_block() {
+    // The sprite's own eight-column stripe, exactly as the background test uses, but anchored to
+    // the sprite's local origin rather than the screen's — see `draw_mosaic_sprite`.
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, RED); // sprite palette 0, index 1
+    scene.colour(258, GREEN); // index 2
+    scene.colour(259, WHITE); // index 3
+    let base = crate::objects::OBJ_TILE_BASE;
+    scene.vram[base..base + 32].copy_from_slice(&striped_tile_4bpp());
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+    );
+    scene.set_sprite(0, 1 << 12, 0, 0); // mosaic bit, plain sprite, at the origin
+    scene.effects.write16(ereg::MOSAIC, 1 << 8); // OBJ H-size field 1 -> block size 2
+
+    let frame = scene.render(0);
+    assert_eq!(
+        frame.pixel(0, 0).r,
+        0xFF,
+        "column 0, unmosaiced source colour"
+    );
+    assert_eq!(frame.pixel(1, 0).r, 0xFF, "held to column 0's colour");
+    assert_eq!(frame.pixel(2, 0), Rgba8::WHITE, "column 2, its own block");
+    assert_eq!(frame.pixel(3, 0), Rgba8::WHITE, "held to column 2's colour");
+}
+
+#[test]
+fn vertical_obj_mosaic_holds_each_local_row_across_its_block() {
+    use crate::effects::reg as ereg;
+    let mut scene = Scene::new(0);
+    scene.colour(0, BLUE);
+    scene.colour(257, RED);
+    scene.colour(258, GREEN);
+    let base = crate::objects::OBJ_TILE_BASE;
+    // Row 0 solid colour 1, row 1 solid colour 2.
+    scene.vram[base..base + 4].copy_from_slice(&[0x11; 4]);
+    scene.vram[base + 4..base + 8].copy_from_slice(&[0x22; 4]);
+    scene.video.write16(
+        reg::DISPCNT,
+        scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+    );
+    scene.set_sprite(0, 1 << 12, 0, 0);
+    scene.effects.write16(ereg::MOSAIC, 1 << 12); // OBJ V-size field 1 -> block size 2
+
+    assert_eq!(scene.render(0).pixel(0, 0).r, 0xFF, "line 0 samples row 0");
+    assert_eq!(
+        scene.render(1).pixel(0, 1).r,
+        0xFF,
+        "line 1 is held to row 0's colour, not row 1's"
+    );
+}
+
+#[test]
+fn an_obj_mosaic_size_of_zero_is_exactly_the_unmosaiced_picture() {
+    use crate::effects::reg as ereg;
+    let build = |mosaic_on: bool| {
+        let mut scene = Scene::new(0);
+        scene.colour(0, BLUE);
+        scene.colour(257, RED);
+        scene.colour(258, GREEN);
+        scene.colour(259, WHITE);
+        let base = crate::objects::OBJ_TILE_BASE;
+        scene.vram[base..base + 32].copy_from_slice(&striped_tile_4bpp());
+        scene.video.write16(
+            reg::DISPCNT,
+            scene.video.dispcnt | dispcnt::OBJ | dispcnt::OBJ_1D_MAPPING,
+        );
+        let attr0 = if mosaic_on { 1 << 12 } else { 0 };
+        scene.set_sprite(0, attr0, 0, 0);
+        scene.effects.write16(ereg::MOSAIC, 0);
+        scene
+    };
+
+    let plain = build(false).render(0);
+    let mosaiced = build(true).render(0);
+    for x in 0..8 {
+        assert_eq!(
+            plain.pixel(x, 0),
+            mosaiced.pixel(x, 0),
+            "column {x}: a zero-size OBJ block must not change anything"
+        );
+    }
 }

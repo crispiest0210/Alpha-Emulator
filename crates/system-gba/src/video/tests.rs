@@ -1,6 +1,27 @@
 use super::*;
 use crate::irq::source;
 
+/// Advance by exactly `cycles`, looping over `tick`'s now-clamped-to-one-line steps and merging
+/// their events the way a single call used to: the last of each kind wins. Only valid for a test
+/// that does not care which of several crossed lines a merged field describes — true of most of
+/// them here, since a single call spanning at most one line has only one edge to merge in the
+/// first place. A test about the collapsing behaviour itself drives the loop directly instead.
+fn tick_all(video: &mut VideoTiming, mut cycles: u32) -> VideoEvents {
+    let mut events = VideoEvents::default();
+    while cycles > 0 {
+        let (step_events, consumed) = video.tick(cycles);
+        cycles -= consumed;
+        if step_events.scanline_ready.is_some() {
+            events.scanline_ready = step_events.scanline_ready;
+        }
+        events.entered_hblank |= step_events.entered_hblank;
+        events.entered_vblank |= step_events.entered_vblank;
+        events.frame_started |= step_events.frame_started;
+        events.vcount_matched |= step_events.vcount_matched;
+    }
+    events
+}
+
 #[test]
 fn a_frame_is_two_hundred_and_twenty_eight_lines_not_one_hundred_and_sixty() {
     // The 68 trailing lines are not a gap: they are when almost everything a game does to
@@ -8,7 +29,7 @@ fn a_frame_is_two_hundred_and_twenty_eight_lines_not_one_hundred_and_sixty() {
     let mut video = VideoTiming::new();
     let mut lines = 0;
     for _ in 0..LINES_PER_FRAME {
-        video.tick(CYCLES_PER_LINE);
+        tick_all(&mut video, CYCLES_PER_LINE);
         lines += 1;
     }
     assert_eq!(lines, 228);
@@ -25,20 +46,58 @@ fn the_line_and_frame_lengths_multiply_out_to_the_documented_frame_cycle_count()
 fn horizontal_blanking_begins_after_the_visible_dots() {
     let mut video = VideoTiming::new();
     assert!(!video.in_hblank());
-    video.tick(HBLANK_START_CYCLE - 1);
+    tick_all(&mut video, HBLANK_START_CYCLE - 1);
     assert!(!video.in_hblank(), "still drawing the last visible dot");
-    video.tick(1);
+    tick_all(&mut video, 1);
     assert!(video.in_hblank());
+}
+
+#[test]
+fn cycles_until_next_edge_stops_at_hblank_start_not_the_line_end() {
+    // The gap `tick`'s own cap cannot see: asked for a whole line in one call, it would report
+    // this many cycles late, landing at the line's end rather than where hblank actually starts.
+    let video = VideoTiming::new();
+    assert_eq!(video.cycles_until_next_edge(), HBLANK_START_CYCLE);
+}
+
+#[test]
+fn cycles_until_next_edge_stops_at_the_line_end_once_already_in_hblank() {
+    let mut video = VideoTiming::new();
+    tick_all(&mut video, HBLANK_START_CYCLE);
+    assert!(video.in_hblank());
+    assert_eq!(
+        video.cycles_until_next_edge(),
+        CYCLES_PER_LINE - HBLANK_START_CYCLE
+    );
+}
+
+#[test]
+fn a_tick_capped_to_cycles_until_next_edge_never_overshoots_into_hblank() {
+    // The property `halt_fast_forward_cycles` in `system.rs` relies on: a request capped to
+    // `cycles_until_next_edge`, even when what the caller actually wanted was far larger, lands
+    // exactly on the edge instead of sailing past it into the next line the way an uncapped
+    // request for the same huge span would (`tick`'s own cap only stops at a line boundary).
+    let mut video = VideoTiming::new();
+    let huge_request = CYCLES_PER_LINE * 10;
+    let cap = video.cycles_until_next_edge();
+    let (events, consumed) = video.tick(huge_request.min(cap));
+    assert_eq!(consumed, cap);
+    assert!(events.entered_hblank);
+    assert_eq!(
+        video.cycles_until_next_edge(),
+        CYCLES_PER_LINE - HBLANK_START_CYCLE,
+        "stopped exactly at the edge, not somewhere inside the next line"
+    );
 }
 
 #[test]
 fn entering_horizontal_blanking_is_reported_once_per_line() {
     let mut video = VideoTiming::new();
-    let events = video.tick(HBLANK_START_CYCLE);
+    let events = tick_all(&mut video, HBLANK_START_CYCLE);
     assert!(events.entered_hblank);
     assert_eq!(events.scanline_ready, Some(0));
 
-    let events = video.tick(1);
+    let events = tick_all(&mut video, 1);
     assert!(!events.entered_hblank, "the edge, not the level");
 }
 
@@ -47,11 +106,11 @@ fn a_scanline_is_reported_ready_only_while_the_beam_is_visible() {
     let mut video = VideoTiming::new();
     // Run to the last visible line.
     for _ in 0..SCREEN_HEIGHT {
-        video.tick(CYCLES_PER_LINE);
+        tick_all(&mut video, CYCLES_PER_LINE);
     }
     assert_eq!(video.vcount() as u32, SCREEN_HEIGHT);
 
-    let events = video.tick(HBLANK_START_CYCLE);
+    let events = tick_all(&mut video, HBLANK_START_CYCLE);
     assert!(events.entered_hblank, "HBlank still happens in VBlank");
     assert_eq!(events.scanline_ready, None, "but there is nothing to draw");
 }
@@ -60,7 +119,7 @@ fn a_scanline_is_reported_ready_only_while_the_beam_is_visible() {
 fn vertical_blanking_begins_at_line_one_hundred_and_sixty() {
     let mut video = VideoTiming::new();
     for line in 0..SCREEN_HEIGHT {
-        let events = video.tick(CYCLES_PER_LINE);
+        let events = tick_all(&mut video, CYCLES_PER_LINE);
         assert_eq!(
             events.entered_vblank,
             line + 1 == SCREEN_HEIGHT,
@@ -73,21 +132,60 @@ fn vertical_blanking_begins_at_line_one_hundred_and_sixty() {
 #[test]
 fn a_long_step_reports_every_scanline_it_crossed_rather_than_only_the_last() {
     // A DMA burst or a long instruction can cover more than a line, and collapsing that to one
-    // edge silently drops scanlines.
+    // edge silently drops scanlines. `tick` reports at most one edge per call and expects its
+    // caller to loop — see `system::GbaSystemBus::advance` — so this drives that loop itself and
+    // checks every one of the three lines it crosses comes back, not only the last.
     let mut video = VideoTiming::new();
-    let events = video.tick(CYCLES_PER_LINE * 3 + HBLANK_START_CYCLE);
+    let mut remaining = CYCLES_PER_LINE * 3;
+    let mut scanlines = Vec::new();
+    let mut hblanks = 0;
+    while remaining > 0 {
+        let (events, consumed) = video.tick(remaining);
+        remaining -= consumed;
+        if events.entered_hblank {
+            hblanks += 1;
+        }
+        if let Some(line) = events.scanline_ready {
+            scanlines.push(line);
+        }
+    }
     assert_eq!(video.vcount(), 3);
-    assert!(events.entered_hblank);
-    assert_eq!(events.scanline_ready, Some(3), "the most recent one");
+    assert_eq!(hblanks, 3, "one per line crossed");
+    assert_eq!(
+        scanlines,
+        vec![0, 1, 2],
+        "every scanline, not only the last"
+    );
+}
+
+#[test]
+fn vcount_matched_fires_once_per_matching_line_crossed_in_a_multi_line_step() {
+    // The same collapsing risk as `scanline_ready`, for the comparison interrupt, and a sharper
+    // test of it: a step spanning two whole frames must report the match *twice*, once for each
+    // time the matching line is crossed — a single merged flag could only ever say it happened at
+    // least once, undercounting exactly the way a missed scanline would.
+    let mut video = VideoTiming::new();
+    video.write16(reg::DISPSTAT, 1 << 8); // match line 1
+
+    let mut remaining = CYCLES_PER_LINE * (LINES_PER_FRAME + 3);
+    let mut matches = 0;
+    while remaining > 0 {
+        let (events, consumed) = video.tick(remaining);
+        remaining -= consumed;
+        if events.vcount_matched {
+            matches += 1;
+        }
+    }
+    assert_eq!(matches, 2, "line 1 was crossed once in each of two frames");
 }
 
 #[test]
 fn the_frame_start_edge_fires_when_vcount_wraps() {
     let mut video = VideoTiming::new();
     for _ in 0..LINES_PER_FRAME - 1 {
-        assert!(!video.tick(CYCLES_PER_LINE).frame_started);
+        assert!(!tick_all(&mut video, CYCLES_PER_LINE).frame_started);
     }
-    assert!(video.tick(CYCLES_PER_LINE).frame_started);
+    assert!(tick_all(&mut video, CYCLES_PER_LINE).frame_started);
 }
 
 #[test]
@@ -96,7 +194,7 @@ fn the_vcount_comparison_fires_on_the_line_the_game_asked_for() {
     video.write16(reg::DISPSTAT, 5 << 8);
 
     for line in 1..8 {
-        let events = video.tick(CYCLES_PER_LINE);
+        let events = tick_all(&mut video, CYCLES_PER_LINE);
         assert_eq!(events.vcount_matched, line == 5, "at line {line}");
     }
 }
@@ -106,7 +204,7 @@ fn a_write_to_dispstat_cannot_clear_the_hardware_flags() {
     // A plain store would let a game clear the VBlank flag, which hardware does not allow.
     let mut video = VideoTiming::new();
     for _ in 0..SCREEN_HEIGHT {
-        video.tick(CYCLES_PER_LINE);
+        tick_all(&mut video, CYCLES_PER_LINE);
     }
     assert_ne!(video.read16(reg::DISPSTAT).unwrap() & dispstat::VBLANK, 0);
 
@@ -122,9 +220,9 @@ fn a_write_to_dispstat_cannot_clear_the_hardware_flags() {
 fn the_status_flags_track_the_beam_rather_than_being_stored() {
     let mut video = VideoTiming::new();
     assert_eq!(video.read16(reg::DISPSTAT).unwrap() & dispstat::HBLANK, 0);
-    video.tick(HBLANK_START_CYCLE);
+    tick_all(&mut video, HBLANK_START_CYCLE);
     assert_ne!(video.read16(reg::DISPSTAT).unwrap() & dispstat::HBLANK, 0);
-    video.tick(CYCLES_PER_LINE - HBLANK_START_CYCLE);
+    tick_all(&mut video, CYCLES_PER_LINE - HBLANK_START_CYCLE);
     assert_eq!(
         video.read16(reg::DISPSTAT).unwrap() & dispstat::HBLANK,
         0,
@@ -146,7 +244,7 @@ fn only_the_enabled_video_interrupts_are_requested() {
 
     let mut sources = 0;
     for _ in 0..SCREEN_HEIGHT {
-        let events = video.tick(CYCLES_PER_LINE);
+        let events = tick_all(&mut video, CYCLES_PER_LINE);
         sources |= video.interrupt_sources(&events);
     }
     assert_eq!(
@@ -160,7 +258,7 @@ fn only_the_enabled_video_interrupts_are_requested() {
 fn enabling_the_hblank_interrupt_reports_it() {
     let mut video = VideoTiming::new();
     video.write16(reg::DISPSTAT, dispstat::HBLANK_IRQ);
-    let events = video.tick(HBLANK_START_CYCLE);
+    let events = tick_all(&mut video, HBLANK_START_CYCLE);
     assert_eq!(video.interrupt_sources(&events), source::HBLANK);
 }
 
@@ -189,7 +287,7 @@ fn video_state_round_trips_mid_scanline() {
     let mut video = VideoTiming::new();
     video.write16(reg::DISPCNT, 3 | dispcnt::BG2);
     video.write16(reg::DISPSTAT, dispstat::VBLANK_IRQ | (90 << 8));
-    video.tick(CYCLES_PER_LINE * 40 + 700);
+    tick_all(&mut video, CYCLES_PER_LINE * 40 + 700);
 
     let bytes = encode_state("gba-video", 1, &video);
     let mut restored = VideoTiming::new();
@@ -198,7 +296,7 @@ fn video_state_round_trips_mid_scanline() {
 
     // And it resumes mid-line rather than snapping to a boundary.
     assert_eq!(
-        restored.tick(CYCLES_PER_LINE).scanline_ready,
-        video.tick(CYCLES_PER_LINE).scanline_ready
+        tick_all(&mut restored, CYCLES_PER_LINE).scanline_ready,
+        tick_all(&mut video, CYCLES_PER_LINE).scanline_ready
     );
 }

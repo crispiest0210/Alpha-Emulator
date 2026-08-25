@@ -114,6 +114,29 @@ impl Effects {
         (reg::WIN0H..reg::BLDY + 2).contains(&addr)
     }
 
+    /// Background mosaic block size in pixels, `(horizontal, vertical)`.
+    ///
+    /// Bits 0-3 and 4-7 of `MOSAIC`, each a size *minus one* — field zero is block size one,
+    /// which is the identity: quantizing a coordinate to a block of one pixel changes nothing, so
+    /// mosaic being "on" with a zero field is indistinguishable from being off.
+    pub fn bg_mosaic_size(&self) -> (u32, u32) {
+        (
+            (self.mosaic & 0xF) as u32 + 1,
+            ((self.mosaic >> 4) & 0xF) as u32 + 1,
+        )
+    }
+
+    /// Object mosaic block size in pixels, `(horizontal, vertical)`.
+    ///
+    /// A genuinely separate field from [`Self::bg_mosaic_size`], bits 8-11 and 12-15 of the same
+    /// register — the two block sizes are not required to match.
+    pub fn obj_mosaic_size(&self) -> (u32, u32) {
+        (
+            ((self.mosaic >> 8) & 0xF) as u32 + 1,
+            ((self.mosaic >> 12) & 0xF) as u32 + 1,
+        )
+    }
+
     /// Which layers may draw at this pixel, given which windows are enabled.
     ///
     /// `enabled` is the three window-enable bits of `DISPCNT`, in the order window 0, window 1,

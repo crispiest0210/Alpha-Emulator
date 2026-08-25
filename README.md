@@ -25,7 +25,7 @@ controls, per-OS packages, where saves go, and what to do when something goes wr
 |---|---|---|---|---|
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, and 9 of 12 `dmg_sound` sub-tests |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
-| Game Boy Advance | ✅ | ✅ | ✅ | Passes all three `gba-suite` ROMs. **A commercial game plays at a measured 100% speed** with backgrounds, sprites, affine effects, and colour blending. BIOS calls work in both instruction sets, decompressors included. **No PSG mixing**; no cartridge clock, mosaic, or EEPROM |
+| Game Boy Advance | ✅ | ✅ | ⚠️ | Passes `gba-suite`'s ARM, Thumb, memory, and BIOS ROMs. **A commercial game plays at a measured 100% speed** with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are mixed alongside direct sound.** The `save/` ROMs found two real save-chip bugs, tracked as known failures; no cartridge clock or EEPROM |
 | Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene. Two programs, not a commercial game: no retail title has been tried |
 
 **All four systems boot with picture and sound, and three of them play commercial games at full
@@ -44,11 +44,12 @@ debugging timing or graphics, see:
 - **Game Boy / Game Boy Color**: The core is complete and holds a full accuracy bar against
   Blargg's test ROMs. Minor known gaps are listed in `README.md`'s accuracy suite section and in
   `system-gb`'s crate docs.
-- **Game Boy Advance**: All three `gba-suite` instruction ROMs pass, and a commercial game plays at
-  full speed. Seven rendering bugs surfaced and were fixed; see **[AGENTS.md](AGENTS.md)** under
-  "Gotchas" for what they looked like and how they were found. A real commercial game plays at 100%
-  speed with sound. **PSG mixing is not wired** — that is the biggest missing piece. See
-  `system-gba`'s crate docs for the full list.
+- **Game Boy Advance**: `gba-suite`'s ARM, Thumb, memory, and BIOS ROMs pass, and a commercial game
+  plays at full speed with sound. Seven rendering bugs surfaced and were fixed; see
+  **[AGENTS.md](AGENTS.md)** under "Gotchas" for what they looked like and how they were found.
+  All four PSG channels are now mixed alongside direct sound, closing what was long the project's
+  biggest gap. Still open: the `save/` ROMs expose two real save-chip protocol bugs, and there is
+  no cartridge clock or EEPROM. See `system-gba`'s crate docs for the full list.
 - **Nintendo DS**: Boots and draws both screens with sound and 3D. Runs real libnds homebrew.
   **No commercial title has been tried yet.** See `system-nds`'s crate docs and **[AGENTS.md](AGENTS.md)**
   under "Start here" for the gaps, the implementation summary, and what has been verified.

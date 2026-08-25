@@ -388,3 +388,65 @@ fn an_ordinary_transfer_still_honours_its_own_settings() {
     assert_eq!(transfer.words, 0x10, "its own count");
     assert_eq!(transfer.destination_step, AddressStep::Increment);
 }
+
+#[test]
+fn channel_zero_masks_its_addresses_to_twenty_seven_bits() {
+    // Channel 0 cannot reach the cartridge at all, and 27 bits is exactly the window that
+    // excludes it — bit 27 (0x0800_0000) is the first bit above that window.
+    let mut dma = DmaController::new();
+    arm(
+        &mut dma,
+        0,
+        0x0800_0000 | 0x0200_0000,
+        0x0800_0000 | 0x0600_0000,
+        1,
+        0,
+    );
+    let transfer = dma.take_transfer().expect("it is armed");
+    assert_eq!(
+        transfer.source, 0x0200_0000,
+        "the 28th bit is not on channel 0's bus"
+    );
+    assert_eq!(transfer.destination, 0x0600_0000);
+}
+
+#[test]
+fn channels_one_through_three_mask_their_addresses_to_twenty_eight_bits() {
+    // Bit 28 (0x1000_0000) is the first bit above every other channel's 28-bit window.
+    let mut dma = DmaController::new();
+    arm(
+        &mut dma,
+        1,
+        0x1000_0000 | 0x0200_0000,
+        0x1000_0000 | 0x0600_0000,
+        1,
+        0,
+    );
+    let transfer = dma.take_transfer().expect("it is armed");
+    assert_eq!(transfer.source, 0x0200_0000);
+    assert_eq!(transfer.destination, 0x0600_0000);
+}
+
+#[test]
+fn a_repeating_transfer_wraps_its_running_address_within_the_channel_window_rather_than_past_it() {
+    // The mask is not only applied once at latch time: each step re-applies it, or an address
+    // that increments up to the top of the window would carry into the bit the mask exists to
+    // exclude instead of wrapping back to the start of it.
+    let mut dma = DmaController::new();
+    // Source one word below channel 0's 27-bit ceiling, incrementing by four bytes (the word
+    // bit), repeating on HBlank (bits 12-13 = 2) so a second transfer needs only another
+    // `on_hblank`, not a fresh register write that would re-latch the address from scratch.
+    let flags = control::WORD_SIZE | control::REPEAT | (2 << 12);
+    arm(&mut dma, 0, 0x07FF_FFFC, 0, 1, flags);
+
+    dma.on_hblank();
+    let first = dma.take_transfer().unwrap();
+    assert_eq!(first.source, 0x07FF_FFFC);
+
+    dma.on_hblank();
+    let second = dma.take_transfer().unwrap();
+    assert_eq!(
+        second.source, 0,
+        "stepping past the 27-bit ceiling wraps to the start of the window"
+    );
+}
