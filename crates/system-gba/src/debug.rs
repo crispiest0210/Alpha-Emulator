@@ -162,8 +162,11 @@ impl GbaSystem {
         for layer in 0..4u32 {
             let enabled = dispcnt & (1 << (8 + layer)) != 0;
             let cnt = bus.read16(0x0400_0008 + layer * 2);
-            let hofs = bus.read16(0x0400_0010 + layer * 4);
-            let vofs = bus.read16(0x0400_0012 + layer * 4);
+            // `BGxHOFS`/`BGxVOFS` are write-only, so reading them back through the bus always
+            // answers zero — a layer scrolled to 320 reported `scroll=(0,0)` and sent at least
+            // one debugging session after the wrong thing. The stored value is the real one.
+            let scroll = bus.backgrounds.layers[layer as usize];
+            let (hofs, vofs) = (u32::from(scroll.scroll_x), u32::from(scroll.scroll_y));
             // Bits 6 and 7 mean different things on an affine layer than on a text one, which is
             // the decode a reader is most likely to get wrong by hand.
             let affine = matches!((mode, layer), (1, 2) | (1, 3) | (2, 2) | (2, 3));
@@ -192,7 +195,8 @@ impl GbaSystem {
 
         let bldcnt = bus.read16(0x0400_0050);
         let bldalpha = bus.read16(0x0400_0052);
-        let bldy = bus.read16(0x0400_0054);
+        // Write-only too, same trap as the scroll registers above.
+        let bldy = bus.effects.bldy();
         let effect = match (bldcnt >> 6) & 3 {
             0 => "none",
             1 => "alpha blend",
@@ -258,6 +262,31 @@ mod tests {
     fn a_system_offers_a_debug_target() {
         let mut system = system();
         assert!(System::debug(&mut system).is_some());
+    }
+
+    #[test]
+    fn graphics_dump_reports_the_real_scroll_and_bldy_not_a_bus_read_of_zero() {
+        // `BGxHOFS`/`BGxVOFS`/`BLDY` are write-only: reading them back through the bus answers
+        // zero however they were set. A dump that did so reported `scroll=(0,0)` for a layer
+        // scrolled to 320, which cost real time on the battle-menu bug where the scroll *was*
+        // the answer. These come from the stored values instead.
+        let mut system = system();
+        system.bus_mut().backgrounds.layers[0].scroll_x = 320;
+        system.bus_mut().backgrounds.layers[0].scroll_y = 12;
+        system
+            .bus_mut()
+            .effects
+            .write16(crate::effects::reg::BLDY, 0x0B);
+
+        let dump = system.graphics_dump();
+        assert!(
+            dump.contains("scroll=(320,12)"),
+            "the dump should carry the stored scroll, got:\n{dump}"
+        );
+        assert!(
+            !dump.contains("evy=0"),
+            "the dump should carry the stored BLDY, got:\n{dump}"
+        );
     }
 
     #[test]

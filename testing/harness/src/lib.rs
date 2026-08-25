@@ -621,6 +621,14 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
     let mut previous_pc = u64::MAX;
     let mut settled = 0;
 
+    // Every real exit path in these suites draws its report before it settles, so a picture
+    // identical to the boot frame means the ROM never got as far as reporting anything. This
+    // catches a shape the entry-point check below cannot: a machine wedged *after* leaving the
+    // entry point but before rendering — a BIOS trap, say — which otherwise has exactly the
+    // signature of a pass (settled PC, `r12 == 0`) at an address that is not the entry point.
+    // The two checks are deliberately kept separate: neither subsumes the other.
+    let boot_picture = framebuffer_hash(system.framebuffer());
+
     for frame in 1..=max_frames {
         system.step_frame(InputState::default());
         let pc = register(system, "PC");
@@ -640,6 +648,16 @@ pub fn run_gba_suite<S: TestableSystem + ?Sized>(system: &mut S, max_frames: u32
             return TestOutcome::Failed {
                 report: "settled at the cartridge entry point without ever leaving it — the CPU \
                          is stuck before any test logic ran, not finished with it"
+                    .into(),
+                frames: frame,
+            };
+        }
+
+        if framebuffer_hash(system.framebuffer()) == boot_picture {
+            return TestOutcome::Failed {
+                report: "settled without ever drawing anything — the picture is still the boot \
+                         frame, so the ROM stopped before it reported a result, whatever `r12` \
+                         happens to hold"
                     .into(),
                 frames: frame,
             };

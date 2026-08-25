@@ -173,6 +173,15 @@ impl Effects {
     }
 
     /// The four window-bound registers, for diagnostics. They are write-only to a game.
+    /// The stored `BLDY`, for the debugger.
+    ///
+    /// `BLDY` is write-only, so reading it back through the bus answers zero and a dump that
+    /// does so reports no brightness effect however bright the screen actually is — the same
+    /// trap as `BGxHOFS`/`BGxVOFS`.
+    pub fn bldy(&self) -> u16 {
+        self.bldy
+    }
+
     pub fn window_bounds(&self) -> (u16, u16, u16, u16) {
         (self.win0h, self.win1h, self.win0v, self.win1v)
     }

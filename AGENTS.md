@@ -257,10 +257,14 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
   **When a picture is wrong, get a save state and bisect the layers** — use `frontend-headless run
   --state <file> --save-frame out.png` to render the state, then inspect the bit patterns. Four of
   these were found that way in minutes.
-- **`graphics_dump`'s scroll column is not trustworthy.** `BGxHOFS`/`BGxVOFS` are write-only, so a
-  bus read returns zero and the dump shows `scroll=(0,0)` for a layer scrolled to 320. The stored
-  value has to come from `bus.backgrounds.layers[i]`. This cost real time on the battle-menu bug,
-  where the scroll *was* the answer.
+- **A write-only register read back through the bus answers zero, not what was written.**
+  `BGxHOFS`/`BGxVOFS` and `BLDY` are all write-only. `graphics_dump` used to read them that way
+  and so reported `scroll=(0,0)` for a layer scrolled to 320, which cost real time on the
+  battle-menu bug where the scroll *was* the answer. Fixed — it reads
+  `bus.backgrounds.layers[i]` and `bus.effects.bldy()` now, pinned by
+  `graphics_dump_reports_the_real_scroll_and_bldy_not_a_bus_read_of_zero`. Worth remembering as
+  a shape: **any** diagnostic that reaches a write-only register through the bus is reporting a
+  zero it invented, and the GBA has several more.
 - **A masked comparison is the wrong way to write `owns`.** It bit the GBA interrupt controller
   (`IE` and `IF` are two apart, so `& !1` misses `IF`) and the direct-sound block (`SOUNDCNT_H`
   is a halfword at an address ending in 2, so no single mask groups it correctly). Write
