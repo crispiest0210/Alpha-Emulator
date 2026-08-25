@@ -41,7 +41,10 @@ pub mod system;
 #[cfg(test)]
 mod mock_system;
 
-pub use bus::{Addr, Bus, MapError, MemoryRegion, Ram, RegionMap};
+pub use bus::{
+    compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, Addr, Bus,
+    MapError, MemoryRegion, Ram, RegionMap,
+};
 pub use cpu::{Cpu, CpuIntrospect, DisasmInstruction, Disassemble, RegisterValue};
 pub use debug::{Access, AccessKind, AccessLog, DebugRegion, DebugTarget};
 pub use event_types::{

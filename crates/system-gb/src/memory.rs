@@ -37,7 +37,10 @@
 //! method precisely so each system has to state this rather than inheriting a zero.
 
 use cart_common::Mapper;
-use core_common::{Bus, Savable, StateError, StateReader, StateWriter};
+use core_common::{
+    compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, Bus, Savable,
+    StateError, StateReader, StateWriter,
+};
 
 pub const VRAM_BANK_SIZE: usize = 0x2000;
 pub const WRAM_BANK_SIZE: usize = 0x1000;
@@ -416,6 +419,22 @@ impl Bus for GbBus {
     /// reached through the wide accessors straddling the end of the address space.
     fn open_bus8(&self, _addr: u32) -> u8 {
         0xFF
+    }
+
+    /// The Game Boy's bus is genuinely byte-oriented, so composing wide accesses out of
+    /// [`Bus::read8`]/[`Bus::write8`] is correct here — unlike on the GBA or DS, where a real
+    /// word transaction is not four byte transactions. See `core_common::bus`'s module docs.
+    fn read16(&mut self, addr: u32) -> u16 {
+        compose_le_read16(self, addr)
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        compose_le_read32(self, addr)
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        compose_le_write16(self, addr, value)
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        compose_le_write32(self, addr, value)
     }
 
     fn peek8(&self, addr: u32) -> Option<u8> {

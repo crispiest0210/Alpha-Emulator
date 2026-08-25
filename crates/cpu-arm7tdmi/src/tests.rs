@@ -5,7 +5,10 @@
 //! switches.
 
 use crate::*;
-use core_common::{Bus, Cpu, CpuIntrospect, Savable, StateReader, StateWriter};
+use core_common::{
+    compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, Bus, Cpu,
+    CpuIntrospect, Savable, StateReader, StateWriter,
+};
 
 const ORG: u32 = 0x1000;
 const STACK: u32 = 0x8000;
@@ -60,6 +63,18 @@ impl Bus for TestBus {
     }
     fn open_bus8(&self, _addr: u32) -> u8 {
         0
+    }
+    fn read16(&mut self, addr: u32) -> u16 {
+        compose_le_read16(self, addr)
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        compose_le_read32(self, addr)
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        compose_le_write16(self, addr, value)
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        compose_le_write32(self, addr, value)
     }
     fn peek8(&self, addr: u32) -> Option<u8> {
         Some(self.mem[self.index(addr)])

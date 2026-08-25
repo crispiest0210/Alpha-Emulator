@@ -612,6 +612,18 @@ pub(super) mod tests {
         fn open_bus8(&self, _addr: u32) -> u8 {
             0
         }
+        fn read16(&mut self, addr: u32) -> u16 {
+            core_common::compose_le_read16(self, addr)
+        }
+        fn read32(&mut self, addr: u32) -> u32 {
+            core_common::compose_le_read32(self, addr)
+        }
+        fn write16(&mut self, addr: u32, value: u16) {
+            core_common::compose_le_write16(self, addr, value)
+        }
+        fn write32(&mut self, addr: u32, value: u32) {
+            core_common::compose_le_write32(self, addr, value)
+        }
     }
 
     #[test]

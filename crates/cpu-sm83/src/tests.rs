@@ -6,7 +6,10 @@
 //! crate; they are what catches a regression in seconds instead of minutes.
 
 use crate::*;
-use core_common::{Bus, Cpu, CpuIntrospect, Savable, StateReader, StateWriter};
+use core_common::{
+    compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, Bus, Cpu,
+    CpuIntrospect, Savable, StateReader, StateWriter,
+};
 
 /// Flat 64 KiB of RAM. `IF` and `IE` land in it naturally at their real addresses, so the CPU
 /// reads them through the bus exactly as it would on hardware.
@@ -35,6 +38,18 @@ impl Bus for TestBus {
     }
     fn open_bus8(&self, _addr: u32) -> u8 {
         0xFF
+    }
+    fn read16(&mut self, addr: u32) -> u16 {
+        compose_le_read16(self, addr)
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        compose_le_read32(self, addr)
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        compose_le_write16(self, addr, value)
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        compose_le_write32(self, addr, value)
     }
     fn peek8(&self, addr: u32) -> Option<u8> {
         Some(self.mem[(addr & 0xFFFF) as usize])

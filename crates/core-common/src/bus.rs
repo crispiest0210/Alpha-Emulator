@@ -2,18 +2,32 @@
 //!
 //! # Widths
 //!
-//! [`Bus`] exposes 8/16/32-bit accesses. Only the 8-bit pair is required; the wider accessors
-//! default to composing byte accesses. That choice matters both ways:
+//! [`Bus`] exposes 8/16/32-bit accesses, and all four are required — there is no default that
+//! composes a wide access out of byte accesses anymore. There used to be one, and it caused two
+//! separate serious bugs before it was removed:
 //!
-//! - The Game Boy's bus is byte-oriented, so `system-gb` implements two methods and gets the
-//!   rest correctly for free.
+//! - `system-nds`'s `NdsBus` inherited the default, so every ARM9/ARM7 instruction fetch paid
+//!   four region decodes instead of one. That was a 65% frame-time regression on the DS, found
+//!   only by profiling — nothing about it looked wrong, it was just slow.
+//! - `cpu-arm946e`'s `TcmBus` inherited the default too, and that one was silent rather than
+//!   slow: real DS hardware *drops* an ARM9 byte write to VRAM, palette RAM, and OAM, so
+//!   decomposing a word write into four byte writes made every such write vanish. The ARM9
+//!   could not write to VRAM at all, and it presented as a black screen with every register set
+//!   correctly — nothing about *that* looked wrong either, until someone traced it.
+//!
+//! Both bugs have the same shape: a bus wrapper forwards `read8`/`write8` and inherits the wide
+//! methods for free, which is exactly wrong whenever the underlying system's wide accesses are
+//! not decomposable byte-by-byte — which is true of every real bus in this project except the
+//! Game Boy's. Making the four methods required turns that choice into something that has to
+//! appear in a diff instead of something that happens by omission. An implementor whose bus
+//! genuinely is byte-oriented calls [`compose_le_read16`] and friends explicitly instead of
+//! inheriting them, so the "yes, really, compose this" decision is visible at the call site.
+//!
+//! - The Game Boy's bus is byte-oriented, so `system-gb` and every test-only bus in this
+//!   codebase implement all four methods but the wide ones just call the `compose_le_*` helpers.
 //! - The GBA and DS have genuinely 16/32-bit-wide buses where a word access is *one* bus
-//!   transaction with its own wait-state cost, not four byte transactions. Those systems
-//!   override the wider accessors with native implementations.
-//!
-//! A lowest-common-denominator byte-only interface would have quietly made the GBA and DS
-//! both slower and less accurate, which is why the wide methods exist even though the
-//! smallest system never implements them.
+//!   transaction with its own wait-state cost, not four byte transactions, and those systems
+//!   give the wide accessors native implementations instead of calling the helpers.
 //!
 //! # Open bus is explicit
 //!
@@ -38,9 +52,11 @@ pub type Addr = u32;
 ///   `&mut self`. Anything that must not disturb the machine — a debugger's memory view — uses
 ///   [`peek8`](Bus::peek8) instead.
 /// - Unmapped reads must go through [`open_bus8`](Bus::open_bus8), never silently return 0.
-/// - Wide accesses default to little-endian composition of byte accesses. Every system here is
-///   little-endian; override the wide methods when the real bus performs them as single
-///   transactions.
+/// - All four widths are required, on purpose — see the module docs for the two bugs a default
+///   composition caused. Every system here is little-endian. An implementor whose bus really is
+///   byte-oriented should implement the wide methods by calling [`compose_le_read16`],
+///   [`compose_le_read32`], [`compose_le_write16`], and [`compose_le_write32`] explicitly, so
+///   that choice shows up in the diff instead of being inherited invisibly.
 /// - Alignment handling is the implementer's business. The ARM cores' rotate-on-unaligned-read
 ///   behavior belongs in the system's bus, not here.
 pub trait Bus: Savable {
@@ -69,36 +85,10 @@ pub trait Bus: Savable {
     /// value must not itself perturb the machine.
     fn open_bus8(&self, addr: Addr) -> u8;
 
-    #[inline]
-    fn read16(&mut self, addr: Addr) -> u16 {
-        u16::from_le_bytes([self.read8(addr), self.read8(addr.wrapping_add(1))])
-    }
-
-    #[inline]
-    fn read32(&mut self, addr: Addr) -> u32 {
-        u32::from_le_bytes([
-            self.read8(addr),
-            self.read8(addr.wrapping_add(1)),
-            self.read8(addr.wrapping_add(2)),
-            self.read8(addr.wrapping_add(3)),
-        ])
-    }
-
-    #[inline]
-    fn write16(&mut self, addr: Addr, value: u16) {
-        let b = value.to_le_bytes();
-        self.write8(addr, b[0]);
-        self.write8(addr.wrapping_add(1), b[1]);
-    }
-
-    #[inline]
-    fn write32(&mut self, addr: Addr, value: u32) {
-        let b = value.to_le_bytes();
-        self.write8(addr, b[0]);
-        self.write8(addr.wrapping_add(1), b[1]);
-        self.write8(addr.wrapping_add(2), b[2]);
-        self.write8(addr.wrapping_add(3), b[3]);
-    }
+    fn read16(&mut self, addr: Addr) -> u16;
+    fn read32(&mut self, addr: Addr) -> u32;
+    fn write16(&mut self, addr: Addr, value: u16);
+    fn write32(&mut self, addr: Addr, value: u32);
 
     /// Side-effect-free read for the debugger and the test harness.
     ///
@@ -128,6 +118,52 @@ pub trait Bus: Savable {
             self.peek8(addr.wrapping_add(3))?,
         ]))
     }
+}
+
+/// Composes a little-endian 16-bit read out of two [`Bus::read8`] calls, low byte first.
+///
+/// For implementors whose bus is genuinely byte-oriented and should get correct wide accessors
+/// by explicitly opting into composition — not by leaving the method unimplemented and hoping.
+/// See the module docs for why this is a named function an implementor calls, rather than a
+/// trait default it inherits.
+#[inline]
+pub fn compose_le_read16<B: Bus + ?Sized>(bus: &mut B, addr: Addr) -> u16 {
+    u16::from_le_bytes([bus.read8(addr), bus.read8(addr.wrapping_add(1))])
+}
+
+/// Composes a little-endian 32-bit read out of four [`Bus::read8`] calls, low byte first.
+///
+/// See [`compose_le_read16`].
+#[inline]
+pub fn compose_le_read32<B: Bus + ?Sized>(bus: &mut B, addr: Addr) -> u32 {
+    u32::from_le_bytes([
+        bus.read8(addr),
+        bus.read8(addr.wrapping_add(1)),
+        bus.read8(addr.wrapping_add(2)),
+        bus.read8(addr.wrapping_add(3)),
+    ])
+}
+
+/// Composes a little-endian 16-bit write out of two [`Bus::write8`] calls, low byte first.
+///
+/// See [`compose_le_read16`].
+#[inline]
+pub fn compose_le_write16<B: Bus + ?Sized>(bus: &mut B, addr: Addr, value: u16) {
+    let b = value.to_le_bytes();
+    bus.write8(addr, b[0]);
+    bus.write8(addr.wrapping_add(1), b[1]);
+}
+
+/// Composes a little-endian 32-bit write out of four [`Bus::write8`] calls, low byte first.
+///
+/// See [`compose_le_read16`].
+#[inline]
+pub fn compose_le_write32<B: Bus + ?Sized>(bus: &mut B, addr: Addr, value: u32) {
+    let b = value.to_le_bytes();
+    bus.write8(addr, b[0]);
+    bus.write8(addr.wrapping_add(1), b[1]);
+    bus.write8(addr.wrapping_add(2), b[2]);
+    bus.write8(addr.wrapping_add(3), b[3]);
 }
 
 /// One contiguous span of address space with its own storage and behavior.
@@ -439,6 +475,18 @@ mod tests {
         }
         fn open_bus8(&self, _addr: Addr) -> u8 {
             self.open_bus_value
+        }
+        fn read16(&mut self, addr: Addr) -> u16 {
+            compose_le_read16(self, addr)
+        }
+        fn read32(&mut self, addr: Addr) -> u32 {
+            compose_le_read32(self, addr)
+        }
+        fn write16(&mut self, addr: Addr, value: u16) {
+            compose_le_write16(self, addr, value)
+        }
+        fn write32(&mut self, addr: Addr, value: u32) {
+            compose_le_write32(self, addr, value)
         }
         fn peek8(&self, addr: Addr) -> Option<u8> {
             self.map.peek8(addr)

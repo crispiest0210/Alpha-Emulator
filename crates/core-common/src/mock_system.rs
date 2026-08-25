@@ -11,9 +11,10 @@
 //! bounded by [`Scheduler::cycles_until_next`], drain due events, repeat.
 
 use crate::{
-    bus::Addr, AudioSample, Bus, CartridgeError, Cpu, CpuIntrospect, Cycles, FrameOutput,
-    Framebuffer, InputState, Ram, RegionMap, RegisterValue, Savable, Scheduler, StateError,
-    StateReader, StateWriter, System,
+    bus::Addr, compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32,
+    AudioSample, Bus, CartridgeError, Cpu, CpuIntrospect, Cycles, FrameOutput, Framebuffer,
+    InputState, Ram, RegionMap, RegisterValue, Savable, Scheduler, StateError, StateReader,
+    StateWriter, System,
 };
 
 const WRAM_BASE: Addr = 0x0000;
@@ -141,6 +142,19 @@ impl Bus for MockBus {
 
     fn open_bus8(&self, _addr: Addr) -> u8 {
         self.last_value
+    }
+
+    fn read16(&mut self, addr: Addr) -> u16 {
+        compose_le_read16(self, addr)
+    }
+    fn read32(&mut self, addr: Addr) -> u32 {
+        compose_le_read32(self, addr)
+    }
+    fn write16(&mut self, addr: Addr, value: u16) {
+        compose_le_write16(self, addr, value)
+    }
+    fn write32(&mut self, addr: Addr, value: u32) {
+        compose_le_write32(self, addr, value)
     }
 
     fn peek8(&self, addr: Addr) -> Option<u8> {

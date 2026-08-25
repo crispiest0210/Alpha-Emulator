@@ -572,12 +572,19 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
   argument to `render_sprites` and every GBA sprite was rendered as 16-colour; a 256-colour one came
   out as a stretched checkerboard, one byte read as two indices, which looks like a corrupt tile
   rather than an unimplemented feature. Pokémon Emerald's title wordmark is the case that found it.
-- **`cpu-arm946e`'s `TcmBus` used to decompose wide accesses**, because `Bus`'s default `read32`
-  composes byte accesses and the wrapper did not override it. Invisible on a bus whose byte and wide
-  behaviour agree, and fatal on the DS, where an ARM9 byte write to VRAM, palette RAM, or OAM is
-  *dropped* by hardware. The ARM9 could not write to VRAM at all and it presented as a black screen
-  with every register set correctly. Fixed, with two tests; worth remembering as a shape of bug,
-  because any future bus wrapper can reintroduce it.
+- **`Bus`'s wide accessors are required methods, and that is load-bearing.** `read16`/`read32`/
+  `write16`/`write32` once had defaults that composed byte accesses, and that default caused two
+  serious bugs before it was removed. `NdsBus` inherited it, so every instruction fetch paid four
+  region decodes — a **65% frame-time regression** found only by profiling. `cpu-arm946e`'s
+  `TcmBus` inherited it too, and that one was silent rather than slow: an ARM9 byte write to VRAM,
+  palette RAM, or OAM is *dropped* by hardware, so decomposing a word write made every such write
+  vanish. The ARM9 could not write to VRAM at all and it presented as a black screen with every
+  register set correctly. Both are the same shape — a bus wrapper forwards `read8`/`write8` and
+  gets the wide methods for free, which is wrong for every real bus here except the Game Boy's.
+  The defaults are gone; a byte-oriented bus now calls `core_common::compose_le_read16` and friends
+  **explicitly**, so the choice appears in a diff instead of being inherited by omission. Do not
+  reintroduce a default, and do not reach for the helpers on a bus whose wide accesses are real
+  single transactions.
 
 ### Tools worth knowing about before you start
 

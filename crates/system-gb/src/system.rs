@@ -29,8 +29,9 @@
 
 use cart_common::{create_mapper, GbHeader};
 use core_common::{
-    AccessKind, AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer,
-    InputState, Savable, StateError, StateReader, StateWriter, System,
+    compose_le_read16, compose_le_read32, compose_le_write16, compose_le_write32, AccessKind,
+    AccessLog, AudioSample, Bus, CartridgeError, Cpu, Cycles, FrameOutput, Framebuffer, InputState,
+    Savable, StateError, StateReader, StateWriter, System,
 };
 use cpu_sm83::Sm83;
 
@@ -246,6 +247,22 @@ impl Bus for GbSystemBus {
 
     fn open_bus8(&self, addr: u32) -> u8 {
         self.memory.open_bus8(addr)
+    }
+
+    /// Composed from [`Bus::read8`]/[`Bus::write8`] above rather than from `self.memory`
+    /// directly, so a wide access still records one watchpoint entry per byte — exactly what a
+    /// real byte-oriented bus does, and what the watch log needs to stay accurate.
+    fn read16(&mut self, addr: u32) -> u16 {
+        compose_le_read16(self, addr)
+    }
+    fn read32(&mut self, addr: u32) -> u32 {
+        compose_le_read32(self, addr)
+    }
+    fn write16(&mut self, addr: u32, value: u16) {
+        compose_le_write16(self, addr, value)
+    }
+    fn write32(&mut self, addr: u32, value: u32) {
+        compose_le_write32(self, addr, value)
     }
 
     fn peek8(&self, addr: u32) -> Option<u8> {
