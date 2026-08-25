@@ -51,7 +51,12 @@ use crate::timing::{interrupt, reg as timing_reg, GbTiming, PpuMode, TimingOutpu
 /// but the byte layout every save state carries changed for every caller of that type at once.
 /// 4 is the OAM DMA becoming a transfer that takes time: a state saved mid-transfer has to
 /// carry how far through it is, where before there was no such moment to be in.
-const STATE_VERSION: u32 = 4;
+/// 5 is mode 3 becoming a computed length rather than a constant, which gives `GbTiming` five
+/// new fields — where the current mode 3 began and how long this line's is, the mode STAT
+/// reports and when it last changed (they lag the real mode by a machine cycle), and whether
+/// line 153 has already rolled its `LY` back to zero. A state saved mid-line is meaningless
+/// without them.
+const STATE_VERSION: u32 = 5;
 
 /// Everything the CPU can reach, plus the subsystems that run on their own schedule.
 pub struct GbSystemBus {
@@ -243,6 +248,24 @@ impl GbSystemBus {
 
         if out.frame_started || self.timing.take_lcd_restarted() {
             self.ppu.begin_frame();
+            // A restart mid-frame has no `line_started` of its own — the PPU is put back at the
+            // top of the frame without an event — so the first line's `WY` latch is sampled
+            // here instead. Missing it would cost a game its window for one frame after every
+            // `LCDC` toggle, which is a thing games do every frame.
+            self.ppu.begin_line(self.timing.ppu.ly);
+        }
+        if let Some(line) = out.line_started {
+            self.ppu.begin_line(line);
+        }
+        if let Some(line) = out.drawing_started {
+            // Mode 3 is scheduled at its minimum and corrected here, in the same cycle: the
+            // scheduler cannot see `SCX`, the window latch, or OAM, and this is the first
+            // moment all three are settled. See `GbTiming::set_mode3_length`.
+            let cycles = {
+                let (_, oam) = self.memory.vram_and_oam();
+                self.ppu.mode3_cycles(line, oam)
+            };
+            self.timing.set_mode3_length(cycles);
         }
         if let Some(line) = out.scanline_ready {
             // Composite with the registers as they are *now*, which is what makes a mid-frame
@@ -561,6 +584,11 @@ impl GbSystem {
                 self.apply_post_boot_registers();
             }
         }
+        // Power-on puts the PPU in mode 2 on line 0 without an event ever firing, so line 0 is
+        // the one line of the first frame with no `line_started` behind it. Sampling the `WY`
+        // latch here covers it; a game with `WY = 0` would otherwise lose its window until the
+        // second frame.
+        self.bus.ppu.begin_line(self.bus.timing.ppu.ly);
     }
 
     /// The hardware register state a DMG boot ROM leaves behind.
@@ -625,7 +653,18 @@ impl GbSystem {
     /// core cannot make that distinction — `KEY1` is not its register — so it always stops and
     /// the machine decides here what the stop meant.
     fn resolve_stop(&mut self) {
-        if !self.cpu.is_stopped() || !self.bus.memory.model.has_cgb_hardware() {
+        if !self.cpu.is_stopped() {
+            return;
+        }
+        // `STOP` halts the oscillator, and the divider is the oscillator counted: it reads zero
+        // for as long as the machine is stopped and starts again from zero when it resumes.
+        // Writing the register rather than assigning the field is deliberate — a divider reset
+        // can clock `TIMA` and the frame sequencer on its falling edge, and `STOP` is not exempt
+        // from that.
+        if let Some(interrupts) = self.bus.timing.write_register(timing_reg::DIV, 0) {
+            self.bus.memory.interrupt_flags |= interrupts;
+        }
+        if !self.bus.memory.model.has_cgb_hardware() {
             return;
         }
         if let Some(stall) = self.bus.cgb.speed.switch() {

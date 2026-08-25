@@ -1143,3 +1143,97 @@ fn a_transfer_survives_a_save_state_mid_flight() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mode 3's length, end to end
+// ---------------------------------------------------------------------------
+
+/// Step until the PPU is drawing, and report the length the scheduler booked for that line.
+fn mode3_length_of_next_line(gb: &mut GbSystem) -> u64 {
+    // Out of any mode 3 already running first, so this reports a line that began *after* the
+    // caller's register writes rather than the one in progress when they landed.
+    for _ in 0..10_000 {
+        if gb.bus().timing.ppu.mode != crate::timing::PpuMode::Drawing {
+            break;
+        }
+        gb.step_instruction();
+    }
+    for _ in 0..10_000 {
+        gb.step_instruction();
+        if gb.bus().timing.ppu.mode == crate::timing::PpuMode::Drawing {
+            return gb.bus().timing.mode3_length();
+        }
+    }
+    panic!("the PPU never reached mode 3");
+}
+
+#[test]
+fn the_scheduler_gets_the_length_of_the_line_the_ppu_is_about_to_draw() {
+    // The two halves of this only meet here: the PPU knows what the fetcher has to do, the
+    // scheduler knows when to fire, and the bus is what carries the number between them. A
+    // break in that wiring leaves mode 3 permanently at its minimum, which is exactly the bug
+    // this replaced and which no test inside either module could see.
+    let mut gb = system(SPIN_PROGRAM);
+    assert_eq!(
+        mode3_length_of_next_line(&mut gb),
+        crate::timing::MIN_DRAWING_CYCLES,
+        "nothing to draw yet"
+    );
+
+    write(&mut gb, ppu::reg::SCX, 5);
+    assert_eq!(
+        mode3_length_of_next_line(&mut gb),
+        crate::timing::MIN_DRAWING_CYCLES + 5,
+        "a fine scroll lengthens the line the PPU is about to draw"
+    );
+
+    // An object on the line costs more again. Put one at the far left, on a tile boundary.
+    write(&mut gb, ppu::reg::SCX, 0);
+    let lcdc = read(&mut gb, ppu::reg::LCDC);
+    write(&mut gb, ppu::reg::LCDC, lcdc | 0x02);
+    let line = gb.bus().timing.ppu.ly;
+    // OAM is unreachable during modes 2 and 3, so park in horizontal blank before writing it —
+    // exactly what a game has to do. Without this the two writes below are dropped by the bus
+    // and the object never exists, which reads as "the penalty is not applied" rather than as
+    // the lockout doing its job.
+    let resume = gb.bus().timing.ppu.mode;
+    park_in(&mut gb, PpuMode::HBlank);
+    write(&mut gb, 0xFE00, line.wrapping_add(16)); // Y, so it lands on a line about to be drawn
+    write(&mut gb, 0xFE01, 8); // X = 8: screen x 0
+    gb.bus_mut().timing.ppu.mode = resume;
+    let with_object = mode3_length_of_next_line(&mut gb);
+    assert!(
+        with_object > crate::timing::MIN_DRAWING_CYCLES,
+        "an object on the line lengthened mode 3, got {with_object}"
+    );
+}
+
+#[test]
+fn stop_holds_the_divider_at_zero() {
+    // STOP halts the oscillator, and the divider is that oscillator counted. A game that stops
+    // and resumes sees DIV start again from zero rather than from wherever it had reached.
+    let mut program = vec![0x00u8; 200]; // enough NOPs for DIV to leave zero
+    program.extend_from_slice(&[0x10, 0x00]); // stop
+    program.extend_from_slice(&[0x18, 0xFE]); // spin, if it ever resumes
+    let mut gb = system(&program);
+
+    for _ in 0..190 {
+        gb.step_instruction();
+    }
+    assert_ne!(read(&mut gb, timing_reg::DIV), 0, "DIV was running");
+
+    for _ in 0..20 {
+        gb.step_instruction();
+        if gb.cpu().is_stopped() {
+            break;
+        }
+    }
+    assert!(gb.cpu().is_stopped(), "the program reached STOP");
+    assert_eq!(read(&mut gb, timing_reg::DIV), 0, "STOP zeroed the divider");
+
+    // And it stays there: the counter is not running, so it cannot creep.
+    for _ in 0..100 {
+        gb.step_instruction();
+    }
+    assert_eq!(read(&mut gb, timing_reg::DIV), 0);
+}

@@ -616,14 +616,9 @@ pub const GB_MOONEYE_PPU: &[TestRom] = &[
         hardware: Hardware::Dmg,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "mode 3 is a fixed 172 cycles (`timing::DRAWING_CYCLES`) and nothing shortens \
-             horizontal blank to pay for it, so `SCX` does not move the mode-0 boundary at \
-             all. This ROM requires LY to increment 51 cycles after the mode-0 interrupt for \
-             SCX mod 8 = 0, 50 for 1-4, and 49 for 5-7 — the fetcher discarding SCX mod 8 \
-             pixels at the start of the line. Charging that costs a mode 3 whose length the \
-             renderer computes rather than a constant",
-        ),
+        // Passes since mode 3's length became a computed per-line value: `SCX mod 8` is charged
+        // as fine-scroll discard, so the mode-0 boundary moves where this ROM requires.
+        expected_failure: None,
         licence: MOONEYE_LICENCE,
     },
     TestRom {
@@ -656,15 +651,9 @@ pub const GB_MOONEYE_PPU: &[TestRom] = &[
         hardware: Hardware::Dmg,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "a mode change raises its STAT interrupt and updates the mode field STAT reads in \
-             the same cycle. Hardware separates the two: the interrupt comes one machine cycle \
-             before the field follows it. Confirmed by experiment — moving the mode-2 to mode-3 \
-             edge four cycles later, with the interrupts left where they are, turns this ROM \
-             and `intr_2_mode3_timing` and `intr_2_oam_ok_timing` green and turns \
-             `intr_2_0_timing` red, which measures interrupt to interrupt and is already \
-             correct. So the interrupt cycles are right and only the field lags",
-        ),
+        // Passes since the mode field STAT reports began lagging the real mode transition by one
+        // machine cycle (`timing::STAT_MODE_LAG_CYCLES`), with the interrupt left where it was.
+        expected_failure: None,
         licence: MOONEYE_LICENCE,
     },
     TestRom {
@@ -676,10 +665,14 @@ pub const GB_MOONEYE_PPU: &[TestRom] = &[
         max_frames: 600,
         expected_hash: None,
         expected_failure: Some(
-            "a sprite on the line stalls the fetcher and lengthens mode 3, and mode 3 here is \
-             the constant `timing::DRAWING_CYCLES` — the renderer composites a whole scanline \
-             at once and never reports what the fetch cost. So every sprite configuration this \
-             ROM sets up produces the same mode-0 boundary",
+            "mode 3's length is computed per line now, and `ppu::GbPpu::mode3_cycles` does \
+             charge for objects — 6 cycles each plus up to 5 more for the first one landing in \
+             a given background tile. That model is close enough for the sibling ROMs and not \
+             close enough for this one, which varies the sprites' X positions specifically to \
+             measure the per-object stall exactly. Getting it needs the real fetcher's \
+             abort-and-refetch behaviour rather than a per-object approximation, which is the \
+             same per-dot renderer the mealybug ROMs want. Not a wrong constant any more: a \
+             model that is right in aggregate and wrong per sprite",
         ),
         licence: MOONEYE_LICENCE,
     },
@@ -691,11 +684,9 @@ pub const GB_MOONEYE_PPU: &[TestRom] = &[
         hardware: Hardware::Dmg,
         max_frames: 600,
         expected_hash: None,
-        expected_failure: Some(
-            "the same one-machine-cycle lag between a STAT mode interrupt and the mode field \
-             STAT reads that `intr_2_mode0_timing` documents; this one polls for mode 3 rather \
-             than mode 0 and misses by the same cycle",
-        ),
+        // Passes for the same reason `intr_2_mode0_timing` does: the STAT mode field now lags
+        // the transition by a machine cycle. This one polls for mode 3 rather than mode 0.
+        expected_failure: None,
         licence: MOONEYE_LICENCE,
     },
     TestRom {
@@ -707,11 +698,15 @@ pub const GB_MOONEYE_PPU: &[TestRom] = &[
         max_frames: 600,
         expected_hash: None,
         expected_failure: Some(
-            "OAM does become unreachable during modes 2 and 3 now, and this ROM measures when \
-             it opens again rather than whether it ever closes. It opens one machine cycle \
-             early, for the same reason `intr_2_mode0_timing` reads mode 0 one cycle early: \
-             the lockout is driven off the mode field, and the mode field changes on the same \
-             cycle as the interrupt instead of one cycle after it",
+            "OAM does become unreachable during modes 2 and 3, and this ROM measures when it \
+             opens again rather than whether it ever closes. The one-machine-cycle STAT mode \
+             lag this used to be blamed on now exists, and turned `intr_2_mode0_timing` and \
+             `intr_2_mode3_timing` green without turning this one — so the lockout window's \
+             edge is a separate question from what STAT reports. The lockout is driven off the \
+             real mode rather than the lagged field, deliberately (a game must not be able to \
+             write OAM the PPU is still reading); what this ROM measures is that hardware opens \
+             OAM a cycle later than the mode-3-to-mode-0 edge, which is a third timing \
+             relationship neither of the other two pins down. Root cause narrowed, not confirmed",
         ),
         licence: MOONEYE_LICENCE,
     },

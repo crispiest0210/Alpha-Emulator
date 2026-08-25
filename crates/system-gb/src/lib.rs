@@ -18,7 +18,20 @@
 //! in [`cgb`], which explains why they are here rather than in `system-gbc`. What is left to
 //! that crate is the assembled machine and the boot path that recolours a DMG cartridge.
 //!
-//! # Status: the CPU cannot reach all of memory all of the time
+//! # What "scanline-accurate" means here, and where it stops
+//!
+//! Each line is *timed* to the cycle: mode 3's length is computed from the fine scroll, the
+//! window, and the line's objects ([`ppu::GbPpu::mode3_cycles`]), and mode 0 is whatever is left
+//! of the 456 — so a game that writes registers from an `HBlank` interrupt lands where hardware
+//! puts it. Mooneye's PPU acceptance tests are what hold that down.
+//!
+//! Each line is *drawn* once, when mode 3 ends, from the registers as they stand at that moment.
+//! So a register rewritten **partway along a line** applies to all of it or none of it, where
+//! hardware would split the line. Getting that too means a per-dot fetcher and a pixel FIFO,
+//! which is a different renderer, not a refinement of this one. The `mealybug-tearoom-tests`
+//! ROMs measure exactly that gap.
+//!
+//! # The CPU cannot reach all of memory all of the time
 //!
 //! Two mechanisms take memory away from the CPU, and both are modelled. The PPU has priority
 //! over the memory it is reading, so VRAM is unreachable during mode 3 and OAM during modes 2
@@ -31,10 +44,10 @@
 //! not know what the PPU is doing and a copy of the mode kept next to it would be a second
 //! source of truth for a value that changes every few hundred cycles.
 //!
-//! Mooneye's four `oam_dma` acceptance ROMs pass. Its `ppu` set does not, and the corpus
-//! records why for each: STAT's mode field changes on the same cycle as the mode-change
-//! interrupt instead of one machine cycle later, and mode 3 is a fixed length because the
-//! renderer composites a whole scanline at once and never reports what the fetch cost.
+//! Mooneye's four `oam_dma` acceptance ROMs pass, and its `ppu` set is what the mode-3 length
+//! above is measured against. The corpus records, per ROM, which of them still do not pass and
+//! why — the remaining ones need the LCD-on frame's first line modelled and `LY`/`LYC`
+//! compared while the LCD is off, neither of which the mode-3 length reaches.
 
 #![deny(unsafe_code)]
 

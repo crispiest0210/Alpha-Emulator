@@ -7,6 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Parser)]
@@ -380,7 +381,7 @@ fn fetch_test_roms(force: bool) -> Result<()> {
 
     let mut fetched = 0usize;
     let mut skipped = 0usize;
-    let mut failed = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
 
     for rom in harness::corpus::all_roms() {
         let target = corpus.join(rom.path);
@@ -407,9 +408,13 @@ fn fetch_test_roms(force: bool) -> Result<()> {
             // Leave nothing half-written behind: a truncated ROM would fail the suite in a
             // way that looks like an emulator bug.
             let _ = std::fs::remove_file(&target);
-            failed.push(rom.path);
+            failed.push(rom.path.to_string());
         }
     }
+
+    let (archived, archive_skipped) = fetch_archives(&corpus, force, &mut failed)?;
+    fetched += archived;
+    skipped += archive_skipped;
 
     println!(
         "\n{fetched} fetched, {skipped} already present, {} failed",
@@ -500,6 +505,173 @@ fn extract_from_archive(
             .map(|m| m.len() > 0)
             .unwrap_or(false);
     Ok(extracted)
+}
+
+/// Suites that ship only as an archive, and which member of it goes where.
+///
+/// Neither the Mooneye test suite nor mealybug-tearoom-tests publishes built ROMs as separate
+/// downloads — Mooneye's repository is source and a `Makefile`, mealybug's binaries live inside
+/// a zip. `game-boy-test-roms` is the community bundle of both, versioned and released, so this
+/// is one download and one pinned version instead of a build toolchain. The version is in the
+/// URL on purpose: an unpinned "latest" would silently change what the accuracy claims mean.
+const TEST_ROM_ARCHIVES: &[(&str, &[(&str, &str)])] = &[(
+    "https://github.com/c-sp/game-boy-test-roms/releases/download/v7.0/game-boy-test-roms-v7.0.zip",
+    &[
+        (
+            "gb/mooneye/ppu/intr_1_2_timing-GS.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_1_2_timing-GS.gb",
+        ),
+        (
+            "gb/mooneye/ppu/intr_2_0_timing.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_2_0_timing.gb",
+        ),
+        (
+            "gb/mooneye/ppu/intr_2_mode0_timing.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing.gb",
+        ),
+        (
+            "gb/mooneye/ppu/intr_2_mode0_timing_sprites.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_2_mode0_timing_sprites.gb",
+        ),
+        (
+            "gb/mooneye/ppu/intr_2_mode3_timing.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_2_mode3_timing.gb",
+        ),
+        (
+            "gb/mooneye/ppu/intr_2_oam_ok_timing.gb",
+            "mooneye-test-suite/acceptance/ppu/intr_2_oam_ok_timing.gb",
+        ),
+        (
+            "gb/mooneye/ppu/hblank_ly_scx_timing-GS.gb",
+            "mooneye-test-suite/acceptance/ppu/hblank_ly_scx_timing-GS.gb",
+        ),
+        (
+            "gb/mooneye/ppu/lcdon_timing-GS.gb",
+            "mooneye-test-suite/acceptance/ppu/lcdon_timing-GS.gb",
+        ),
+        (
+            "gb/mooneye/ppu/lcdon_write_timing-GS.gb",
+            "mooneye-test-suite/acceptance/ppu/lcdon_write_timing-GS.gb",
+        ),
+        (
+            "gb/mooneye/ppu/stat_lyc_onoff.gb",
+            "mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb",
+        ),
+        (
+            "gb/mooneye/ppu/stat_irq_blocking.gb",
+            "mooneye-test-suite/acceptance/ppu/stat_irq_blocking.gb",
+        ),
+        (
+            "gb/mooneye/ppu/vblank_stat_intr-GS.gb",
+            "mooneye-test-suite/acceptance/ppu/vblank_stat_intr-GS.gb",
+        ),
+        (
+            "gb/mealybug/m3_scx_low_3_bits.gb",
+            "mealybug-tearoom-tests/ppu/m3_scx_low_3_bits.gb",
+        ),
+        (
+            "gb/mealybug/m3_bgp_change.gb",
+            "mealybug-tearoom-tests/ppu/m3_bgp_change.gb",
+        ),
+        (
+            "gb/mealybug/m3_wx_4_change.gb",
+            "mealybug-tearoom-tests/ppu/m3_wx_4_change.gb",
+        ),
+        (
+            "gb/mealybug/m3_wx_5_change.gb",
+            "mealybug-tearoom-tests/ppu/m3_wx_5_change.gb",
+        ),
+        (
+            "gb/mealybug/m3_wx_6_change.gb",
+            "mealybug-tearoom-tests/ppu/m3_wx_6_change.gb",
+        ),
+    ],
+)];
+
+/// Fetch each archive and extract only the members the corpus names.
+///
+/// Only the named members: the bundle is 3.7 MB of suites this project does not run, and
+/// unpacking all of it would make `testing/test-roms/` a pile nobody can map back to a test.
+///
+/// Uses `unzip`, on the same reasoning as `curl` above — it is present on macOS, on every Linux
+/// distribution, and in Windows' own toolchain since 10 — and a zip decoder is a lot of
+/// dependency for a step that runs once per checkout.
+fn fetch_archives(corpus: &Path, force: bool, failed: &mut Vec<String>) -> Result<(usize, usize)> {
+    let mut fetched = 0usize;
+    let mut skipped = 0usize;
+
+    for (url, members) in TEST_ROM_ARCHIVES {
+        let wanted: Vec<&(&str, &str)> = members
+            .iter()
+            .filter(|(path, _)| force || !corpus.join(path).is_file())
+            .collect();
+        skipped += members.len() - wanted.len();
+        if wanted.is_empty() {
+            continue;
+        }
+        if !have_with("unzip", "-v") {
+            bail!("unzip is required to extract {url}; install it and re-run");
+        }
+
+        // Into a temporary directory beside the corpus, so a failed extraction leaves nothing
+        // half-written where the harness would find it and read it as a ROM.
+        let staging = corpus.join(".archive-staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)
+            .with_context(|| format!("creating {}", staging.display()))?;
+        let archive = staging.join("archive.zip");
+
+        println!("fetching {url}");
+        let status = Command::new("curl")
+            .args([
+                "--location",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "600",
+                "--output",
+            ])
+            .arg(&archive)
+            .arg(*url)
+            .status()
+            .with_context(|| format!("running curl for {url}"))?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&staging);
+            for (path, _) in &wanted {
+                failed.push((*path).to_string());
+            }
+            continue;
+        }
+
+        for (path, member) in &wanted {
+            let target = corpus.join(path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            // `-j` flattens the archive's directories; the corpus decides its own layout.
+            let status = Command::new("unzip")
+                .args(["-o", "-j", "-q"])
+                .arg(&archive)
+                .arg(member)
+                .arg("-d")
+                .arg(&staging)
+                .status()
+                .with_context(|| format!("running unzip for {member}"))?;
+
+            let extracted = staging.join(Path::new(member).file_name().unwrap_or_default());
+            if status.success() && extracted.is_file() {
+                std::fs::rename(&extracted, &target)
+                    .with_context(|| format!("moving {member} into place"))?;
+                fetched += 1;
+            } else {
+                failed.push((*path).to_string());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    Ok((fetched, skipped))
 }
 
 /// The workspace root, found from this crate rather than the current directory.
