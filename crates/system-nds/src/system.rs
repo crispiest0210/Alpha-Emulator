@@ -6,21 +6,25 @@
 //! of it: cooperative interleaving on one thread, never real parallelism, because determinism is
 //! required and save states depend on it. What was left open was *the quantum*.
 //!
-//! The quantum here is **a video boundary**: [`crate::video::VideoTiming`] says how far the
-//! machine may run before something visible happens, both cores run that many cycles, and then the
-//! boundary is serviced. Two other options were considered:
+//! There are two quanta, not one, and they answer different questions.
 //!
-//! - **A fixed small quantum**, say 32 cycles. Finer IPC coupling, but it decouples the CPUs from
-//!   the renderer, so a scanline can be composited from registers written part-way through it.
-//!   That is the mid-frame-scroll bug prompt 08 exists to prevent.
-//! - **One scheduler both cores hang off**, which prompt 07 built for one master. Extending it to
-//!   two means every event carries which core it belongs to and the "next event" query becomes a
-//!   merge — real work, for a machine whose two cores synchronize through polled registers and a
-//!   FIFO rather than through timing.
+//! **The renderer's is a video boundary**: [`crate::video::VideoTiming`] says how far the machine
+//! may run before something visible happens, and the boundary is serviced when it arrives. That is
+//! what keeps a scanline from being composited out of registers written part-way through it, which
+//! is the mid-frame-scroll bug prompt 08 exists to prevent.
 //!
-//! The video boundary is between 1536 and 594 cycles, which is 45-18 microseconds of emulated
-//! time. IPC round trips take far longer than that in any real game, because both ends are
-//! interrupt-driven. **This is reversible in one place**: `step_frame` is the only caller.
+//! **The two cores' is `INTERLEAVE`**, 32 cycles, inside that boundary. This part was originally
+//! the boundary too, on the reasoning that IPC round trips take far longer than 45 microseconds
+//! because both ends are interrupt-driven. That reasoning is sound and the conclusion drawn from
+//! it was wrong: the FIFO is not the only way the cores talk. They also poll each other's
+//! registers with a short fixed delay in between — a boot handshake, a driver waiting for an
+//! acknowledgement — and a delay shorter than a boundary cannot see across one. See
+//! `NdsSystem::run_cores` for the retail game that hangs on it.
+//!
+//! The option not taken is **one scheduler both cores hang off**, which prompt 07 built for one
+//! master. Extending it to two means every event carries which core it belongs to and the "next
+//! event" query becomes a merge — real work, for a machine whose two cores synchronize through
+//! polled registers and a FIFO rather than through timing.
 //!
 //! # The ARM9 runs at twice the clock, and that is all
 //!
@@ -49,7 +53,7 @@ use crate::cartridge::{NdsCartridge, HEADER_MIRROR};
 use crate::dma::{AddressStep, DmaController, Transfer};
 use crate::engine2d::{Engine, Engine2d};
 use crate::gpu3d::Gpu3d;
-use crate::input::{Input, RAW_PER_PIXEL};
+use crate::input::Input;
 use crate::ipc::Ipc;
 use crate::irq::{sources, InterruptController};
 use crate::math::MathUnits;
@@ -68,6 +72,24 @@ use cpu_arm946e::Arm946e;
 /// Where the firmware leaves its user settings for software to read, and where direct boot
 /// fabricates a block.
 const USER_SETTINGS: u32 = 0x027F_FC80;
+
+/// Where the firmware records what cartridge it booted: chip ID, chip ID again, and the header
+/// and secure-area CRC16s. See [`NdsSystem::write_system_area`].
+const SYSTEM_AREA: u32 = 0x027F_F800;
+
+/// The second copy of the same block, which is the one a game reads when the boot indicator is
+/// not zero.
+const SYSTEM_AREA_COPY: u32 = 0x027F_FC00;
+
+/// Which of the two copies software should believe. Zero means the first.
+const BOOT_INDICATOR: u32 = 0x027F_FC10;
+
+/// What the firmware leaves in the boot indicator for an ordinary cartridge boot.
+const BOOT_INDICATOR_NORMAL: u16 = 1;
+
+/// Where the header keeps its own CRC16, and the secure area's.
+const HEADER_CRC16_OFFSET: usize = 0x15E;
+const SECURE_AREA_CRC16_OFFSET: usize = 0x06C;
 
 /// Stack pointers the firmware installs, at the top of the ARM7's private work RAM.
 const SP_SYSTEM: u32 = 0x0380_FD80;
@@ -795,6 +817,14 @@ impl NdsBus {
 /// the `SWI` on every wake, and a free call would spin the slice forever.
 const HLE_CYCLES: i64 = 3;
 
+/// How far either core may run before the other gets a turn, in system cycles.
+///
+/// Small enough that a core polling for the other's write sees it within the delay any real
+/// driver waits, and large enough that the alternation costs nothing measurable: the two stepping
+/// loops are entered about forty times per scanline instead of once, and each entry is a couple of
+/// comparisons against a slice that still runs tens of instructions.
+const INTERLEAVE: u32 = 32;
+
 /// The comment field of the `SWI` at `addr`.
 ///
 /// The two encodings do not keep it in the same place. Thumb's `1101 1111 imm8` carries it in the
@@ -1013,6 +1043,7 @@ impl NdsSystem {
         for (i, byte) in header.iter().enumerate() {
             self.bus.write8(Core::Arm9, HEADER_MIRROR + i as u32, *byte);
         }
+        self.write_system_area(&header);
         self.write_user_settings();
 
         // What the firmware leaves POWCNT1 holding: both engines and both LCDs powered, with
@@ -1022,75 +1053,119 @@ impl NdsSystem {
         self.bus.powcnt1 = 0x820F;
     }
 
-    /// Fabricate the firmware user-settings block direct boot cannot copy.
+    /// Fabricate the block the firmware leaves about the cartridge it just booted.
     ///
-    /// The only field that matters here is the touchscreen calibration, and it has to be the
-    /// inverse of what [`crate::input`]'s controller reports — see `RAW_PER_PIXEL`. Two points,
-    /// one at the origin and one at the far corner, give the linear mapping software expects.
-    fn write_user_settings(&mut self) {
-        let put16 = |bus: &mut NdsBus, at: u32, v: u16| {
-            bus.write8(Core::Arm9, at, v as u8);
-            bus.write8(Core::Arm9, at + 1, (v >> 8) as u8);
+    /// # A game checks this against the card, and terminates when they disagree
+    ///
+    /// The firmware identifies the cartridge before handing control to it and writes what it
+    /// found here: the chip ID the card answered, and the two CRC16s out of the header. A Nitro
+    /// SDK title reads the chip ID back — command `0xB8`, straight to the card — and compares it
+    /// against the copy left here. If they differ, the card it is running from is not the card
+    /// the firmware booted, and the SDK's answer to that is `OS_Terminate`: interrupts off, halt,
+    /// forever.
+    ///
+    /// Direct boot skipped all of this, so the copy was zero and the card answered a real ID.
+    /// Pokemon Platinum makes that check four frames in and never reaches its own first
+    /// instruction of game code. What it looks like from outside is a machine at full speed with
+    /// two white screens — which is also what a dozen unrelated bugs look like, and why this one
+    /// took a `OS_Terminate` in a program-counter trace to find rather than a picture.
+    ///
+    /// Nothing here needs the *real* cartridge's numbers. It needs the machine to agree with
+    /// itself: the same [`NdsCartridge::chip_id`] the card answers, written where the firmware
+    /// would have written it.
+    ///
+    /// # Both copies, and the indicator that chooses between them
+    ///
+    /// The block exists twice, at [`SYSTEM_AREA`] and at [`SYSTEM_AREA_COPY`], and which one a
+    /// game reads depends on the boot indicator at [`BOOT_INDICATOR`] — zero sends it to the
+    /// first, anything else to the second. Both are written with the same values and the
+    /// indicator is set to the normal-boot value, so a game reaches the right answer down either
+    /// path rather than down the one that happened to be tested.
+    fn write_system_area(&mut self, header: &[u8]) {
+        let chip_id = self.bus.cart.chip_id();
+        let halfword = |at: usize| {
+            u16::from_le_bytes([
+                header.get(at).copied().unwrap_or(0),
+                header.get(at + 1).copied().unwrap_or(0),
+            ])
         };
-        let base = USER_SETTINGS;
-        put16(&mut self.bus, base + 0x58, 0); // ADC x1
-        put16(&mut self.bus, base + 0x5A, 0); // ADC y1
-        self.bus.write8(Core::Arm9, base + 0x5C, 0); // screen x1
-        self.bus.write8(Core::Arm9, base + 0x5D, 0); // screen y1
-        put16(&mut self.bus, base + 0x5E, 255 * RAW_PER_PIXEL);
-        put16(&mut self.bus, base + 0x60, 191 * RAW_PER_PIXEL);
-        self.bus.write8(Core::Arm9, base + 0x62, 255);
-        self.bus.write8(Core::Arm9, base + 0x63, 191);
+        // The header carries both CRC16s already, and the firmware copies rather than recomputes
+        // them: a cartridge whose header CRC is wrong is one the firmware refuses to boot at all,
+        // so software reading these is checking that it is the same cart, not that it is a valid
+        // one.
+        let header_crc = halfword(HEADER_CRC16_OFFSET);
+        let secure_crc = halfword(SECURE_AREA_CRC16_OFFSET);
+
+        for base in [SYSTEM_AREA, SYSTEM_AREA_COPY] {
+            self.write_word(base, chip_id);
+            // Chip ID 2 is the second ROM chip's, and a one-chip cartridge reports the same ID
+            // for both — which every retail card is.
+            self.write_word(base + 4, chip_id);
+            self.write_halfword(base + 8, header_crc);
+            self.write_halfword(base + 10, secure_crc);
+        }
+        self.write_halfword(BOOT_INDICATOR, BOOT_INDICATOR_NORMAL);
     }
 
-    /// Run both cores for `cycles` system cycles.
+    fn write_word(&mut self, at: u32, value: u32) {
+        for (i, byte) in value.to_le_bytes().iter().enumerate() {
+            self.bus.write8(Core::Arm9, at + i as u32, *byte);
+        }
+    }
+
+    fn write_halfword(&mut self, at: u32, value: u16) {
+        for (i, byte) in value.to_le_bytes().iter().enumerate() {
+            self.bus.write8(Core::Arm9, at + i as u32, *byte);
+        }
+    }
+
+    /// Copy the user-settings block out of the firmware, where the firmware would have put it.
+    ///
+    /// This used to fabricate a block here directly, with the touchscreen calibration in it and
+    /// nothing else. That was enough for software that reads the RAM copy and no more. It is not
+    /// enough for software that reads the *flash* — see [`crate::firmware`] — because then there
+    /// are two blocks in the machine and only one of them has a checksum.
+    ///
+    /// So there is one block, in the flash, and this copies it. Which of the flash's two copies
+    /// is current is decided the way software decides it: by the update counter at offset `0x70`,
+    /// taking the block whose counter is one greater than the other's.
+    fn write_user_settings(&mut self) {
+        let settings = self.bus.input.firmware.current_user_settings().to_vec();
+        for (i, byte) in settings.iter().enumerate() {
+            self.bus.write8(Core::Arm9, USER_SETTINGS + i as u32, *byte);
+        }
+    }
+
+    /// Run both cores for `cycles` system cycles, alternating between them in short slices.
     ///
     /// The ARM9 runs at twice the clock, and both carry a debt so an instruction that overruns
     /// the slice is paid for out of the next one rather than being free.
+    ///
+    /// # Why this is chopped up
+    ///
+    /// The video boundary this is called on is up to 1536 system cycles, and running one core
+    /// through all of it before the other starts makes every cross-core write invisible for that
+    /// long. Real DS software notices. The pattern that breaks is "write a register, wait a
+    /// fixed short while, read back what the other core put there" — which is how both boot
+    /// handshakes and several drivers are written, because on hardware the cores genuinely run at
+    /// the same time. Pokemon Platinum's ARM7 waits about a thousand cycles that way, and with a
+    /// whole boundary of lead the ARM9 had not run at all by the time it looked.
+    ///
+    /// [`INTERLEAVE`] is that quantum. It does not move any video event: the boundary is still
+    /// where a scanline is composited and where the frame loop regains control, so nothing here
+    /// lets a line be drawn from registers written part-way through it. All it changes is the
+    /// order in which the two cores' cycles are spent inside a boundary they both already sit in.
     fn run_cores(&mut self, cycles: u32) {
-        let mut budget9 = cycles as i64 * 2 - self.arm9_debt;
-        while budget9 > 0 {
-            if self.bus.halted[Core::Arm9 as usize] {
-                if self.bus.irq[Core::Arm9 as usize].active() != 0 {
-                    self.bus.halted[Core::Arm9 as usize] = false;
-                } else {
-                    budget9 = 0;
-                    break;
-                }
+        let mut remaining = cycles;
+        loop {
+            let slice = remaining.min(INTERLEAVE);
+            self.run_arm9(slice);
+            self.run_arm7(slice);
+            remaining -= slice;
+            if remaining == 0 {
+                break;
             }
-            self.service_interrupt(Core::Arm9);
-            // Both stand in for BIOS code, so both cost time rather than being free: a wait that
-            // is never satisfied must still run the slice down and hand the frame loop back.
-            if self.at_bios_entry(Core::Arm9) {
-                self.run_bios_hle(Core::Arm9);
-                budget9 -= HLE_CYCLES;
-                continue;
-            }
-            let mut view = Arm9View(&mut self.bus);
-            budget9 -= self.arm9.step(&mut view).0 as i64;
         }
-        self.arm9_debt = -budget9;
-
-        let mut budget7 = cycles as i64 - self.arm7_debt;
-        while budget7 > 0 {
-            if self.bus.halted[Core::Arm7 as usize] {
-                if self.bus.irq[Core::Arm7 as usize].active() != 0 {
-                    self.bus.halted[Core::Arm7 as usize] = false;
-                } else {
-                    budget7 = 0;
-                    break;
-                }
-            }
-            self.service_interrupt(Core::Arm7);
-            if self.at_bios_entry(Core::Arm7) {
-                self.run_bios_hle(Core::Arm7);
-                budget7 -= HLE_CYCLES;
-                continue;
-            }
-            let mut view = Arm7View(&mut self.bus);
-            budget7 -= self.arm7.step(&mut view).0 as i64;
-        }
-        self.arm7_debt = -budget7;
 
         let irq9 = self.bus.timers[Core::Arm9 as usize].step(cycles);
         let irq7 = self.bus.timers[Core::Arm7 as usize].step(cycles);
@@ -1114,6 +1189,54 @@ impl NdsSystem {
         // performed. A driver that reads `CARD_DATA` with the CPU instead finishes it inside the
         // stepping above, and this catches that too.
         self.raise_card_interrupt();
+    }
+
+    /// Step the ARM9 for `cycles` system cycles' worth of its own doubled clock.
+    fn run_arm9(&mut self, cycles: u32) {
+        let mut budget = cycles as i64 * 2 - self.arm9_debt;
+        while budget > 0 {
+            if self.bus.halted[Core::Arm9 as usize] {
+                if self.bus.irq[Core::Arm9 as usize].active() != 0 {
+                    self.bus.halted[Core::Arm9 as usize] = false;
+                } else {
+                    budget = 0;
+                    break;
+                }
+            }
+            self.service_interrupt(Core::Arm9);
+            // Both stand in for BIOS code, so both cost time rather than being free: a wait that
+            // is never satisfied must still run the slice down and hand the frame loop back.
+            if self.at_bios_entry(Core::Arm9) {
+                budget -= self.run_bios_hle(Core::Arm9);
+                continue;
+            }
+            let mut view = Arm9View(&mut self.bus);
+            budget -= self.arm9.step(&mut view).0 as i64;
+        }
+        self.arm9_debt = -budget;
+    }
+
+    /// Step the ARM7 for `cycles` system cycles, which are its own cycles one for one.
+    fn run_arm7(&mut self, cycles: u32) {
+        let mut budget = cycles as i64 - self.arm7_debt;
+        while budget > 0 {
+            if self.bus.halted[Core::Arm7 as usize] {
+                if self.bus.irq[Core::Arm7 as usize].active() != 0 {
+                    self.bus.halted[Core::Arm7 as usize] = false;
+                } else {
+                    budget = 0;
+                    break;
+                }
+            }
+            self.service_interrupt(Core::Arm7);
+            if self.at_bios_entry(Core::Arm7) {
+                budget -= self.run_bios_hle(Core::Arm7);
+                continue;
+            }
+            let mut view = Arm7View(&mut self.bus);
+            budget -= self.arm7.step(&mut view).0 as i64;
+        }
+        self.arm7_debt = -budget;
     }
 
     /// Arm whichever DMA channel is waiting on the cartridge.
@@ -1176,6 +1299,10 @@ impl NdsSystem {
             }
             if self.bus.input.irq_pending() {
                 raise |= sources::KEYPAD;
+            }
+            // The ARM9's alone: the ARM7 has no 3D core to have a FIFO in.
+            if core == Core::Arm9 && self.bus.gpu3d.fifo_irq_pending() {
+                raise |= sources::GEOMETRY_FIFO;
             }
             if raise != 0 {
                 self.bus.irq[core as usize].raise(raise);
@@ -1289,10 +1416,12 @@ impl NdsSystem {
     /// Split from the gate and never inlined, so the frame loop's inner loop stays small: this
     /// runs a few thousand times a frame at most, against several hundred thousand instructions.
     #[inline(never)]
-    fn run_bios_hle(&mut self, core: Core) {
-        if !self.intercept_bios_irq_return(core) {
-            self.intercept_bios_call(core);
+    /// Returns what the intercepted call cost the calling core, in that core's own cycles.
+    fn run_bios_hle(&mut self, core: Core) -> i64 {
+        if self.intercept_bios_irq_return(core) {
+            return HLE_CYCLES;
         }
+        HLE_CYCLES + self.intercept_bios_call(core) as i64
     }
 
     /// The other half of the wrapper: unwind and leave the exception.
@@ -1354,7 +1483,7 @@ impl NdsSystem {
     /// Trapping at the vector is one comparison per instruction instead, and reads the comment
     /// byte once per call rather than once per instruction. It also answers a *conditional* `SWI`
     /// correctly, which the peek could not without duplicating the flag check.
-    fn intercept_bios_call(&mut self, core: Core) -> bool {
+    fn intercept_bios_call(&mut self, core: Core) -> u32 {
         let vector = Exception::SoftwareInterrupt.vector();
         let (has_bios, pc, expected) = match core {
             Core::Arm9 => (
@@ -1369,7 +1498,7 @@ impl NdsSystem {
             ),
         };
         if has_bios || pc != expected {
-            return false;
+            return 0;
         }
 
         // `R14_svc` holds the address of the instruction *after* the `SWI`, so the call itself is
@@ -1436,7 +1565,7 @@ impl NdsSystem {
             Core::Arm9 => self.arm9.core.exception_return(resume),
             Core::Arm7 => self.arm7.exception_return(resume),
         }
-        true
+        effect.extra_cycles
     }
 
     /// Perform every DMA transfer that is ready, on both cores.

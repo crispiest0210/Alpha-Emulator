@@ -23,13 +23,18 @@
 //! direct boot fabricates. The two must agree, which is why the constant lives here and the
 //! comment saying so lives next to the writer.
 //!
-//! # What is not implemented
+//! # The other two devices on the bus
 //!
-//! The other two SPI devices. The power-management chip accepts writes and reads back zero; the
-//! firmware chip reads as `0xFF`, which is what an erased or absent flash looks like. A game that
-//! reads its user settings straight from firmware rather than from the copy in main RAM gets
-//! nothing useful — but that is the path direct boot exists to make unnecessary.
+//! The firmware flash is [`crate::firmware`], which this owns and forwards to. It used to read as
+//! `0xFF` — an absent chip — on the reasoning that direct boot made it unnecessary; see that
+//! module for the retail game that reads it anyway and hangs.
+//!
+//! The power-management chip is not implemented: it accepts writes and reads back zero. What it
+//! controls is the backlight, the power LED, and the amplifier — outputs this machine has no
+//! equivalent of — and its one input, the battery level, has no meaningful answer on a machine
+//! that is not running on a battery.
 
+use crate::firmware::Firmware;
 use crate::Core;
 use core_common::{Buttons, InputState, Savable, StateError, StateReader, StateWriter};
 
@@ -68,8 +73,8 @@ impl SpiDevice {
     }
 }
 
-/// Keypad state and the SPI bus the touchscreen hangs off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Keypad state and the SPI bus the touchscreen and the firmware flash hang off.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
     /// Active low, so all ones is nothing held.
     keyinput: u16,
@@ -82,6 +87,8 @@ pub struct Input {
     /// How many bytes of that conversion have been read.
     tsc_position: u8,
     touch: Option<(u16, u16)>,
+    /// The firmware flash, which is the second device on this bus.
+    pub firmware: Firmware,
 }
 
 impl Default for Input {
@@ -103,6 +110,7 @@ impl Input {
             tsc_output: 0,
             tsc_position: 0,
             touch: None,
+            firmware: Firmware::new(),
         }
     }
 
@@ -233,16 +241,20 @@ impl Input {
     /// Shift one byte through the SPI bus and latch what came back.
     fn transfer(&mut self, byte: u8) {
         // Bit 11 held low ends the transfer and deselects the device, which is what resets the
-        // controller's byte counter between conversions.
+        // controller's byte counter between conversions and what frames one flash command.
         let keep_selected = self.spicnt & (1 << 11) != 0;
-        self.spidata = match SpiDevice::from_bits(self.spicnt) {
+        let device = SpiDevice::from_bits(self.spicnt);
+        self.spidata = match device {
             SpiDevice::Touchscreen => self.touchscreen_transfer(byte),
-            // An erased or absent flash reads as all ones.
-            SpiDevice::Firmware => 0xFF,
+            SpiDevice::Firmware => self.firmware.transfer(byte),
             SpiDevice::PowerManagement | SpiDevice::Reserved => 0,
         };
         if !keep_selected {
             self.tsc_position = 0;
+            // The flash's framing is the select line and nothing else: a command runs until the
+            // chip is deselected. Leaving it selected across the release is how a driver that
+            // reads two blocks in a row ends up with the second one continuing the first.
+            self.firmware.deselect();
         }
     }
 
@@ -314,6 +326,7 @@ impl Savable for Input {
                 w.write_u16(0);
             }
         }
+        self.firmware.save(w);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -328,6 +341,7 @@ impl Savable for Input {
         let x = r.read_u16()?;
         let y = r.read_u16()?;
         self.touch = touching.then_some((x, y));
+        self.firmware.load(r)?;
         Ok(())
     }
 }

@@ -469,7 +469,11 @@ impl NdsCartridge {
     }
 
     /// A plausible chip ID: 1 MiB-unit capacity in the middle byte, as real carts report.
-    fn chip_id(&self) -> u32 {
+    ///
+    /// Public because direct boot has to leave the same number in the system area the firmware
+    /// fills in: a game that compares the two and finds them different concludes its cartridge
+    /// has been swapped under it. See `NdsSystem::write_system_area`.
+    pub fn chip_id(&self) -> u32 {
         if !self.is_present() {
             return u32::MAX;
         }

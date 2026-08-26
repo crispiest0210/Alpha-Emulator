@@ -184,14 +184,45 @@ fn deselecting_the_device_restarts_the_byte_counter() {
 }
 
 #[test]
-fn the_other_two_spi_devices_are_absent_but_do_not_hang() {
+fn the_firmware_answers_a_read_out_of_its_own_image() {
+    // The bus used to answer every firmware byte with 0xFF. See `crate::firmware` for the retail
+    // game that reads the flash directly and hangs when it does. This checks the join: bytes
+    // clocked at the firmware device reach the chip and its answer comes back through SPIDATA.
     let mut input = Input::new();
-    // Firmware reads as an erased flash.
+    let expected = input.firmware.image()[4];
+    for byte in [0x03, 0x00, 0x00, 0x04] {
+        input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (1 << 8));
+        input.write16(ARM7, reg::SPIDATA, byte);
+    }
+    input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (1 << 8));
+    input.write16(ARM7, reg::SPIDATA, 0);
+    assert_eq!(input.read16(ARM7, reg::SPIDATA), Some(expected as u16));
+}
+
+#[test]
+fn releasing_the_chipselect_ends_the_firmware_command() {
+    // Bit 11 is the select line, and the flash's only framing. A driver that reads two blocks in
+    // a row gets the second from where the first stopped without this.
+    let mut input = Input::new();
     input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (1 << 8));
     input.write16(ARM7, reg::SPIDATA, 0x03);
-    assert_eq!(input.read16(ARM7, reg::SPIDATA), Some(0xFF));
+    // No hold: this byte transfers and then deselects.
+    input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 8));
+    input.write16(ARM7, reg::SPIDATA, 0x00);
+    // Which makes the next byte an opcode again, not the second address byte.
+    input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (1 << 8));
+    input.write16(ARM7, reg::SPIDATA, 0x05);
+    input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (1 << 8));
+    input.write16(ARM7, reg::SPIDATA, 0);
+    // The status register, which is what opcode 5 asks for, and not image data.
+    assert_eq!(input.read16(ARM7, reg::SPIDATA), Some(0));
+}
 
-    // Power management accepts writes and reads back zero.
+#[test]
+fn the_power_management_chip_is_absent_but_does_not_hang() {
+    // It accepts writes and reads back zero: what it controls — backlight, power LED, amplifier —
+    // has no equivalent here, and its one input is a battery this machine does not run on.
+    let mut input = Input::new();
     input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11));
     input.write16(ARM7, reg::SPIDATA, 0x00);
     assert_eq!(input.read16(ARM7, reg::SPIDATA), Some(0));

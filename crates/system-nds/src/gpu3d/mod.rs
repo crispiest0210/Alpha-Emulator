@@ -70,8 +70,8 @@ pub struct Gpu3d {
     disp3dcnt: u16,
     clear_color: u32,
     clear_depth: u32,
-    /// `GXSTAT`'s interrupt mode, bits 30-31. Stored and reported; the FIFO never fills here, so
-    /// the interrupt it selects has nothing to fire on. See the note on FIFO depth below.
+    /// `GXSTAT`'s interrupt mode, bits 30-31: 0 never, 1 when the FIFO is less than half full,
+    /// 2 when it is empty. See [`Self::fifo_irq_pending`].
     gxstat_irq: u8,
 
     /// Opcodes waiting for their parameters, from a packed `GXFIFO` word.
@@ -197,6 +197,30 @@ impl Gpu3d {
             _ if (reg::TOON_TABLE..reg::TOON_TABLE + 64).contains(&addr) => 0,
             _ => return None,
         })
+    }
+
+    /// Whether the geometry FIFO's interrupt condition currently holds.
+    ///
+    /// # Why this is always the condition, and why that is not a shortcut
+    ///
+    /// Commands here are executed as they arrive rather than queued, so the FIFO is empty at every
+    /// moment software can look at it — which makes both of the conditions `GXSTAT` can select
+    /// permanently true. This says so instead of saying nothing.
+    ///
+    /// Saying nothing is what it did before, and it cost a real game its title screen. The DS's
+    /// geometry interrupt is how a driver learns that the hardware has taken the display list it
+    /// handed over: Pokemon Platinum sets a flag, sends its list, and spins until the interrupt
+    /// handler clears the flag again. With the FIFO reported empty and the interrupt never raised,
+    /// the one thing the machine *had* to tell the game was the one thing it never said, and the
+    /// game waited at a title screen that was otherwise drawn correctly.
+    ///
+    /// The interrupt is a level, not an edge — the condition holds for as long as it holds — so
+    /// this is asked once per quantum rather than latched at a transition. That is also why
+    /// software turns the mode back off in its handler: on hardware, leaving it on with an empty
+    /// FIFO re-enters the handler forever, and it does here too.
+    pub fn fifo_irq_pending(&self) -> bool {
+        // 1 is "less than half full" and 2 is "empty"; an empty FIFO satisfies both.
+        matches!(self.gxstat_irq, 1 | 2)
     }
 
     /// `GXSTAT`, assembled from the pieces that own each field.

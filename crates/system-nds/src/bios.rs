@@ -131,10 +131,16 @@ impl BiosCall {
             Core::Arm7 => match comment {
                 0x07 => Some(BiosCall::Sleep),
                 0x08 => Some(BiosCall::SoundBias),
+                // The three sound tables, and they are 0x1A-0x1C rather than the 0x20-0x22 that
+                // was here before. Pokemon Platinum's own SWI thunk table settles it: `svc #0x1a`,
+                // `svc #0x1b`, `svc #0x1c` sit immediately after the decompression thunks, and its
+                // sound driver calls the last two thousands of times a second — with arguments in
+                // exactly the ranges those two tables are indexed by. At 0x20-0x22 they arrived as
+                // `Unhandled` and answered nothing.
+                0x1A => Some(BiosCall::GetSineTable),
+                0x1B => Some(BiosCall::GetPitchTable),
+                0x1C => Some(BiosCall::GetVolumeTable),
                 0x1F => Some(BiosCall::CustomHalt),
-                0x20 => Some(BiosCall::GetSineTable),
-                0x21 => Some(BiosCall::GetPitchTable),
-                0x22 => Some(BiosCall::GetVolumeTable),
                 _ => None,
             },
         };
@@ -152,6 +158,12 @@ pub struct BiosEffect {
     /// Only [`BiosCall::IntrWait`] and [`BiosCall::VBlankIntrWait`] set this, and only while their
     /// condition is still unmet. See [`Context`] for why the wait is a loop rather than one halt.
     pub repeat: bool,
+    /// Extra cycles this call cost, on top of the flat charge every intercepted call pays.
+    ///
+    /// Almost every call leaves this at zero: the flat charge is a guess and refining it per call
+    /// would be a guess with more digits. [`BiosCall::WaitByLoop`] is the exception, and it is not
+    /// a refinement — it is the whole meaning of the call. See there.
+    pub extra_cycles: u32,
 }
 
 /// The per-core state `IntrWait` needs, which is the one thing the two cores keep in different
@@ -215,7 +227,7 @@ pub fn dispatch<B: Bus + ?Sized>(
         }
         BiosCall::CpuSet => cpu_set(cpu, bus, false),
         BiosCall::CpuFastSet => cpu_set(cpu, bus, true),
-        BiosCall::GetCrc16 => crc16(cpu, bus),
+        BiosCall::GetCrc16 => crc16_call(cpu, bus),
         BiosCall::IsDebugger => {
             // Zero means a retail unit. Answering "debugger" sends libnds down a path that expects
             // the extra 4 MiB of RAM a development unit has and this machine does not.
@@ -235,9 +247,22 @@ pub fn dispatch<B: Bus + ?Sized>(
         // wait for a *new* vertical blank.
         BiosCall::VBlankIntrWait => intr_wait(bus, &mut effect, ctx, true, 1),
         BiosCall::WaitByLoop => {
-            // A delay of `r0` iterations. Returning at once makes the machine faster than hardware
-            // through this call and never slower, so the only software it can mislead is software
-            // timing a bus by counting loops — which no DS software does, because it has timers.
+            // A delay of `r0` iterations, and the delay is the entire point of the call — so it
+            // has to cost the time it asks for rather than returning at once.
+            //
+            // The BIOS loop is `SUBS r0, r0, #1` / `BGT`, four cycles an iteration, and it is how
+            // DS software spells "wait for the *other* core to notice what I just wrote". Pokemon
+            // Platinum's ARM7 boot handshake is exactly that: write a nibble to `IPCSYNC`,
+            // `SWI 3` for a thousand cycles, then read back what the ARM9 echoed. A call that
+            // returns instantly reads the register back before the other core has run a single
+            // instruction, the compare fails every round, and both cores handshake forever at a
+            // white screen — with no BIOS call failing, no register wrong, and nothing in any
+            // unit test to say so.
+            //
+            // Charging the time cannot make a machine slower than hardware here, because
+            // [`Self::extra_cycles`] is spent by the caller's own slice, which is what the loop
+            // would have spent anyway.
+            effect.extra_cycles = cpu.reg(0).saturating_mul(4);
             cpu.set_reg(0, 0);
         }
         BiosCall::SoundBias => {
@@ -265,11 +290,14 @@ pub fn dispatch<B: Bus + ?Sized>(
         // But it is *logged*. A call that silently does nothing is exactly how a GBA game ran at
         // full speed with a black screen for a whole session: every graphic it owned was
         // LZ77-compressed, the decompressor was missing, and nothing said so.
+        BiosCall::GetPitchTable => cpu.set_reg(0, pitch_table(cpu.reg(0)) as u32),
+        BiosCall::GetVolumeTable => cpu.set_reg(0, volume_table(cpu.reg(0)) as u32),
         BiosCall::BitUnPack
         | BiosCall::Sleep
+        // The sine table is the one of the three that could not be reconstructed: see
+        // [`pitch_table`] for what made the other two knowable, and why guessing this one's
+        // amplitude would be worse than answering nothing.
         | BiosCall::GetSineTable
-        | BiosCall::GetPitchTable
-        | BiosCall::GetVolumeTable
         | BiosCall::Unhandled(_) => {
             tracing::warn!(
                 core = ctx.core.name(),
@@ -381,21 +409,93 @@ fn cpu_set<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B, fast: bool) {
 /// checksums in a `.nds` header, so it can be checked against a real cartridge rather than only
 /// against itself. Software calls it with an initial value of `0xFFFF`; the parameter exists so a
 /// checksum can be continued across several buffers.
-fn crc16<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
-    let mut crc = cpu.reg(0) & 0xFFFF;
+fn crc16_call<B: Bus + ?Sized>(cpu: &mut Arm7Tdmi, bus: &mut B) {
+    let mut crc = cpu.reg(0) as u16;
     let address = cpu.reg(1);
     let length = cpu.reg(2);
     for offset in 0..length {
-        crc ^= bus.read8(address.wrapping_add(offset)) as u32;
-        for _ in 0..8 {
-            let carry = crc & 1 != 0;
-            crc >>= 1;
-            if carry {
-                crc ^= 0xA001;
-            }
+        crc = crc16_step(crc, bus.read8(address.wrapping_add(offset)));
+    }
+    cpu.set_reg(0, crc as u32);
+}
+
+/// `GetPitchTable`: the frequency multiplier for a pitch offset, in 1/64ths of a semitone.
+///
+/// # These two tables are computed, not dumped
+///
+/// They live in the ARM7 BIOS, which this project does not vendor, so the numbers here are
+/// reconstructed. That is only defensible because the caller's own arithmetic says what they have
+/// to be, and Pokemon Platinum's sound driver is sitting in memory saying it:
+///
+/// - The driver adds `0x10000` to what this returns and multiplies a timer reload by the result,
+///   normalising a pitch offset into `0..0x300` — 768, twelve semitones of sixty-four steps —
+///   and counting the octaves it removed as a shift. So the table is `2^(index/768)` in 16.16,
+///   less the one that the `+0x10000` puts back.
+/// - For [`volume_table`], the driver indexes it with `attenuation + 723` and separately picks the
+///   hardware's volume divider at `attenuation < -60`, `< -120`, and `< -240`. Those three
+///   thresholds are the divider's own steps — halve, quarter, sixteenth, which is -6.02, -12.04
+///   and -24.08 decibels — so the units are tenths of a decibel, the table spans -72.3 dB to 0,
+///   and it holds the 7-bit volume that is *left* once the divider has taken its share.
+///
+/// Getting the last bit of either wrong is inaudible: one step of the volume table is 0.07 dB and
+/// one of the pitch table is 1/64th of a semitone. Getting them *absent* is not, which is what was
+/// happening — they were mapped to the wrong `SWI` numbers, arrived as unhandled, and answered
+/// zero, which is silence and no pitch at all.
+///
+/// The third table, `GetSineTable`, is deliberately still unanswered. Nothing in reach says what
+/// amplitude its entries are scaled to, and a vibrato depth wrong by a factor of two hundred is a
+/// worse thing to ship than a vibrato that is missing. It is logged instead.
+fn pitch_table(index: u32) -> u16 {
+    // 768 entries; hardware's table has no more, and the driver never asks past it.
+    let index = index.min(767) as f64;
+    let multiplier = (index / 768.0).exp2();
+    // Less the one the driver's own `+0x10000` puts back, which is why an index of zero — no
+    // pitch change at all — is stored as zero rather than as unity.
+    let scaled = (multiplier * 65536.0).round() as u32;
+    scaled.saturating_sub(65536) as u16
+}
+
+/// `GetVolumeTable`: the 7-bit channel volume for an attenuation in tenths of a decibel.
+///
+/// See [`pitch_table`] for where the shape of this comes from.
+fn volume_table(index: u32) -> u8 {
+    // 724 entries, indexed by `attenuation + 723`, so index 723 is no attenuation at all.
+    let index = index.min(723) as i32;
+    let tenths_of_a_decibel = (index - 723) as f64;
+    // What the hardware's volume divider will already have taken off, at the same three thresholds
+    // the driver switches it on.
+    let divider = match tenths_of_a_decibel {
+        t if t < -240.0 => 16.0,
+        t if t < -120.0 => 4.0,
+        t if t < -60.0 => 2.0,
+        _ => 1.0,
+    };
+    let gain = 10f64.powf(tenths_of_a_decibel / 200.0);
+    (gain * divider * 127.0).round().clamp(0.0, 127.0) as u8
+}
+
+/// The same checksum over a slice, for the parts of the machine that have to produce blocks
+/// software will hand to [`BiosCall::GetCrc16`] and expect to pass.
+///
+/// [`crate::firmware`] is the one that needs it: a fabricated settings block whose checksum was
+/// computed by a second implementation of this would be one refactor away from being rejected by
+/// the console it was fabricated for.
+pub fn crc16(initial: u16, bytes: &[u8]) -> u16 {
+    bytes
+        .iter()
+        .fold(initial, |crc, byte| crc16_step(crc, *byte))
+}
+
+fn crc16_step(crc: u16, byte: u8) -> u16 {
+    let mut crc = crc ^ byte as u16;
+    for _ in 0..8 {
+        let carry = crc & 1 != 0;
+        crc >>= 1;
+        if carry {
+            crc ^= 0xA001;
         }
     }
-    cpu.set_reg(0, crc);
+    crc
 }
 
 /// Which compressed format a call is unpacking.
@@ -644,6 +744,71 @@ fn decode_huffman<B: Bus + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_sound_tables_are_the_calls_the_arm7_actually_makes() {
+        // They were at 0x20-0x22, where no DS BIOS has them. A game's sound driver calling
+        // 0x1B thousands of times a second got `Unhandled` and a zero back.
+        assert_eq!(
+            BiosCall::from_comment(Core::Arm7, 0x1A),
+            BiosCall::GetSineTable
+        );
+        assert_eq!(
+            BiosCall::from_comment(Core::Arm7, 0x1B),
+            BiosCall::GetPitchTable
+        );
+        assert_eq!(
+            BiosCall::from_comment(Core::Arm7, 0x1C),
+            BiosCall::GetVolumeTable
+        );
+        // And they are the ARM7's alone. The ARM9 has no sound hardware to have tables for.
+        assert_eq!(
+            BiosCall::from_comment(Core::Arm9, 0x1B),
+            BiosCall::Unhandled(0x1B)
+        );
+    }
+
+    #[test]
+    fn the_pitch_table_doubles_over_an_octave() {
+        // The driver adds 0x10000 to every entry, so this is `2^(index/768)` in 16.16 less one.
+        // 768 steps is twelve semitones, so the far end has to be one octave up.
+        assert_eq!(pitch_table(0), 0);
+        // Half an octave up is the square root of two: 65536 * 1.41421 - 65536.
+        assert_eq!(pitch_table(768 / 2), 27146);
+        // One step short of a full octave, which would be exactly 0x10000 and wrap the u16.
+        assert_eq!(pitch_table(767), 65418);
+        // Indices past the table's end clamp rather than wrapping into a wildly wrong frequency.
+        assert_eq!(pitch_table(10_000), pitch_table(767));
+        // Monotonic, which is the property a pitch bend audibly depends on.
+        for i in 1..768 {
+            assert!(pitch_table(i) > pitch_table(i - 1), "at {i}");
+        }
+    }
+
+    #[test]
+    fn the_volume_table_hands_back_the_share_the_divider_did_not_take() {
+        // Index 723 is no attenuation: full 7-bit volume, divider at one.
+        assert_eq!(volume_table(723), 127);
+        // Just below each of the driver's three divider thresholds the volume jumps back up,
+        // because the divider has just taken a step and the table covers what is left. Without
+        // that the level would drop twice at every threshold.
+        for threshold in [60u32, 120, 240] {
+            let above = volume_table(723 - threshold);
+            let below = volume_table(723 - threshold - 1);
+            assert!(
+                below > above,
+                "the divider steps at -{threshold} tenths of a decibel"
+            );
+        }
+        // -6 dB is half the amplitude, which is what the top of the range must show.
+        assert_eq!(volume_table(723 - 60), 64);
+        assert_eq!(
+            volume_table(0),
+            0,
+            "-72.3 dB is below one step of a 7-bit volume"
+        );
+        assert_eq!(volume_table(10_000), 127, "past the end clamps");
+    }
     use super::*;
     use cpu_arm7tdmi::BootState;
 

@@ -97,6 +97,16 @@ fn ldr_word(rd: u32, rn: u32) -> u32 {
     0xE590_0000 | (rn << 16) | (rd << 12)
 }
 
+/// `ldrh rd, [rn]`
+fn ldrh(rd: u32, rn: u32) -> u32 {
+    0xE1D0_00B0 | (rn << 16) | (rd << 12)
+}
+
+/// `mov rd, rm, lsl #amount`
+fn lsl_imm(rd: u32, rm: u32, amount: u32) -> u32 {
+    0xE1A0_0000 | (rd << 12) | (amount << 7) | rm
+}
+
 /// `add rd, rn, #imm`
 fn add_imm(rd: u32, rn: u32, value: u32) -> u32 {
     0xE280_0000 | (rn << 16) | (rd << 12) | imm_field(value).expect("fits one immediate")
@@ -1342,4 +1352,150 @@ fn the_arm7_has_neither_unit_and_sees_nothing_at_those_addresses() {
         .read_wide_arm7(0x0380_2000, 4)
         .expect("the ARM7's own work RAM");
     assert_eq!(answered, 0, "no divider on this core");
+}
+
+#[test]
+fn wait_by_loop_costs_the_time_it_asks_for() {
+    // `SWI 3` is a delay, and the delay is the whole call. Returning at once made the machine
+    // faster than hardware through it, which sounds harmless and is not: DS software spells "wait
+    // for the other core to notice what I just wrote" exactly this way. See `crate::bios`.
+    //
+    // The ARM7 here asks for 0x40000 iterations — 0x100000 cycles, close to two frames — and only
+    // then writes its marker.
+    let arm7 = [
+        load(0, 0x0004_0000),
+        vec![swi(3)],
+        load(0, 1),
+        load(1, 0x0380_2000),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&[SPIN], &arm7);
+    nds.step_frame(InputState::default());
+    assert_eq!(
+        nds.bus().memory.read_wide_arm7(0x0380_2000, 4),
+        Some(0),
+        "one frame is less than the delay, so the marker cannot be there yet"
+    );
+    for _ in 0..4 {
+        nds.step_frame(InputState::default());
+    }
+    assert_eq!(
+        nds.bus().memory.read_wide_arm7(0x0380_2000, 4),
+        Some(1),
+        "and the call does return once the time it asked for has passed"
+    );
+}
+
+#[test]
+fn a_core_sees_the_others_register_write_within_a_short_delay() {
+    // The boot handshake every retail DS game performs, reduced to its two sides. The ARM7 writes
+    // a nibble to `IPCSYNC`, waits about a thousand cycles, and reads back what the ARM9 echoed.
+    // The ARM9 does nothing but echo.
+    //
+    // This is the shape that a video-boundary interleave cannot serve: a thousand cycles is less
+    // than one boundary, so with each core running a whole boundary before the other starts, the
+    // ARM7's read happens before the ARM9 has executed a single instruction. Pokemon Platinum
+    // hangs on exactly this, at a white screen, with every unit test in this crate passing. See
+    // `INTERLEAVE`.
+    let arm9 = [
+        load(3, 0x0400_0180),
+        vec![
+            ldrh(0, 3),
+            and_imm(0, 0, 0x0F),
+            lsl_imm(0, 0, 8),
+            strh(0, 3),
+            b_to(5, 1),
+        ],
+    ]
+    .concat();
+
+    let arm7 = [
+        load(3, 0x0400_0180),
+        load(0, 6 << 8),
+        vec![strh(0, 3)],
+        // 250 iterations is 1000 cycles: what a real driver waits, and less than a scanline.
+        load(0, 250),
+        vec![swi(3), ldrh(0, 3), and_imm(0, 0, 0x0F)],
+        load(1, 0x0380_2000),
+        vec![str_word(0, 1), SPIN],
+    ]
+    .concat();
+
+    let mut nds = booted(&arm9, &arm7);
+    nds.step_frame(InputState::default());
+    assert_eq!(
+        nds.bus().memory.read_wide_arm7(0x0380_2000, 4),
+        Some(6),
+        "the ARM9 must have echoed the nibble before the ARM7's delay ran out"
+    );
+}
+
+#[test]
+fn direct_boot_leaves_the_cards_chip_id_where_the_firmware_would_have() {
+    // A Nitro SDK title reads the chip ID straight off the card and compares it against the copy
+    // the firmware left in the system area. Different means the cartridge was swapped, and the
+    // SDK's answer to that is to disable interrupts and halt forever. See `write_system_area`.
+    let mut nds = idle();
+    let expected = nds.bus.cart.chip_id();
+    assert_ne!(
+        expected, 0,
+        "the fabricated ID must not be the zero it replaces"
+    );
+    for at in [SYSTEM_AREA, SYSTEM_AREA_COPY] {
+        assert_eq!(word_at(&nds, at), expected, "chip ID 1 at {at:#X}");
+        assert_eq!(word_at(&nds, at + 4), expected, "chip ID 2 at {at:#X}");
+    }
+
+    // And the card answers the same thing, which is the half that makes the comparison pass.
+    // The opcode is the byte at `CARD_COMMAND` itself — the command is stored most significant
+    // byte first — so `0xB8` goes in the low byte of the word written there.
+    nds.bus.exmemcnt = 0;
+    nds.bus.write32(Core::Arm9, 0x0400_01A8, 0x0000_00B8);
+    nds.bus
+        .write32(Core::Arm9, 0x0400_01A4, (1 << 31) | (7 << 24));
+    assert_eq!(nds.bus.read32(Core::Arm9, 0x0410_0010), expected);
+}
+
+#[test]
+fn direct_boot_takes_the_user_settings_from_the_firmware_rather_than_inventing_them() {
+    // One settings block in the machine, in the flash, with a checksum. The RAM copy is a copy.
+    let nds = idle();
+    let block = nds.bus.input.firmware.current_user_settings();
+    for (i, byte) in block.iter().enumerate() {
+        assert_eq!(
+            nds.peek_arm9(USER_SETTINGS + i as u32),
+            Some(*byte),
+            "user settings byte {i:#X}"
+        );
+    }
+}
+
+#[test]
+fn the_geometry_fifo_raises_its_interrupt_while_its_condition_holds() {
+    // How a driver learns the 3D core has taken its display list. Never raising it left Pokemon
+    // Platinum spinning on a flag its interrupt handler was the only thing that could clear —
+    // at a title screen it had otherwise drawn correctly. See `Gpu3d::fifo_irq_pending`.
+    let mut nds = idle();
+    nds.step_frame(InputState::default());
+    assert_eq!(
+        nds.bus.irq[Core::Arm9 as usize].flags() & sources::GEOMETRY_FIFO,
+        0,
+        "mode 0 selects no interrupt at all"
+    );
+
+    // Mode 2: interrupt while the FIFO is empty, which here it always is.
+    nds.bus.write32(Core::Arm9, 0x0400_0600, 2 << 30);
+    nds.step_frame(InputState::default());
+    assert_ne!(
+        nds.bus.irq[Core::Arm9 as usize].flags() & sources::GEOMETRY_FIFO,
+        0
+    );
+
+    // The ARM7 has no 3D core, so it has no such interrupt however the ARM9 configures one.
+    assert_eq!(
+        nds.bus.irq[Core::Arm7 as usize].flags() & sources::GEOMETRY_FIFO,
+        0
+    );
 }

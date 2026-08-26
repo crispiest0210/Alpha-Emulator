@@ -26,12 +26,12 @@ controls, per-OS packages, where saves go, and what to do when something goes wr
 | Game Boy (DMG) | ✅ | ✅ | ⚠️ | Plays in the window with sound and input, measured at 100% speed. Passes all 11 Blargg `cpu_instrs` sub-tests, `instr_timing`, `mem_timing`, `dmg-acid2` pixel-exact, 9 of 12 `dmg_sound` sub-tests, all 4 mooneye `oam_dma` tests, and 6 of 12 mooneye PPU tests. **Mode 3's length is computed per scanline** from fine scroll, window and objects, so `HBlank` lands where hardware puts it; a register rewritten *within* a line still does not split it |
 | Game Boy Color | ✅ | ✅ | ⚠️ | Plays. 11 of 12 Blargg `cgb_sound` sub-tests pass; `cgb-acid2` is pixel-exact against its reference |
 | Game Boy Advance | ✅ | ✅ | ⚠️ | Passes `gba-suite`'s ARM, Thumb, memory, and BIOS ROMs. **A commercial game plays at a measured 100% speed** with backgrounds, sprites, affine effects, mosaic, and colour blending. BIOS calls work in both instruction sets, decompressors included. **All four PSG channels are mixed alongside direct sound.** The `save/` ROMs found two real save-chip bugs, tracked as known failures; no cartridge clock or EEPROM |
-| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew**, including one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene. Two programs, not a commercial game: no retail title has been tried |
+| Nintendo DS | ✅ | ⚠️ | ⚠️ | **Runs real libnds homebrew and a retail game.** Pokemon Platinum boots, plays its intro, and reaches its first dialogue; the homebrew includes one that streams its data off its own cartridge and renders a textured, normal-mapped 3D scene. No real-time clock and no wifi |
 
-**All four systems boot with picture and sound, and three of them play commercial games at full
-speed.** The fourth, the DS, runs homebrew correctly but has not been tried on a retail game. The
-Game Boy and Game Boy Color are held to the strictest accuracy bar here — 41 corpus ROMs pass and
-every one that does not carries a written diagnosis of why. See each system's notes for specifics.
+**All four systems boot with picture and sound and play commercial games at full speed.** The DS
+is the newest and the least proven: one retail title has been played, not a library. The Game Boy
+and Game Boy Color are held to the strictest accuracy bar here — 41 corpus ROMs pass and every one
+that does not carries a written diagnosis of why. See each system's notes for specifics.
 
 The application has a ROM library, video, audio, keyboard and touchscreen input, quicksave and
 quickload, rewind, an HUD, a rebindable keymap, screenshots, and an in-app debugger with registers,
@@ -53,9 +53,11 @@ debugging timing or graphics, see:
   All four PSG channels are now mixed alongside direct sound, closing what was long the project's
   biggest gap. Still open: the `save/` ROMs expose two real save-chip protocol bugs, and there is
   no cartridge clock or EEPROM. See `system-gba`'s crate docs for the full list.
-- **Nintendo DS**: Boots and draws both screens with sound and 3D. Runs real libnds homebrew.
-  **No commercial title has been tried yet.** See `system-nds`'s crate docs and **[AGENTS.md](AGENTS.md)**
-  under "Start here" for the gaps, the implementation summary, and what has been verified.
+- **Nintendo DS**: Boots and draws both screens with sound and 3D. Runs real libnds homebrew, and
+  Pokemon Platinum plays. **One retail title, not a library** — and no real-time clock, so a game
+  with a day-and-night cycle sees a clock that never starts. See `system-nds`'s crate docs and
+  **[AGENTS.md](AGENTS.md)** under "Start here" for the gaps, the implementation summary, and what
+  has been verified.
 
 ## Performance
 

@@ -13,11 +13,13 @@
 //! the inter-processor
 //! communication hardware ([`ipc`]), the two interrupt controllers ([`irq`]), the two timer blocks
 //! ([`timers`]), the two DMA controllers ([`dma`]), the video timing ([`video`]), the keypad and
-//! touchscreen ([`input`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
+//! touchscreen ([`input`]), the firmware flash the touchscreen shares its bus with
+//! ([`firmware`]), the Slot-1 cartridge ([`cartridge`]), and the machine that assembles
 //! them ([`system`]). The in-app debugger works against it through [`debug`], on the ARM9.
 //!
-//! Not implemented: wifi, KEY1 cartridge encryption, four BIOS calls whose answers would have to be
-//! guessed at (see [`bios`]), and the 3D core's rarer effects — fog, edge
+//! Not implemented: wifi, KEY1 cartridge encryption, the real-time clock, the sound-capture
+//! hardware, the clip and directional matrix readback registers, three BIOS calls whose answers
+//! would have to be guessed at (see [`bios`]), and the 3D core's rarer effects — fog, edge
 //! marking, anti-aliasing, shadow polygons, and the toon table. Prompt 13 explicitly ranks those
 //! below geometry and texturing correctness, which is the order they were built in. Each is
 //! documented where it is skipped rather than approximated into a picture that looks deliberate.
@@ -46,6 +48,28 @@
 //! more than another hundred synthetic tests, because it exercises the joins rather than the
 //! parts.
 //!
+//! # And what a retail game did with it
+//!
+//! Pokemon Platinum boots, plays its intro, and reaches its first line of dialogue. Getting there
+//! took four more fixes, and the argument above holds twice over: **every one of them was
+//! invisible to 418 passing unit tests, and all four presented as the same white screen.**
+//!
+//! - `SWI 3`, `WaitByLoop`, returned instantly. It is how DS software spells "wait for the other
+//!   core to notice what I just wrote", and the boot handshake needs it to take time. See
+//!   [`bios`].
+//! - The two cores ran a whole video boundary each before the other started, so a wait of a
+//!   thousand cycles could not see across. See `INTERLEAVE` in [`system`].
+//! - Direct boot never wrote the cartridge chip ID into the system area, so the game compared it
+//!   against the card, found them different, and called `OS_Terminate`. See
+//!   `NdsSystem::write_system_area`.
+//! - The firmware flash answered `0xFF` — which in the status register means *busy forever*. See
+//!   [`firmware`].
+//!
+//! Two more surfaced once it was running and are fixed here too: the geometry FIFO never raised
+//! its interrupt, which left the game spinning at a title screen it had drawn correctly
+//! ([`gpu3d::Gpu3d::fifo_irq_pending`]), and the three sound-table BIOS calls were mapped to
+//! `SWI` numbers no DS BIOS uses ([`bios`]).
+//!
 //! # Wifi is out of scope
 //!
 //! The wifi hardware is not implemented and is not planned. Its register block reads as open bus,
@@ -61,6 +85,7 @@ pub mod debug;
 pub mod diagnostics;
 pub mod dma;
 pub mod engine2d;
+pub mod firmware;
 pub mod gpu3d;
 pub mod input;
 pub mod ipc;
@@ -78,6 +103,7 @@ pub use bios::{BiosCall, BiosEffect};
 pub use cartridge::NdsCartridge;
 pub use dma::DmaController;
 pub use engine2d::{Engine, Engine2d};
+pub use firmware::Firmware;
 pub use gpu3d::Gpu3d;
 pub use input::Input;
 pub use ipc::Ipc;
