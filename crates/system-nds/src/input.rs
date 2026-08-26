@@ -261,18 +261,43 @@ impl Input {
     /// The touchscreen controller's half of a transfer.
     ///
     /// A command byte has bit 7 set and names a channel; the controller answers it with a zero
-    /// and then hands the 12-bit conversion back over the next two bytes, high seven bits first.
+    /// and then hands the 12-bit conversion back over the next two bytes, high seven bits first:
+    ///
+    /// ```text
+    /// send: cmd  00h  00h
+    /// recv: 00h  hi   lo
+    /// ```
+    ///
+    /// # The next command rides in the low byte's slot
+    ///
+    /// A driver taking several readings does not pay for three bytes each. It sends the next
+    /// command *instead of* the second dummy, so one conversion's low byte and the next
+    /// conversion's request share a transfer:
+    ///
+    /// ```text
+    /// send: cmd1 00h  cmd2 00h  cmd3 00h ... 00h
+    /// recv: 00h  hi1  lo1  hi2  lo2  hi3 ... hi_n
+    /// ```
+    ///
+    /// Answering a command byte with an unconditional zero — which is what this used to do —
+    /// therefore does not lose a formality, it loses the low five bits of *every* reading a
+    /// pipelining driver takes. The DS's own SDK pipelines, so that was every reading Pokemon
+    /// Platinum ever saw: a stylus that could only land on even coordinates. Which byte a
+    /// command answers with depends only on whether the high byte has already gone out, so one
+    /// position counter covers both shapes.
     fn touchscreen_transfer(&mut self, byte: u8) -> u8 {
+        let low = (self.tsc_output << 3) as u8;
         if byte & 0x80 != 0 {
             let channel = (byte >> 4) & 7;
             self.tsc_output = self.conversion(channel);
+            let answer = if self.tsc_position == 1 { low } else { 0 };
             self.tsc_position = 0;
-            return 0;
+            return answer;
         }
         self.tsc_position = self.tsc_position.saturating_add(1);
         match self.tsc_position {
             1 => (self.tsc_output >> 5) as u8,
-            _ => (self.tsc_output << 3) as u8,
+            _ => low,
         }
     }
 

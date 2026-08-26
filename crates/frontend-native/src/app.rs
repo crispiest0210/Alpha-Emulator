@@ -651,13 +651,25 @@ impl App {
             };
             actions = self.chrome.ui(root, &chrome_state);
 
-            // The game fills whatever the panels left over. Drawing it in a frameless central
-            // panel is what makes the layout's rectangle and the drawn rectangle the same number.
-            egui::CentralPanel::no_frame().show(root, |ui| {
-                let available = ui.available_rect_before_wrap();
+            // The game fills whatever the panels left over.
+            //
+            // Drawn through a plain child `Ui` rather than a `CentralPanel`, because a central
+            // panel *uses up* the root `Ui`'s remaining space — and egui decides whether the
+            // pointer is over its own interface by asking whether the pointer is outside that
+            // remaining space. With the space used up, every position is outside it, egui reports
+            // that it wants every click, and `MouseInput` below sees `consumed` for a click on
+            // the picture. That is a stylus that never touches the screen. See
+            // `egui_does_not_claim_a_click_on_the_picture`.
+            //
+            // The child is given the same rectangle and the same clip rectangle a central panel
+            // would have had, so nothing about the drawing changes — only the bookkeeping.
+            let available = root.available_rect_before_wrap();
+            let mut ui = root.new_child(egui::UiBuilder::new().max_rect(available));
+            ui.set_clip_rect(available);
+            {
+                let ui = &mut ui;
                 // The bezel. Painted before the screens rather than set as a panel fill, so the
-                // layout's rectangle and the drawn rectangle stay the same number — which is the
-                // reason the panel is frameless in the first place.
+                // layout's rectangle and the drawn rectangle stay the same number.
                 let bezel = crate::chrome::theme::Palette::from(self.config.video.theme).bezel;
                 ui.painter().rect_filled(available, 0.0, bezel);
                 self.layout = layout::compute(
@@ -680,7 +692,7 @@ impl App {
                     }
                     None => idle_message(ui, self.loaded.is_some()),
                 }
-            });
+            }
         });
 
         egui_state.handle_platform_output(&window, output.platform_output);
@@ -954,6 +966,71 @@ mod tests {
         assert_eq!(
             describe_action(Action::Chrome(ChromeAction::FastForward)),
             "fast-forward"
+        );
+    }
+
+    /// Run a UI shaped like [`App::redraw`]'s and report whether egui claims the pointer.
+    ///
+    /// Two passes because the answer is computed from the previous pass's layout, which is also
+    /// how the real application asks it: the click arrives between two frames.
+    fn egui_wants_pointer_at(pointer: egui::Pos2, use_central_panel: bool) -> bool {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        input.events.push(egui::Event::PointerMoved(pointer));
+        let mut wants = false;
+        for _ in 0..2 {
+            let _ = ctx.clone().run_ui(input.clone(), |root| {
+                egui::Panel::top("top-bar").show(root, |ui| {
+                    let _ = ui.button("Pause");
+                });
+                let available = root.available_rect_before_wrap();
+                if use_central_panel {
+                    egui::CentralPanel::no_frame().show(root, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+                    });
+                } else {
+                    let mut ui = root.new_child(egui::UiBuilder::new().max_rect(available));
+                    ui.set_clip_rect(available);
+                    ui.painter()
+                        .rect_filled(available, 0.0, egui::Color32::BLACK);
+                }
+            });
+            wants = ctx.egui_wants_pointer_input();
+        }
+        wants
+    }
+
+    /// The touchscreen depends on this: a click egui claims never becomes a stylus.
+    ///
+    /// It really did claim them. A `CentralPanel` uses up the root `Ui`'s remaining space, and
+    /// egui treats "outside the root's remaining space" as "over egui" — so with the game drawn
+    /// in one, every click on the picture was reported as belonging to the interface and the DS
+    /// touchscreen did nothing at all. The second assertion is that bug, kept as the reason this
+    /// test exists.
+    #[test]
+    fn egui_does_not_claim_a_click_on_the_picture() {
+        let over_picture = egui::pos2(500.0, 500.0);
+        let over_toolbar = egui::pos2(40.0, 12.0);
+
+        assert!(
+            !egui_wants_pointer_at(over_picture, false),
+            "a click on the picture belongs to the emulated machine"
+        );
+        assert!(
+            egui_wants_pointer_at(over_toolbar, false),
+            "a click on the toolbar still belongs to the interface"
+        );
+        assert!(
+            egui_wants_pointer_at(over_picture, true),
+            "a central panel is what used to swallow the click; if this ever stops being true, \
+             the workaround above can go"
         );
     }
 }

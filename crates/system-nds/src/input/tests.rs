@@ -159,6 +159,48 @@ fn the_position_channels_read_zero_with_the_pen_up() {
     assert_eq!(read_channel(&mut input, 1), 0);
 }
 
+/// Run the conversion the DS's own SDK runs: one command byte per sample, each riding in the
+/// slot where the previous sample's low byte comes back.
+///
+/// ```text
+/// send: cmd  00h  cmd  00h  cmd  00h
+/// recv: 00h  hi1  lo1  hi2  lo2  hi3
+/// ```
+fn read_channel_chained(input: &mut Input, channel: u8, samples: usize) -> Vec<u16> {
+    let command = (0x80 | (channel << 4)) as u16;
+    let send = |input: &mut Input, byte: u16| {
+        input.write16(ARM7, reg::SPICNT, (1 << 15) | (1 << 11) | (2 << 8));
+        input.write16(ARM7, reg::SPIDATA, byte);
+        input.read16(ARM7, reg::SPIDATA).unwrap()
+    };
+    send(input, command);
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let high = send(input, 0);
+        let low = send(input, command);
+        values.push(((high & 0x7F) << 5) | ((low & 0xF8) >> 3));
+    }
+    values
+}
+
+#[test]
+fn a_chained_conversion_hands_back_its_low_bits() {
+    // Odd coordinates, so the bottom five bits of the reading are the ones that decide them: at
+    // sixteen counts per pixel an answer missing them is an answer rounded down to an even pixel.
+    let mut input = Input::new();
+    input.set_input(touched(101, 51));
+    assert_eq!(
+        read_channel_chained(&mut input, 5, 3),
+        vec![101 * RAW_PER_PIXEL; 3],
+        "X, three times over"
+    );
+    assert_eq!(
+        read_channel_chained(&mut input, 1, 3),
+        vec![51 * RAW_PER_PIXEL; 3],
+        "Y, three times over"
+    );
+}
+
 #[test]
 fn deselecting_the_device_restarts_the_byte_counter() {
     let mut input = Input::new();
