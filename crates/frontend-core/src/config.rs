@@ -16,7 +16,6 @@
 use crate::input::KeybindMap;
 use library::AppPaths;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// How the emulated framebuffer is scaled into the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -242,7 +241,10 @@ impl Config {
         }
         let text = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        write_atomically(&path, text.as_bytes())
+        // A settings file is rewritten on every quit. Truncating the real file and then being
+        // killed mid-write leaves a zero-byte config and loses every keybind the user set — cheap
+        // to avoid, and the same reason the library index runs in WAL mode.
+        crate::durable::write_atomically(&path, text.as_bytes())
     }
 
     /// Bring hand-edited values into range.
@@ -264,17 +266,6 @@ impl Config {
         self.emulation.fast_forward_speed = self.emulation.fast_forward_speed.min(64.0);
         self
     }
-}
-
-/// Write through a temporary file and rename.
-///
-/// A settings file is rewritten on every quit. Truncating the real file and then being killed
-/// mid-write leaves a zero-byte config and loses every keybind the user set — cheap to avoid, and
-/// the same reason the library index runs in WAL mode.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temp = path.with_extension("toml.tmp");
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, path)
 }
 
 #[cfg(test)]

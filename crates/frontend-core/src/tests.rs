@@ -617,6 +617,94 @@ fn a_save_file_of_the_wrong_size_is_reported_and_does_not_stop_the_load() {
 }
 
 #[test]
+fn a_save_that_could_not_be_restored_is_moved_aside_before_anything_overwrites_it() {
+    // The data-loss path: a `.sav` the cartridge rejects is reported, the game runs on blank RAM,
+    // writes to it, and the debounced flush then lands on the very path the rejected file was
+    // sitting at. The file is dirtied through a real cartridge write rather than a forced flush,
+    // because the debounce is the path that used to clobber it with nobody asking.
+    let fixture = Fixture::new("badsrambak");
+    let rom = fixture.battery_writing_rom("batterywrite.gb", 0x5A);
+    let save = fixture.paths.save_file(&rom);
+    std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+    let original = vec![0x01u8, 0x02, 0x03];
+    std::fs::write(&save, &original).unwrap();
+    // An earlier backup already exists, so this one must not land on top of it either.
+    let earlier = save.with_file_name("batterywrite.sav.bak");
+    std::fs::write(&earlier, b"earlier backup").unwrap();
+
+    let session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+
+    let message = wait_event(&session, "the size complaint", |event| match event {
+        SessionEvent::Error(message) if message.contains("does not fit") => Some(message.clone()),
+        _ => None,
+    });
+    let backup = save.with_file_name("batterywrite.sav.bak.1");
+    assert!(
+        message.contains(&backup.display().to_string()),
+        "the error must name where the unrestorable save went: {message}"
+    );
+
+    // Past the debounce: the game's new progress is written, to the original path.
+    wait_event(&session, "the debounced flush", |event| {
+        matches!(event, SessionEvent::SaveRamWritten { .. }).then_some(())
+    });
+
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        original,
+        "the bytes that could not be restored must survive in the backup"
+    );
+    assert_eq!(
+        std::fs::read(&earlier).unwrap(),
+        b"earlier backup",
+        "an existing backup must not be clobbered by a newer one"
+    );
+    let written = std::fs::read(&save).unwrap();
+    assert_eq!(written.len(), 8192, "the original path holds the new save");
+    assert_eq!(written[0], 0x5A, "with the game's own write in it");
+}
+
+#[test]
+fn save_ram_dirtied_while_stepping_under_the_debugger_is_written_on_close() {
+    // With a breakpoint registered the loop runs `debug_tick`, which never sees a `FrameOutput`
+    // and so never learned save RAM had gone dirty: a play session spent stepping lost every
+    // in-game save made during it. Attached before the load, so the cartridge's very first write
+    // happens under stepping and no ordinary frame ever reports it.
+    let fixture = Fixture::new("dbgsram");
+    let rom = fixture.battery_writing_rom("batterywrite.gb", 0x3C);
+    let save = fixture.paths.save_file(&rom);
+
+    let session = fixture.session();
+    session.send(SessionCommand::SetDebugAttached(true));
+    // The spin loop after the SRAM write: reached only once the write has executed.
+    session.send(SessionCommand::AddBreakpoint(0x010A));
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    let addr = wait_event(&session, "the breakpoint", |event| match event {
+        SessionEvent::BreakpointHit { addr } => Some(*addr),
+        _ => None,
+    });
+    assert_eq!(addr, 0x010A);
+
+    session.send(SessionCommand::CloseRom);
+    wait_event(&session, "RomClosed", |event| {
+        matches!(event, SessionEvent::RomClosed).then_some(())
+    });
+
+    assert!(
+        save.exists(),
+        "save RAM dirtied under the debugger must be flushed on close"
+    );
+    assert_eq!(std::fs::read(&save).unwrap()[0], 0x3C);
+}
+
+#[test]
 fn an_untouched_save_file_survives_an_explicit_close() {
     // Not a panic-recovery test: this ROM never touches SRAM, so nothing here is dirty and
     // `close_rom` has nothing to flush. What it checks is narrower and still worth pinning —

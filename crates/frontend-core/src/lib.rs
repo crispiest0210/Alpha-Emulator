@@ -42,6 +42,14 @@
 //! the debugger is attached and checking the registry between steps, so no system crate has a hook
 //! in its hot loop and a detached session runs exactly as it did.
 //!
+//! Battery save RAM is flushed on a debounce, on close, and on a panic, through
+//! `durable::write_atomically` — the temporary file is synced before the rename and the directory
+//! after it, and settings and save states share the same helper. Whether save RAM is dirty is
+//! decided by comparing the chip's buffer against what is on disk as well as by the frame's flag, so
+//! stepping under the debugger and a forced flush both see it. A `.sav` that exists but cannot be
+//! restored is renamed to the first free `.sav.bak`/`.sav.bak.N` before the first frame runs, so the
+//! game's new progress never lands on top of it.
+//!
 //! Not done: gamepad input (the keybind layer in [`input`] is keyboard-only by construction —
 //! [`input::PhysicalKey`] would need a sibling for pads); touch input has a delivery path but no
 //! producer until prompt 13 gives it a DS to point at; and while a breakpoint is set, joypad input is
@@ -59,6 +67,7 @@
 pub mod audio;
 pub mod catalog;
 pub mod config;
+mod durable;
 mod emulation;
 pub mod frame;
 pub mod input;

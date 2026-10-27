@@ -97,6 +97,18 @@ cargo run -p frontend-native -- --data-dir /tmp/scratch ~/roms/mygame.gba
 
 Settings and keybindings are plain TOML and safe to edit by hand.
 
+A game's battery save is `<rom name>.sav` in the saves directory, written a couple of seconds after
+the game saves and again when you close it — including while the debugger is stepping. Every write
+goes through a temporary file that is synced before it replaces the real one, so a crash or a power
+cut leaves either the old save or the new one, never a truncated file.
+
+If a `.sav` is there but cannot be restored — the wrong size for the cartridge, or unreadable — it
+is **moved aside, not overwritten**: renamed to `<rom name>.sav.bak` (or `.sav.bak.1`, `.bak.2`, …
+if a backup already exists), and the error message names where it went. The game then starts with
+blank save memory and writes new progress to the original name. To go back to the old file, close
+the game and rename the backup. If the file cannot even be moved, nothing is written to that path
+for the rest of the session.
+
 ## Per-OS notes
 
 ### macOS

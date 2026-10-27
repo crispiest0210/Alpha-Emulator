@@ -19,6 +19,7 @@
 
 use crate::audio::{AudioProducer, Resampler};
 use crate::config::RewindConfig;
+use crate::durable::write_atomically;
 use crate::frame::FramePublisher;
 use crate::input::InputReceiver;
 use crate::platform;
@@ -221,8 +222,43 @@ struct Active {
     rewind: Option<RewindBuffer>,
     save_ram_path: PathBuf,
     /// When save RAM first went dirty without having been written since.
+    ///
+    /// Set from two places: a `FrameOutput`'s flag on the ordinary path, and
+    /// [`Active::save_ram_changed`] after a debugger tick, which has no `FrameOutput` to read.
     dirty_since: Option<Instant>,
+    /// Save RAM as it was last restored from or written to [`Self::save_ram_path`].
+    ///
+    /// What lets the frontend ask the *system* whether its save RAM is dirty, rather than trusting a
+    /// flag only one tick path sets. The alternative was a `take_save_ram_dirty` method on
+    /// `System`, which would have meant a change to every system crate for a question this copy
+    /// answers from frontend-core alone — and a forced flush wants the content comparison anyway,
+    /// because a loaded save state or a rewind changes save RAM without any cartridge write.
+    ///
+    /// Compared through [`System::save_ram`], the bare chip buffer, and not
+    /// [`System::save_ram_for_disk`]: an MBC3 clock trailer changes every second, and comparing it
+    /// would flush a game that never wrote a byte.
+    on_disk: Vec<u8>,
+    /// False when an unrestorable save could not be moved aside, so writing would destroy it.
+    save_ram_writable: bool,
     stopped: bool,
+}
+
+impl Active {
+    /// Whether save RAM differs from what is on disk. One comparison of the chip's buffer, which is
+    /// why it is called after a debugger tick or a forced flush and never per ordinary frame.
+    fn save_ram_changed(&self) -> bool {
+        self.system
+            .save_ram()
+            .is_some_and(|ram| ram != self.on_disk.as_slice())
+    }
+
+    fn remember_on_disk(&mut self) {
+        self.on_disk = self
+            .system
+            .save_ram()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+    }
 }
 
 /// The output side: frames out, audio out.
@@ -476,6 +512,14 @@ impl Emulator {
         }
         active.frame += 1;
         self.stats.frame_completed();
+
+        // `step_instruction` returns no `FrameOutput`, so the dirty flag the ordinary path reads
+        // never reaches here. Without this, every in-game save made with a breakpoint registered
+        // was silently dropped at close.
+        if active.dirty_since.is_none() && active.save_ram_changed() {
+            active.dirty_since = Some(Instant::now());
+        }
+        self.maybe_flush_save_ram(false);
 
         if watch_overflow {
             // Said out loud rather than swallowed. An instruction that made more accesses than the
@@ -831,22 +875,47 @@ impl Emulator {
         // and offers to create one — over the top of the file that was about to be restored.
         let save_ram_path = self.paths.save_file(path);
         let mut save_ram_restored = false;
+        let mut save_ram_writable = true;
         if system.save_ram().is_some() {
-            match std::fs::read(&save_ram_path) {
+            let problem = match std::fs::read(&save_ram_path) {
                 Ok(data) => match system.load_save_ram(&data) {
-                    Ok(()) => save_ram_restored = true,
-                    Err(e) => self.emit(SessionEvent::Error(format!(
+                    Ok(()) => {
+                        save_ram_restored = true;
+                        None
+                    }
+                    Err(e) => Some(format!(
                         "{} exists but does not fit this cartridge: {e}",
                         save_ram_path.display()
-                    ))),
+                    )),
                 },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => self.emit(SessionEvent::Error(format!(
-                    "could not read {}: {e}",
-                    save_ram_path.display()
-                ))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => Some(format!("could not read {}: {e}", save_ram_path.display())),
+            };
+            // The file is there and was not restored, and the very next flush targets its path.
+            // It is moved aside *before* the first frame runs, so no write can reach it.
+            //
+            // Rejected: refusing to write save RAM for the rest of the session. That keeps the old
+            // file, but the game is running on blank RAM and the player is making new progress in
+            // it; refusing would lose that instead, silently, at close. A backup keeps both. Writes
+            // are refused only when the move itself fails, because then the backup does not exist.
+            if let Some(problem) = problem {
+                let message = match move_aside(&save_ram_path) {
+                    Ok(backup) => format!(
+                        "{problem}; it has been kept as {} and a new save will be written",
+                        backup.display()
+                    ),
+                    Err(e) => {
+                        save_ram_writable = false;
+                        format!(
+                            "{problem}; it could not be moved aside ({e}), so save RAM will not \
+                             be written this session rather than overwrite it"
+                        )
+                    }
+                };
+                self.emit(SessionEvent::Error(message));
             }
         }
+        let on_disk = system.save_ram().map(<[u8]>::to_vec).unwrap_or_default();
 
         let title = std::fs::read(path)
             .ok()
@@ -882,6 +951,8 @@ impl Emulator {
                 .then(|| RewindBuffer::new(capacity, self.rewind_config.interval_frames as u64)),
             save_ram_path,
             dirty_since: None,
+            on_disk,
+            save_ram_writable,
             stopped: false,
         });
         self.paused = false;
@@ -1042,23 +1113,33 @@ impl Emulator {
     // --- save RAM -------------------------------------------------------------------------
 
     /// Write dirty save RAM if the debounce has elapsed, or immediately when `force`.
+    ///
+    /// A forced flush — close, shutdown, panic recovery, the explicit command — asks the system
+    /// whether save RAM differs from disk rather than trusting `dirty_since` alone, so it holds
+    /// whichever path the machine was last advanced through.
     fn maybe_flush_save_ram(&mut self, force: bool) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        let Some(dirty_since) = active.dirty_since else {
-            return;
-        };
-        if !force && dirty_since.elapsed() < SAVE_RAM_DEBOUNCE {
+        match active.dirty_since {
+            Some(since) if !force && since.elapsed() < SAVE_RAM_DEBOUNCE => return,
+            Some(_) => {}
+            None if force && active.save_ram_changed() => {}
+            None => return,
+        }
+        active.dirty_since = None;
+        if !active.save_ram_writable {
+            // Already said at load, once; repeating it every debounce would bury it.
             return;
         }
         let Some(data) = active.system.save_ram_for_disk() else {
-            active.dirty_since = None;
             return;
         };
         let path = active.save_ram_path.clone();
         let result = write_atomically(&path, &data);
-        active.dirty_since = None;
+        if result.is_ok() {
+            active.remember_on_disk();
+        }
         match result {
             Ok(()) => self.emit(SessionEvent::SaveRamWritten { path }),
             Err(e) => self.emit(SessionEvent::Error(format!(
@@ -1291,23 +1372,48 @@ fn unwrap_state(bytes: &[u8]) -> (Option<u64>, &[u8]) {
     }
 }
 
-/// Write through a temporary file and rename.
+/// Rename a save that could not be restored to the first free `<name>.bak`, `<name>.bak.1`, …
 ///
-/// Save RAM and save states are both written this way. A save state is written while the game runs
-/// and a crash mid-write would otherwise leave a truncated file that looks loadable and is not;
-/// battery RAM is worse, because the truncated file is the player's entire progress.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Never onto an existing backup: a player who hits this twice with two different bad files has
+/// two files worth keeping. The existence check and the rename are not one atomic step, which is
+/// acceptable because only this thread writes into the saves directory.
+fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let backup = (0u32..)
+        .map(|n| match n {
+            0 => path.with_file_name(format!("{name}.bak")),
+            n => path.with_file_name(format!("{name}.bak.{n}")),
+        })
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded range always yields a free name");
+    std::fs::rename(path, &backup)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::durable::sync_dir(parent);
     }
-    let temp = path.with_extension("tmp");
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, path)
+    Ok(backup)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_takes_the_first_free_name() {
+        let dir = std::env::temp_dir().join(format!("alpha-move-aside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.join("game.sav");
+        for (n, expected) in ["game.sav.bak", "game.sav.bak.1", "game.sav.bak.2"]
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(&save, [n as u8]).unwrap();
+            let backup = move_aside(&save).unwrap();
+            assert_eq!(backup, dir.join(expected));
+            assert_eq!(std::fs::read(&backup).unwrap(), [n as u8]);
+            assert!(!save.exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_state_wrapper_round_trips_its_frame_counter() {

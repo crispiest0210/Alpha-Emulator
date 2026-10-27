@@ -641,6 +641,17 @@ would have caught either half missing on its own: it dirties SRAM through a real
 (not a pre-seeded file, which would pass even with no flush at all), panics the thread on the next
 tick via a `#[cfg(test)]`-only command, and asserts the marker byte reached disk anyway.
 
+Three more save-RAM loss paths were closed after it, all in `frontend-core::emulation`. **A `.sav`
+that could not be restored was overwritten** by the next debounced flush — it is now renamed to the
+first free `.sav.bak`/`.sav.bak.N` before the first frame (refusing to write for the session was
+rejected: it trades the old file for the new progress). **Save RAM dirtied under the debugger was
+never flushed**, because only `frame_tick` read `FrameOutput::save_ram_dirty` and `step_instruction`
+returns none; `Active::on_disk` now lets a debugger tick and any forced flush ask whether the chip's
+buffer differs from disk, instead of adding a dirty query to `System` in every system crate. And
+**`write_atomically` never synced**, so a power cut could leave the rename durable and the data not;
+`frontend-core::durable` syncs the file and its directory, and settings share it. The shape worth
+remembering: a flag that one tick path sets is invisible to every other path into the machine.
+
 Smaller items, in order:
 
 - **Saving works and is confirmed by play**, as of 2026-08-11: a commercial game's in-game save,
