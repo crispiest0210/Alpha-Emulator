@@ -11,14 +11,17 @@
 //! real library. [`AppPaths::rooted_at`] gives that with no environment variable and no `cfg`
 //! branch, so the production and test paths are the same code.
 
+use crate::Platform;
 use std::path::{Path, PathBuf};
 
 /// The resolved on-disk layout.
 ///
 /// ```text
 /// <data>/library.sqlite3          the index
-/// <data>/saves/<rom>.sav          battery-backed cartridge RAM
-/// <data>/states/<rom>/<name>.ast  save states, one directory per ROM
+/// <data>/saves/<key>.sav          battery-backed cartridge RAM
+/// <data>/states/<key>/<name>.ast  save states, one directory per ROM
+///
+/// <key> is the ROM's file stem plus its platform: `Zelda.gbc`, `Metroid.gba`
 /// <data>/screenshots/<name>.png
 /// <config>/config.toml            settings: keybinds, volume, presentation
 /// ```
@@ -108,6 +111,20 @@ impl AppPaths {
         self.states_dir().join(file_key(rom))
     }
 
+    /// Where [`Self::save_file`] pointed before the key carried a platform.
+    ///
+    /// Read only by the migration, which moves a file from here to the current path when exactly
+    /// one destination claims it. Nothing writes here.
+    pub fn legacy_save_file(&self, rom: &Path) -> PathBuf {
+        self.saves_dir()
+            .join(format!("{}.sav", legacy_file_key(rom)))
+    }
+
+    /// Where [`Self::states_dir_for`] pointed before the key carried a platform.
+    pub fn legacy_states_dir_for(&self, rom: &Path) -> PathBuf {
+        self.states_dir().join(legacy_file_key(rom))
+    }
+
     /// Path for a numbered quick-save slot.
     pub fn state_slot_file(&self, rom: &Path, slot: u8) -> PathBuf {
         self.states_dir_for(rom)
@@ -139,28 +156,57 @@ impl AppPaths {
     }
 }
 
-/// The stable per-ROM directory and file name.
+/// The stable per-ROM directory and file name: the sanitised stem, a dot, and a platform tag.
 ///
-/// Derived from the file stem rather than a content hash, because a user browsing
-/// `saves/` should recognise their games. Two different ROMs with the same file name therefore
-/// share a save file, which is the same behaviour every emulator that names saves after the ROM
-/// has — and the alternative, a directory full of hex digests, trades a rare collision for a
-/// permanent usability cost.
+/// Derived from the file name rather than a content hash, because a user browsing `saves/` should
+/// recognise their games. The platform tag is what stops `Game.gb`, `Game.gbc` and `Game.gba` — a
+/// common shape for a series released on all three — sharing one battery file and one state
+/// folder, which handed each game the other's save and let `remove_rom` on one delete the other's
+/// states.
+///
+/// Rejected, both argued in the commit that introduced this:
+/// - **Stem plus a short content hash.** Collision-proof, but unreadable in a file manager, and it
+///   changes when a ROM is patched — so applying a translation patch would strand the save.
+/// - **Keep the stem and disambiguate only on collision.** The smallest change, but the name a
+///   ROM's save lives under would then depend on which *other* ROMs were imported first, and that
+///   history is not something a user can see or a backup can reproduce.
+///
+/// The tag is the [`Platform`] id for a recognised extension — so `.cgb` and `.gbc` agree, and
+/// renaming between them keeps the save — and otherwise the extension itself. Two ROMs with the
+/// same file name *and* platform in different folders still share; that is the one collision
+/// left, and it is the one every emulator naming saves after the ROM has.
 fn file_key(rom: &Path) -> String {
+    let tag = match Platform::from_extension(rom) {
+        Some(platform) => platform.id().to_string(),
+        None => rom
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| sanitize(&e.to_lowercase()))
+            .unwrap_or_else(|| "rom".to_string()),
+    };
+    format!("{}.{tag}", stem_of(rom))
+}
+
+fn stem_of(rom: &Path) -> String {
     let stem = rom
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("untitled");
-    sanitize(stem)
+    // Room for the tag and `.sav` inside the 255-byte name limit, and the 120-byte cap `sanitize`
+    // gives a state label.
+    truncate_bytes(sanitize(stem), 200)
 }
 
-/// Reduce a label to something safe on every filesystem.
+/// The key before the platform tag existed, with the ASCII-only sanitiser it used.
 ///
-/// Windows rejects `<>:"/\|?*`, every platform rejects the separator, and a leading dot hides
-/// the file on Unix. Anything outside the allowed set becomes `_` rather than being dropped, so
-/// two labels that differ only in punctuation do not silently become the same file.
-fn sanitize(label: &str) -> String {
-    let mut out: String = label
+/// Frozen: it names files already on users' disks, so it must reproduce exactly what the old
+/// code produced, including mapping every non-ASCII character to `_`.
+fn legacy_file_key(rom: &Path) -> String {
+    let stem = rom
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled");
+    let out: String = stem
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')') {
@@ -171,14 +217,73 @@ fn sanitize(label: &str) -> String {
         })
         .collect();
     let trimmed = out.trim().trim_start_matches('.').to_string();
-    out = if trimmed.is_empty() {
+    let out = if trimmed.is_empty() {
         "untitled".to_string()
     } else {
         trimmed
     };
-    // Long names are truncated rather than rejected: 120 bytes leaves room for the extension
-    // inside the 255-byte limit every mainstream filesystem shares.
     out.chars().take(120).collect()
+}
+
+/// Reduce a label to something safe on every filesystem, keeping Unicode letters and digits.
+///
+/// Only what some mainstream filesystem actually rejects or misreads is replaced with `_`: the
+/// separators, Windows' `<>:"|?*`, and control characters. Replacing rather than dropping keeps two
+/// labels that differ only there from becoming the same file. Everything else is kept — the
+/// previous ASCII-only rule turned every Japanese title into a row of underscores, so any two
+/// Japanese ROMs of the same length shared one save.
+///
+/// A leading dot hides a file on Unix and is stripped; trailing dots and spaces are silently
+/// dropped by Windows, so they are trimmed here rather than there. A Windows device name (`CON`,
+/// `COM1`, …) is reserved *with any extension*, so one gets a trailing `_`.
+///
+/// Not done: Unicode normalisation. A name typed as NFC and the same name as NFD are different
+/// strings here and the same file on APFS. Doing it needs a normalisation table, which means a
+/// dependency, for a case that needs the same title entered two different ways.
+fn sanitize(label: &str) -> String {
+    let out: String = label
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = out
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .to_string();
+    let mut out = if trimmed.is_empty() {
+        "untitled".to_string()
+    } else {
+        trimmed
+    };
+    let device = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (device.len() == 4
+            && (device.starts_with("COM") || device.starts_with("LPT"))
+            && device.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        out.insert(device.len(), '_');
+    }
+    // Long names are truncated rather than rejected, by bytes rather than characters: a CJK
+    // character is three bytes, and 120 of them would overrun the 255-byte limit every mainstream
+    // filesystem shares.
+    truncate_bytes(out, 120)
+}
+
+fn truncate_bytes(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -197,7 +302,14 @@ mod tests {
     fn save_file_is_named_after_the_rom_stem() {
         let paths = AppPaths::rooted_at("/root");
         let save = paths.save_file(Path::new("/games/Zelda.gbc"));
-        assert_eq!(save.file_name().unwrap(), "Zelda.sav");
+        assert_eq!(save.file_name().unwrap(), "Zelda.gbc.sav");
+        assert_eq!(
+            paths
+                .legacy_save_file(Path::new("/games/Zelda.gbc"))
+                .file_name()
+                .unwrap(),
+            "Zelda.sav"
+        );
     }
 
     #[test]
@@ -209,6 +321,63 @@ mod tests {
         assert_eq!(slot.parent(), named.parent());
         assert_eq!(slot.file_name().unwrap(), "slot3.ast");
         assert_eq!(named.file_name().unwrap(), "before boss.ast");
+    }
+
+    #[test]
+    fn the_same_stem_on_two_platforms_gets_two_saves_and_two_state_folders() {
+        let paths = AppPaths::rooted_at("/root");
+        let gb = Path::new("/games/A.gb");
+        let gba = Path::new("/games/A.gba");
+        assert_ne!(paths.save_file(gb), paths.save_file(gba));
+        assert_ne!(paths.states_dir_for(gb), paths.states_dir_for(gba));
+        assert_eq!(paths.save_file(gba).file_name().unwrap(), "A.gba.sav");
+        // Both alias extensions of one platform agree, so renaming between them keeps the save.
+        assert_eq!(
+            paths.save_file(Path::new("/games/A.cgb")),
+            paths.save_file(Path::new("/games/A.gbc"))
+        );
+        // The legacy key is what they used to share.
+        assert_eq!(paths.legacy_save_file(gb), paths.legacy_save_file(gba));
+    }
+
+    #[test]
+    fn two_japanese_titles_of_the_same_length_no_longer_collide() {
+        let paths = AppPaths::rooted_at("/root");
+        let a = Path::new("/games/ポケモン.gba");
+        let b = Path::new("/games/ゼルダの.gba");
+        assert_ne!(paths.save_file(a), paths.save_file(b));
+        assert_ne!(paths.states_dir_for(a), paths.states_dir_for(b));
+        assert_eq!(paths.save_file(a).file_name().unwrap(), "ポケモン.gba.sav");
+        // Exactly the collision the old ASCII-only rule produced.
+        assert_eq!(paths.legacy_save_file(a), paths.legacy_save_file(b));
+        assert_eq!(paths.legacy_save_file(a).file_name().unwrap(), "____.sav");
+    }
+
+    #[test]
+    fn only_characters_some_filesystem_rejects_are_replaced() {
+        assert_eq!(sanitize("Pokémon: Émeraude?"), "Pokémon_ Émeraude_");
+        assert_eq!(sanitize("a<b>c|d*e\"f"), "a_b_c_d_e_f");
+        assert_eq!(sanitize("tab\there"), "tab_here");
+        assert_eq!(sanitize("trailing. . "), "trailing");
+        assert_eq!(sanitize("Mario & Luigi!"), "Mario & Luigi!");
+    }
+
+    #[test]
+    fn a_windows_device_name_is_never_produced() {
+        assert_eq!(sanitize("CON"), "CON_");
+        assert_eq!(sanitize("com1.gba"), "com1_.gba");
+        assert_eq!(sanitize("CONSOLE"), "CONSOLE");
+        assert_eq!(sanitize("COMX"), "COMX");
+    }
+
+    #[test]
+    fn a_long_cjk_name_is_cut_on_a_character_boundary_within_the_limit() {
+        let long = "あ".repeat(200);
+        let cut = sanitize(&long);
+        assert!(cut.len() <= 120);
+        assert!(cut.chars().all(|c| c == 'あ'));
+        let key = file_key(Path::new(&format!("/g/{long}.gba")));
+        assert!(format!("{key}.sav").len() <= 255);
     }
 
     #[test]

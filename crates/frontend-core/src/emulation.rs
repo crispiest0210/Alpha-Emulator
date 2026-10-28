@@ -915,6 +915,22 @@ impl Emulator {
                 self.emit(SessionEvent::Error(message));
             }
         }
+        // The library adopts a pre-platform-tag save when it can tell whose it is. One still sitting
+        // at the old name means it could not — or this ROM was opened without being imported — and
+        // the player deserves to hear where it is rather than wonder why their save vanished.
+        // Never adopted from here: this thread has no library, so it cannot know whether another
+        // ROM has the same stem.
+        if !save_ram_restored && system.save_ram().is_some() {
+            let legacy = self.paths.legacy_save_file(path);
+            if legacy.is_file() && !save_ram_path.exists() {
+                self.emit(SessionEvent::Notice(format!(
+                    "{} is from the old save layout and was not loaded; if it belongs to this \
+                     game, close it and rename the file to {}",
+                    legacy.display(),
+                    save_ram_path.display()
+                )));
+            }
+        }
         let on_disk = system.save_ram().map(<[u8]>::to_vec).unwrap_or_default();
 
         let title = std::fs::read(path)

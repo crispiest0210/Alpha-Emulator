@@ -180,11 +180,13 @@ into a two-minute diagnosis anyone can reproduce.
 
 1. Play to the frame where the bug is visible and press `F2` (quicksave, slot 0 by default).
 2. Find the state file. Save states live under the application's data directory, in a per-ROM
-   subdirectory named after the ROM's file stem:
+   subdirectory named after the ROM's file stem and its platform (`gb`, `gbc`, `gba`, `nds`):
 
    ```text
-   <data-dir>/states/<rom-file-stem>/slot0.ast
+   <data-dir>/states/<rom-file-stem>.<platform>/slot0.ast
    ```
+
+   For `Pokemon Emerald.gba` that is `states/Pokemon Emerald.gba/slot0.ast`.
 
    The data directory is OS-specific and **printed at startup** — look for the `data:` line in the
    log. If you ran with `--data-dir <path>`, it is `<path>/data` instead.
@@ -193,7 +195,7 @@ into a two-minute diagnosis anyone can reproduce.
 
    ```sh
    cargo run -p frontend-headless -- run path/to/rom.gba \
-     --state <data-dir>/states/<rom-file-stem>/slot0.ast \
+     --state <data-dir>/states/<rom-file-stem>.<platform>/slot0.ast \
      --frames 1 --save-frame out.png
    ```
 

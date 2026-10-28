@@ -652,6 +652,13 @@ buffer differs from disk, instead of adding a dirty query to `System` in every s
 `frontend-core::durable` syncs the file and its directory, and settings share it. The shape worth
 remembering: a flag that one tick path sets is invisible to every other path into the machine.
 
+**The save and state key is now `<stem>.<platform>`**, because the stem alone made `Game.gb`,
+`Game.gbc` and `Game.gba` share one `.sav` and one state folder, and `remove_rom(.., true)` on one
+deleted the others' states. `library::paths::legacy_file_key` is **frozen** — it names files already
+on users' disks — and `Library::adopt_legacy_files` moves a legacy file only when every library ROM
+mapping to it maps to one new path that does not exist yet. Change `file_key` again and the same
+migration is needed again; there is no version number in a file name to tell layouts apart.
+
 Smaller items, in order:
 
 - **Saving works and is confirmed by play**, as of 2026-08-11: a commercial game's in-game save,

@@ -22,7 +22,7 @@
 
 use crate::{paths::AppPaths, LibraryError, Platform};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Row identifier for a ROM.
@@ -85,7 +85,7 @@ pub struct SaveStateEntry {
 ///
 /// Returned rather than logged so the UI can say "3 added, 1 moved, 2 missing" instead of the
 /// user having to guess whether anything happened.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reconciliation {
     /// Files found in a watched folder that were not in the index.
     pub added: usize,
@@ -99,6 +99,11 @@ pub struct Reconciliation {
     pub states_dropped: usize,
     /// Save-state files found on disk that the index did not know about.
     pub states_adopted: usize,
+    /// Saves and state folders moved from the layout before the key carried a platform.
+    pub legacy_adopted: usize,
+    /// Legacy saves and state folders left where they are, because more than one ROM could own
+    /// them or the new path is already taken. Named so the user can be told which file to look at.
+    pub legacy_left: Vec<PathBuf>,
 }
 
 impl Reconciliation {
@@ -581,11 +586,101 @@ impl Library {
         }
         report.missing = missing.len();
 
-        // Step 4: save states. A state whose file is gone is dropped from the index, because
+        // Step 4: the pre-platform-tag layout, after moves are settled (a moved ROM's key follows
+        // its new name) and before state rows are checked (a renamed folder's rows are rewritten
+        // here, not dropped as vanished and re-adopted with their labels and frames lost).
+        let legacy = self.adopt_legacy_files()?;
+        report.legacy_adopted = legacy.adopted;
+        report.legacy_left = legacy.left;
+
+        // Step 5: save states. A state whose file is gone is dropped from the index, because
         // unlike a ROM there is nothing to recover — the row's only content was the file.
         report.states_dropped = self.drop_vanished_states()?;
         report.states_adopted = self.adopt_orphan_states()?;
         Ok(report)
+    }
+
+    /// Move saves and state folders from the layout keyed by stem alone to the one keyed by stem
+    /// and platform.
+    ///
+    /// A legacy file is adopted only when every library ROM that maps to it maps to **one** new
+    /// destination. Two ROMs that differ only in platform — the case the new key exists for — make
+    /// it ambiguous, because nothing in the file says which game wrote it, and guessing hands one
+    /// game the other's progress. Those are left in place and named in the report. Two ROMs with
+    /// the same name *and* platform share the new path too, so they are one destination, not an
+    /// ambiguity. A legacy file is never deleted and never moved onto an existing file: adoption is
+    /// a rename into a path that does not exist yet, so it cannot clobber.
+    ///
+    /// Run from [`Self::reconcile`] and after every import, so a ROM imported and played at once
+    /// finds its old save rather than starting fresh and making the legacy file unadoptable.
+    pub fn adopt_legacy_files(&mut self) -> Result<LegacyAdoption> {
+        let roms = self.roms()?;
+        let mut saves: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
+        let mut states: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
+        for rom in &roms {
+            saves
+                .entry(self.paths.legacy_save_file(&rom.path))
+                .or_default()
+                .insert(self.paths.save_file(&rom.path));
+            states
+                .entry(self.paths.legacy_states_dir_for(&rom.path))
+                .or_default()
+                .insert(self.paths.states_dir_for(&rom.path));
+        }
+
+        let mut report = LegacyAdoption::default();
+        for (legacy, destinations) in saves {
+            if !legacy.is_file() {
+                continue;
+            }
+            match unique_free_destination(&legacy, &destinations) {
+                Some(dest) => {
+                    std::fs::rename(&legacy, dest)?;
+                    tracing::info!("adopted {} as {}", legacy.display(), dest.display());
+                    report.adopted += 1;
+                }
+                None => report.left.push(legacy),
+            }
+        }
+        for (legacy, destinations) in states {
+            if !legacy.is_dir() {
+                continue;
+            }
+            let Some(dest) = unique_free_destination(&legacy, &destinations) else {
+                report.left.push(legacy);
+                continue;
+            };
+            std::fs::rename(&legacy, dest)?;
+            self.rewrite_state_paths(&legacy, dest)?;
+            tracing::info!("adopted {} as {}", legacy.display(), dest.display());
+            report.adopted += 1;
+        }
+        for left in &report.left {
+            tracing::warn!(
+                "{} is from the old save layout and was not adopted: more than one ROM in the \
+                 library could own it, or its new name is already taken",
+                left.display()
+            );
+        }
+        Ok(report)
+    }
+
+    /// Point every state row under `from` at the same file under `to`.
+    fn rewrite_state_paths(&mut self, from: &Path, to: &Path) -> Result<()> {
+        let mut stmt = self.conn.prepare("SELECT id, path FROM save_states")?;
+        let rows: Vec<(SaveId, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for (id, path) in rows {
+            if let Ok(rest) = Path::new(&path).strip_prefix(from) {
+                self.conn.execute(
+                    "UPDATE save_states SET path = ?1 WHERE id = ?2",
+                    params![path_key(&to.join(rest)), id],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn set_present(&mut self, id: RomId, present: bool) -> Result<()> {
@@ -649,6 +744,23 @@ impl Library {
         }
         Ok(adopted)
     }
+}
+
+/// What [`Library::adopt_legacy_files`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyAdoption {
+    pub adopted: usize,
+    pub left: Vec<PathBuf>,
+}
+
+/// The one destination a legacy file can move to, if there is exactly one and nothing is there.
+fn unique_free_destination<'a>(
+    legacy: &Path,
+    destinations: &'a BTreeSet<PathBuf>,
+) -> Option<&'a PathBuf> {
+    let mut it = destinations.iter();
+    let dest = it.next()?;
+    (it.next().is_none() && dest != legacy && !dest.exists()).then_some(dest)
 }
 
 fn rom_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RomEntry> {

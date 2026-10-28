@@ -629,7 +629,8 @@ fn a_save_that_could_not_be_restored_is_moved_aside_before_anything_overwrites_i
     let original = vec![0x01u8, 0x02, 0x03];
     std::fs::write(&save, &original).unwrap();
     // An earlier backup already exists, so this one must not land on top of it either.
-    let earlier = save.with_file_name("batterywrite.sav.bak");
+    let name = save.file_name().unwrap().to_string_lossy().into_owned();
+    let earlier = save.with_file_name(format!("{name}.bak"));
     std::fs::write(&earlier, b"earlier backup").unwrap();
 
     let session = fixture.session();
@@ -642,7 +643,7 @@ fn a_save_that_could_not_be_restored_is_moved_aside_before_anything_overwrites_i
         SessionEvent::Error(message) if message.contains("does not fit") => Some(message.clone()),
         _ => None,
     });
-    let backup = save.with_file_name("batterywrite.sav.bak.1");
+    let backup = save.with_file_name(format!("{name}.bak.1"));
     assert!(
         message.contains(&backup.display().to_string()),
         "the error must name where the unrestorable save went: {message}"
@@ -702,6 +703,29 @@ fn save_ram_dirtied_while_stepping_under_the_debugger_is_written_on_close() {
         "save RAM dirtied under the debugger must be flushed on close"
     );
     assert_eq!(std::fs::read(&save).unwrap()[0], 0x3C);
+}
+
+#[test]
+fn a_save_left_at_the_legacy_name_is_named_rather_than_silently_ignored() {
+    // Opened without being imported, so no library adopted it. The session cannot tell whether
+    // another ROM shares the stem and must not move it, but it can say where it is.
+    let fixture = Fixture::new("legacysav");
+    let rom = fixture.battery_rom("battery.gb");
+    let legacy = fixture.paths.legacy_save_file(&rom);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, vec![0x11u8; 8192]).unwrap();
+
+    let session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom,
+        rom_id: None,
+    });
+    let notice = wait_event(&session, "the legacy notice", |event| match event {
+        SessionEvent::Notice(text) if text.contains("old save layout") => Some(text.clone()),
+        _ => None,
+    });
+    assert!(notice.contains(&legacy.display().to_string()), "{notice}");
+    assert!(legacy.exists(), "named, never moved from this thread");
 }
 
 #[test]

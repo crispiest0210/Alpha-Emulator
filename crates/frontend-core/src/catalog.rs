@@ -48,6 +48,11 @@ pub fn import_rom(library: &mut Library, path: &Path) -> Result<RomId, CatalogEr
     })?;
     if existing.is_none() {
         library.set_title(id, &info.title)?;
+        // A newly imported ROM may own a save from the layout before the key carried a platform.
+        // Adopted now rather than at the next startup, or the first session would start on blank
+        // RAM and write a new save that makes the old one unadoptable. What cannot be adopted is
+        // logged by the library and reported again by the next reconcile.
+        library.adopt_legacy_files()?;
     }
     Ok(id)
 }
@@ -142,6 +147,22 @@ pub fn reconcile(library: &mut Library) -> Result<Reconciliation, CatalogError> 
         );
     }
     Ok(report)
+}
+
+/// One line per legacy file a reconcile left in place, for the frontend to show.
+pub fn legacy_notes(report: &Reconciliation) -> Vec<String> {
+    report
+        .legacy_left
+        .iter()
+        .map(|path| {
+            format!(
+                "{} is from the old save layout and was left alone: more than one ROM in the \
+                 library could own it, or its new name is already taken. Rename it to the \
+                 game's `<name>.<platform>` form to use it.",
+                path.display()
+            )
+        })
+        .collect()
 }
 
 /// The ROMs to show, optionally filtered by a search string and a platform.

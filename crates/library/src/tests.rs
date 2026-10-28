@@ -511,3 +511,119 @@ fn add_rom_accepts_a_caller_supplied_title_and_hash() {
     assert_eq!(entry.title, "Header Title");
     assert_eq!(entry.content_hash, 0xDEAD_BEEF);
 }
+
+// --- the save layout keyed by stem and platform -------------------------------------------------
+
+#[test]
+fn removing_one_rom_with_file_deletion_leaves_a_same_named_rom_on_another_platform_alone() {
+    // Under the stem-only key `A.gb` and `A.gba` shared one state folder, so this deleted the
+    // other game's states along with its own.
+    let scratch = Scratch::new("removesibling");
+    let games = scratch.path().join("games");
+    let mut lib = library(&scratch);
+    let gb = lib.import_file(&write_rom(&games, "A.gb", 1, 64)).unwrap();
+    let gba_rom = write_rom(&games, "A.gba", 2, 64);
+    let gba = lib.import_file(&gba_rom).unwrap();
+    let paths = lib.paths().clone();
+
+    let mut write_state = |id, rom: &Path| {
+        let path = paths.state_slot_file(rom, 0);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [7u8; 8]).unwrap();
+        lib.record_state(id, &path, "slot0", Some(0), 1, 8).unwrap();
+        path
+    };
+    let gb_state = write_state(gb, &games.join("A.gb"));
+    let gba_state = write_state(gba, &gba_rom);
+    assert_ne!(
+        gb_state, gba_state,
+        "two states, not one row upserted twice"
+    );
+
+    lib.remove_rom(gb, true).unwrap();
+
+    assert!(!gb_state.exists());
+    assert!(gba_state.exists(), "the other platform's state survives");
+    assert_eq!(lib.states_for(gba).unwrap().len(), 1);
+}
+
+#[test]
+fn a_legacy_save_and_state_folder_with_one_owner_are_adopted_with_their_rows() {
+    let scratch = Scratch::new("legacyunique");
+    let games = scratch.path().join("games");
+    let rom = write_rom(&games, "Solo.gba", 3, 64);
+    let mut lib = library(&scratch);
+    let id = lib.import_file(&rom).unwrap();
+    let paths = lib.paths().clone();
+
+    let legacy_save = paths.legacy_save_file(&rom);
+    std::fs::create_dir_all(legacy_save.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_save, [0xA5u8; 32]).unwrap();
+    let legacy_state = paths.legacy_states_dir_for(&rom).join("before boss.ast");
+    std::fs::create_dir_all(legacy_state.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_state, [1u8; 8]).unwrap();
+    lib.record_state(id, &legacy_state, "before boss", None, 1234, 8)
+        .unwrap();
+
+    let report = lib.reconcile().unwrap();
+
+    assert_eq!(report.legacy_adopted, 2);
+    assert!(report.legacy_left.is_empty());
+    assert_eq!(std::fs::read(paths.save_file(&rom)).unwrap(), [0xA5u8; 32]);
+    assert!(!legacy_save.exists(), "moved, not copied");
+    let states = lib.states_for(id).unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        states[0].path,
+        paths.states_dir_for(&rom).join("before boss.ast")
+    );
+    assert_eq!(
+        (states[0].label.as_str(), states[0].frame),
+        ("before boss", 1234),
+        "the row was rewritten, not dropped and re-adopted with placeholders"
+    );
+    assert_eq!(report.states_dropped, 0);
+}
+
+#[test]
+fn a_legacy_save_two_platforms_could_own_is_left_where_it_is_and_named() {
+    let scratch = Scratch::new("legacyambiguous");
+    let games = scratch.path().join("games");
+    let gb = write_rom(&games, "A.gb", 1, 64);
+    let gba = write_rom(&games, "A.gba", 2, 64);
+    let mut lib = library(&scratch);
+    lib.import_file(&gb).unwrap();
+    lib.import_file(&gba).unwrap();
+    let paths = lib.paths().clone();
+
+    let legacy = paths.legacy_save_file(&gb);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, [9u8; 16]).unwrap();
+
+    let report = lib.reconcile().unwrap();
+
+    assert_eq!(report.legacy_adopted, 0);
+    assert_eq!(report.legacy_left, vec![legacy.clone()]);
+    assert_eq!(std::fs::read(&legacy).unwrap(), [9u8; 16], "never deleted");
+    assert!(!paths.save_file(&gb).exists());
+    assert!(!paths.save_file(&gba).exists());
+}
+
+#[test]
+fn a_legacy_save_is_never_moved_onto_an_existing_new_save() {
+    let scratch = Scratch::new("legacytaken");
+    let rom = write_rom(&scratch.path().join("games"), "Solo.gb", 4, 64);
+    let mut lib = library(&scratch);
+    lib.import_file(&rom).unwrap();
+    let paths = lib.paths().clone();
+    let legacy = paths.legacy_save_file(&rom);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"old").unwrap();
+    std::fs::write(paths.save_file(&rom), b"new").unwrap();
+
+    let report = lib.reconcile().unwrap();
+
+    assert_eq!(report.legacy_left, vec![legacy.clone()]);
+    assert_eq!(std::fs::read(&legacy).unwrap(), b"old");
+    assert_eq!(std::fs::read(paths.save_file(&rom)).unwrap(), b"new");
+}

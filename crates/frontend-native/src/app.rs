@@ -103,15 +103,25 @@ impl App {
         let mut library_error = None;
         let mut messages = Vec::new();
         match catalog::reconcile(&mut library) {
-            Ok(report) if report.changed_anything() => messages.push(Message {
-                text: format!(
-                    "library: {} added, {} moved, {} missing",
-                    report.added, report.moved, report.missing
-                ),
-                is_error: false,
-                at: Instant::now(),
-            }),
-            Ok(_) => {}
+            Ok(report) => {
+                if report.changed_anything() {
+                    messages.push(Message {
+                        text: format!(
+                            "library: {} added, {} moved, {} missing",
+                            report.added, report.moved, report.missing
+                        ),
+                        is_error: false,
+                        at: Instant::now(),
+                    });
+                }
+                for text in catalog::legacy_notes(&report) {
+                    messages.push(Message {
+                        text,
+                        is_error: true,
+                        at: Instant::now(),
+                    });
+                }
+            }
             Err(e) => library_error = Some(format!("could not reconcile the library: {e}")),
         }
 
@@ -346,6 +356,9 @@ impl App {
                         ),
                         false,
                     );
+                    for text in catalog::legacy_notes(&report) {
+                        self.note(text, true);
+                    }
                 }
                 Err(e) => self.note(format!("rescan failed: {e}"), true),
             },

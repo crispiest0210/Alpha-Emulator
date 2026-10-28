@@ -97,17 +97,28 @@ cargo run -p frontend-native -- --data-dir /tmp/scratch ~/roms/mygame.gba
 
 Settings and keybindings are plain TOML and safe to edit by hand.
 
-A game's battery save is `<rom name>.sav` in the saves directory, written a couple of seconds after
+A game's battery save is `<rom name>.<platform>.sav` in the saves directory — `Zelda.gbc.sav`,
+`Metroid.gba.sav` — and its save states are in `states/<rom name>.<platform>/`. The platform is
+`gb`, `gbc`, `gba` or `nds`, and it is there so that `Game.gb` and `Game.gba` get a save each
+instead of sharing one. Names keep accented and non-Latin characters; only characters some
+filesystem rejects (`/ \ : * ? " < > |`) become `_`. The save is written a couple of seconds after
 the game saves and again when you close it — including while the debugger is stepping. Every write
 goes through a temporary file that is synced before it replaces the real one, so a crash or a power
 cut leaves either the old save or the new one, never a truncated file.
 
 If a `.sav` is there but cannot be restored — the wrong size for the cartridge, or unreadable — it
-is **moved aside, not overwritten**: renamed to `<rom name>.sav.bak` (or `.sav.bak.1`, `.bak.2`, …
+is **moved aside, not overwritten**: renamed to `<rom name>.<platform>.sav.bak` (or `.sav.bak.1`, `.bak.2`, …
 if a backup already exists), and the error message names where it went. The game then starts with
 blank save memory and writes new progress to the original name. To go back to the old file, close
 the game and rename the backup. If the file cannot even be moved, nothing is written to that path
 for the rest of the session.
+
+**Saves from before the platform was part of the name** (`<rom name>.sav`, `states/<rom name>/`)
+are moved to the new name automatically, at startup or when the ROM is imported — but only when
+exactly one game in your library could own them. If you have both `Game.gb` and `Game.gba`, the old
+`Game.sav` is left exactly where it was, and the app tells you its path: rename it to
+`Game.gb.sav` or `Game.gba.sav` yourself, whichever game it belongs to. Old files are never
+deleted, and never moved over a save that already exists at the new name.
 
 ## Per-OS notes
 

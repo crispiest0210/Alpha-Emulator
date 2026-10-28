@@ -13,6 +13,12 @@
 //! outside the application. Unit tests drive reconciliation against a real temporary directory
 //! with a real SQLite engine.
 //!
+//! Saves and state folders are keyed by the ROM's stem *and platform* (`Game.gba.sav`,
+//! `states/Game.gba/`), so same-named ROMs for different machines no longer share one, and names
+//! keep non-ASCII characters. Files under the earlier stem-only key are moved by
+//! [`Library::adopt_legacy_files`] when exactly one destination claims them and are otherwise left
+//! in place and reported. The index schema did not change — only the paths stored in it.
+//!
 //! Not done, and not required yet: save-state thumbnails (the schema has no column for one; add
 //! it with a migration when the frontend can produce one), and any notion of a ROM's box art or
 //! external metadata source.
@@ -30,7 +36,8 @@ pub mod paths;
 pub mod platform;
 
 pub use index::{
-    content_hash, Library, NewRom, Reconciliation, RomEntry, RomId, SaveId, SaveStateEntry,
+    content_hash, LegacyAdoption, Library, NewRom, Reconciliation, RomEntry, RomId, SaveId,
+    SaveStateEntry,
 };
 pub use paths::{AppPaths, STATE_EXTENSION};
 pub use platform::Platform;
