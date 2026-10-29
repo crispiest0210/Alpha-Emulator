@@ -39,6 +39,29 @@ fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Rename `path` to the first free `<name>.<suffix>`, `<name>.<suffix>.1`, … and return where it
+/// went.
+///
+/// Never onto an existing backup: a player who hits this twice with two different bad files has
+/// two files worth keeping. The existence check and the rename are not one atomic step, which is
+/// acceptable because each caller is the only writer of the directory it moves within — save RAM
+/// is written only by the emulation thread, the settings file only by the UI thread at shutdown.
+pub(crate) fn move_aside(path: &Path, suffix: &str) -> std::io::Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let backup = (0u32..)
+        .map(|n| match n {
+            0 => path.with_file_name(format!("{name}.{suffix}")),
+            n => path.with_file_name(format!("{name}.{suffix}.{n}")),
+        })
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded range always yields a free name");
+    std::fs::rename(path, &backup)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
+    }
+    Ok(backup)
+}
+
 /// Make a rename inside `dir` durable, where the platform lets a directory be synced.
 ///
 /// Best effort, deliberately. By the time this runs the data is synced and the rename has happened;

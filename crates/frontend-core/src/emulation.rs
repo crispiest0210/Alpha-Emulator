@@ -106,7 +106,7 @@ pub(crate) fn run(
         loop {
             match commands.try_recv() {
                 Ok(command) => {
-                    if emulator.handle(command) {
+                    if emulator.handle_or_flush(command) {
                         emulator.close_rom();
                         return;
                     }
@@ -139,7 +139,7 @@ pub(crate) fn run(
             emulator.idle_maintenance();
             match commands.recv_timeout(IDLE_POLL) {
                 Ok(command) => {
-                    if emulator.handle(command) {
+                    if emulator.handle_or_flush(command) {
                         emulator.close_rom();
                         return;
                     }
@@ -640,6 +640,23 @@ impl Emulator {
     // --- commands -------------------------------------------------------------------------
 
     /// Returns `true` when the thread should exit.
+    /// [`handle`](Self::handle), with the same panic recovery `run` gives `tick`: flush, then let
+    /// the unwind carry on to `Session::stop`'s `join` exactly as it would have.
+    ///
+    /// Commands need it as much as frames do. `LoadState` runs a system crate's whole
+    /// `Savable::load` over bytes read from disk, `LoadRom` parses a header, and a debugger request
+    /// walks the memory map — each a place a core bug can index off the end of something, and
+    /// before this, any of them took the current debounce window's save RAM down with the thread.
+    fn handle_or_flush(&mut self, command: SessionCommand) -> bool {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(command))) {
+            Ok(shutdown) => shutdown,
+            Err(payload) => {
+                self.close_rom();
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
     fn handle(&mut self, command: SessionCommand) -> bool {
         match command {
             SessionCommand::LoadRom { path, rom_id } => self.load_rom(&path, rom_id),
@@ -803,6 +820,8 @@ impl Emulator {
             SessionCommand::Shutdown => return true,
             #[cfg(test)]
             SessionCommand::TestPanicOnNextTick => self.test_panic_on_next_tick = true,
+            #[cfg(test)]
+            SessionCommand::TestPanicInHandle => panic!("deliberate test panic in handle"),
         }
         false
     }
@@ -899,7 +918,7 @@ impl Emulator {
             // it; refusing would lose that instead, silently, at close. A backup keeps both. Writes
             // are refused only when the move itself fails, because then the backup does not exist.
             if let Some(problem) = problem {
-                let message = match move_aside(&save_ram_path) {
+                let message = match crate::durable::move_aside(&save_ram_path, "bak") {
                     Ok(backup) => format!(
                         "{problem}; it has been kept as {} and a new save will be written",
                         backup.display()
@@ -1109,9 +1128,19 @@ impl Emulator {
                     frame,
                 });
             }
+            // A state for another system, another build's layout, or not a state at all is
+            // refused by the container header before any of it is applied, so the machine is
+            // exactly as it was. Resetting here used to throw away a running game — and its
+            // frame counter and rewind history — over a file that never touched it.
+            Err(e) if e.is_pre_mutation() => {
+                self.emit(SessionEvent::Error(format!(
+                    "{} could not be loaded ({e}); nothing was changed",
+                    path.display()
+                )));
+            }
             Err(e) => {
-                // `System::load_state` documents that a corrupt state can fail partway through,
-                // leaving the machine inconsistent — so resetting is mandatory, not tidiness.
+                // A payload error means the machine is part-way through being overwritten —
+                // `System::load_state`'s contract — so resetting is mandatory, not tidiness.
                 active.system.reset();
                 active.frame = 0;
                 if let Some(rewind) = active.rewind.as_mut() {
@@ -1260,10 +1289,25 @@ impl Active {
             }
             // A snapshot this machine cannot load means the buffer and the machine have got out
             // of step, which is a bug rather than a user error — so it is reported, not silently
-            // skipped.
-            Err(e) => Err(RewindStep::Rejected(format!(
-                "a rewind snapshot from frame {frame} could not be restored: {e}"
-            ))),
+            // skipped. One that failed inside the payload has also half-overwritten the machine,
+            // and the same reset rule as a file load applies: running on from that is worse than
+            // losing the session.
+            Err(e) => {
+                let reset = !e.is_pre_mutation();
+                if reset {
+                    self.system.reset();
+                    self.frame = 0;
+                    rewind.clear();
+                }
+                Err(RewindStep::Rejected(format!(
+                    "a rewind snapshot from frame {frame} could not be restored: {e}{}",
+                    if reset {
+                        "; the machine has been reset"
+                    } else {
+                        ""
+                    }
+                )))
+            }
         }
     }
 }
@@ -1388,27 +1432,6 @@ fn unwrap_state(bytes: &[u8]) -> (Option<u64>, &[u8]) {
     }
 }
 
-/// Rename a save that could not be restored to the first free `<name>.bak`, `<name>.bak.1`, …
-///
-/// Never onto an existing backup: a player who hits this twice with two different bad files has
-/// two files worth keeping. The existence check and the rename are not one atomic step, which is
-/// acceptable because only this thread writes into the saves directory.
-fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let backup = (0u32..)
-        .map(|n| match n {
-            0 => path.with_file_name(format!("{name}.bak")),
-            n => path.with_file_name(format!("{name}.bak.{n}")),
-        })
-        .find(|candidate| !candidate.exists())
-        .expect("an unbounded range always yields a free name");
-    std::fs::rename(path, &backup)?;
-    if let Some(parent) = path.parent() {
-        crate::durable::sync_dir(parent);
-    }
-    Ok(backup)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1423,7 +1446,7 @@ mod tests {
             .enumerate()
         {
             std::fs::write(&save, [n as u8]).unwrap();
-            let backup = move_aside(&save).unwrap();
+            let backup = crate::durable::move_aside(&save, "bak").unwrap();
             assert_eq!(backup, dir.join(expected));
             assert_eq!(std::fs::read(&backup).unwrap(), [n as u8]);
             assert!(!save.exists());

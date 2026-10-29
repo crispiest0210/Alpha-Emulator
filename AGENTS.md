@@ -652,6 +652,19 @@ buffer differs from disk, instead of adding a dirty query to `System` in every s
 `frontend-core::durable` syncs the file and its directory, and settings share it. The shape worth
 remembering: a flag that one tick path sets is invisible to every other path into the machine.
 
+Three session-robustness gaps were closed after those. **Every failed quickload reset the machine**,
+including a state from an older build that the container header had refused before touching
+anything; `StateError::is_pre_mutation` now separates header errors (machine untouched, keep
+running) from payload errors (half-overwritten, reset), by variant rather than by message — which
+is why a header cut off early is `BadHeader` and not `UnexpectedEof`. The rewind path applies the
+same rule. **A config that failed to parse was overwritten with defaults at shutdown**;
+`Config::load` returns a `ConfigOrigin`, and `Config::save_over` moves an unusable file to
+`config.toml.bad` first (skipping the save was rejected: it keeps the file but loses every setting
+changed that session). **`catch_unwind` covered `tick` only**; `Emulator::handle_or_flush` gives
+command handling the same flush-then-`resume_unwind`. `harness::state_fuzz` truncates and
+byte-flips a real state for all four systems and found no `load_state` panic anywhere — what it
+does *not* check is whether a flipped byte that loads `Ok` can panic a later frame.
+
 **The save and state key is now `<stem>.<platform>`**, because the stem alone made `Game.gb`,
 `Game.gbc` and `Game.gba` share one `.sav` and one state folder, and `remove_rom(.., true)` on one
 deleted the others' states. `library::paths::legacy_file_key` is **frozen** — it names files already

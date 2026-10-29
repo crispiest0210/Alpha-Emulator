@@ -180,6 +180,10 @@ pub enum SessionCommand {
     /// not exist in a release build — there is no other way to reach this from outside the crate.
     #[cfg(test)]
     TestPanicOnNextTick,
+    /// Test-only: panic inside command handling itself, to verify the same recovery covers
+    /// `Emulator::handle` and not only `tick`.
+    #[cfg(test)]
+    TestPanicInHandle,
 }
 
 /// Notifications from the emulation thread.

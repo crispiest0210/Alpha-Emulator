@@ -7,11 +7,13 @@
 //!
 //! # Why a malformed file does not stop the program
 //!
-//! [`Config::load_or_default`] logs and returns defaults. An emulator that refuses to start
+//! [`Config::load`] logs and returns defaults. An emulator that refuses to start
 //! because one line of TOML is wrong is worse than one that starts with default keybinds and
 //! says so, and the file is hand-editable precisely so people will edit it by hand and get it
-//! wrong sometimes. The broken file is left on disk rather than overwritten, so whatever the user
-//! was trying to express is still there to fix.
+//! wrong sometimes. It also reports [`ConfigOrigin::Unusable`], so the shutdown save
+//! ([`Config::save_over`]) moves the broken file to `config.toml.bad` before writing — loading
+//! never touched it, but quitting used to overwrite it with the defaults, and whatever the user
+//! was trying to express was gone.
 
 use crate::input::KeybindMap;
 use library::AppPaths;
@@ -210,30 +212,52 @@ pub struct Config {
     pub keybinds: KeybindMap,
 }
 
+/// What [`Config::load`] found on disk, which decides what [`Config::save_over`] may do to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    /// Read and parsed; the running settings came from it.
+    File,
+    /// There was no file; the running settings are defaults.
+    Absent,
+    /// A file exists but could not be used — unparsable, not UTF-8, or unreadable — so the running
+    /// settings are defaults and the file holds something the user wrote that is not in them.
+    Unusable,
+}
+
 impl Config {
-    /// Read the settings file, falling back to defaults on anything unreadable.
-    pub fn load_or_default(paths: &AppPaths) -> Self {
+    /// Read the settings file, falling back to defaults on anything unusable, and say which.
+    ///
+    /// The origin is returned rather than only logged because the shutdown save needs it: an
+    /// unusable file was the user's, a typo away from working, and writing the defaults over it
+    /// on quit used to destroy every keybind in it.
+    pub fn load(paths: &AppPaths) -> (Self, ConfigOrigin) {
         let path = paths.config_file();
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
-                Ok(config) => config.clamped(),
+                Ok(config) => (config.clamped(), ConfigOrigin::File),
                 Err(e) => {
                     tracing::warn!(
-                        "{} could not be parsed ({e}); using defaults. The file is left as it is.",
+                        "{} could not be parsed ({e}); using defaults. It will be kept as \
+                         config.toml.bad when settings are next saved.",
                         path.display()
                     );
-                    Self::default()
+                    (Self::default(), ConfigOrigin::Unusable)
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Self::default(), ConfigOrigin::Absent)
+            }
             Err(e) => {
                 tracing::warn!("{} could not be read ({e}); using defaults", path.display());
-                Self::default()
+                (Self::default(), ConfigOrigin::Unusable)
             }
         }
     }
 
     /// Write the settings file, creating its directory.
+    ///
+    /// Overwrites unconditionally. The application's own save goes through
+    /// [`save_over`](Self::save_over), which knows whether there is anything there to keep.
     pub fn save(&self, paths: &AppPaths) -> std::io::Result<()> {
         let path = paths.config_file();
         if let Some(parent) = path.parent() {
@@ -245,6 +269,41 @@ impl Config {
         // killed mid-write leaves a zero-byte config and loses every keybind the user set — cheap
         // to avoid, and the same reason the library index runs in WAL mode.
         crate::durable::write_atomically(&path, text.as_bytes())
+    }
+
+    /// Save, first moving an [unusable](ConfigOrigin::Unusable) file aside to `config.toml.bad`
+    /// (or `.bad.1`, … if one is already there).
+    ///
+    /// Back up and then save, rather than skipping the save. Skipping keeps the broken file in
+    /// place but silently discards every setting changed this session, and the next launch is on
+    /// defaults again with the same parse warning; backing up keeps both the user's edit and a
+    /// working file. If the backup itself fails the save is skipped instead — overwriting a file
+    /// that could not be preserved is the one outcome this exists to prevent. Either way the log
+    /// says which happened. On success `origin` becomes [`File`](ConfigOrigin::File), so a second
+    /// save does not back up the file this one wrote.
+    pub fn save_over(&self, paths: &AppPaths, origin: &mut ConfigOrigin) -> std::io::Result<()> {
+        let path = paths.config_file();
+        if *origin == ConfigOrigin::Unusable && path.exists() {
+            match crate::durable::move_aside(&path, "bad") {
+                Ok(backup) => tracing::warn!(
+                    "the settings file that could not be used is kept as {}; writing current \
+                     settings to {}",
+                    backup.display(),
+                    path.display()
+                ),
+                Err(e) => {
+                    tracing::error!(
+                        "{} could not be backed up ({e}); not saving settings, so it is left as \
+                         it is",
+                        path.display()
+                    );
+                    return Err(e);
+                }
+            }
+        }
+        self.save(paths)?;
+        *origin = ConfigOrigin::File;
+        Ok(())
     }
 
     /// Bring hand-edited values into range.
@@ -313,20 +372,60 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_file_yields_defaults_and_is_not_overwritten() {
+    fn a_broken_file_yields_defaults_and_is_not_overwritten_by_loading() {
         let dir = std::env::temp_dir().join(format!("alpha-config-{}", std::process::id()));
         let paths = AppPaths::rooted_at(&dir);
         std::fs::create_dir_all(paths.config_dir()).unwrap();
         let broken = "this is not toml = = =";
         std::fs::write(paths.config_file(), broken).unwrap();
 
-        let config = Config::load_or_default(&paths);
+        let (config, origin) = Config::load(&paths);
         assert_eq!(config, Config::default());
+        assert_eq!(origin, ConfigOrigin::Unusable);
         assert_eq!(
             std::fs::read_to_string(paths.config_file()).unwrap(),
             broken,
             "the user's broken file must survive so they can fix it"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_file_survives_a_shutdown_save_as_a_backup() {
+        let dir = std::env::temp_dir().join(format!("alpha-config-bad-{}", std::process::id()));
+        let paths = AppPaths::rooted_at(&dir);
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let broken = "[audio]\nvolume = 0.4\n[[[ a typo";
+        std::fs::write(paths.config_file(), broken).unwrap();
+
+        let (mut config, mut origin) = Config::load(&paths);
+        config.audio.volume = 0.6; // changed during the session
+        config.save_over(&paths, &mut origin).unwrap();
+
+        let backup = paths.config_file().with_file_name("config.toml.bad");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), broken);
+        assert_eq!(Config::load(&paths), (config.clone(), ConfigOrigin::File));
+        assert_eq!(origin, ConfigOrigin::File);
+
+        // A second save writes over the good file it just made, and backs up nothing more.
+        config.save_over(&paths, &mut origin).unwrap();
+        assert!(!backup.with_file_name("config.toml.bad.1").exists());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_good_or_absent_file_is_saved_without_a_backup() {
+        let dir = std::env::temp_dir().join(format!("alpha-config-ok-{}", std::process::id()));
+        let paths = AppPaths::rooted_at(&dir);
+        let (config, mut origin) = Config::load(&paths);
+        assert_eq!(origin, ConfigOrigin::Absent);
+        config.save_over(&paths, &mut origin).unwrap();
+        config.save_over(&paths, &mut origin).unwrap();
+        assert!(!paths
+            .config_file()
+            .with_file_name("config.toml.bad")
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -343,7 +442,7 @@ mod tests {
         );
 
         config.save(&paths).unwrap();
-        assert_eq!(Config::load_or_default(&paths), config);
+        assert_eq!(Config::load(&paths).0, config);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

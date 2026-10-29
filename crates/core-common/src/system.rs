@@ -198,9 +198,11 @@ pub trait System: Savable {
     /// Restore a state produced by [`save_state`](System::save_state).
     ///
     /// A state from a different system or state version is rejected before any of it is
-    /// applied. A *corrupt* state can still fail partway through, leaving the machine
-    /// inconsistent — callers must [`reset`](System::reset) on error rather than continuing
-    /// to run, which is exactly what the frontend's load path does.
+    /// applied, and [`StateError::is_pre_mutation`] says so. A *corrupt* state can still fail
+    /// partway through, leaving the machine inconsistent — on any other error callers must
+    /// [`reset`](System::reset) rather than continuing to run, which is exactly what the
+    /// frontend's load and rewind paths do. Every system relies on this default, and
+    /// `harness`'s `state_fuzz` holds all four to it.
     fn load_state(&mut self, data: &[u8]) -> Result<(), StateError> {
         // Read both before taking the `&mut self` borrow below. `id` returns `&'static str`,
         // so nothing borrowed from `self` outlives these lines.

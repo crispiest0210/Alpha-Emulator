@@ -60,6 +60,35 @@ pub enum StateError {
 
     #[error("{0} bytes of trailing data after the state payload")]
     TrailingData(usize),
+
+    /// The container header itself could not be read — cut off before the version word, or a
+    /// system id that is not UTF-8. Distinct from [`UnexpectedEof`](Self::UnexpectedEof) and
+    /// [`Malformed`](Self::Malformed), which are payload errors, because the two need opposite
+    /// handling: see [`is_pre_mutation`](Self::is_pre_mutation).
+    #[error("save state header is unreadable: {0}")]
+    BadHeader(String),
+}
+
+impl StateError {
+    /// Whether [`decode_state`] returned this before a single byte reached `Savable::load`.
+    ///
+    /// When it did, the target is exactly as it was and a caller can keep running it. When it did
+    /// not, the target may be half-overwritten and must be reset — the [`Savable`] contract.
+    ///
+    /// Decided by variant rather than by where the reader stopped, which is why a header that runs
+    /// out early is [`BadHeader`](Self::BadHeader) and not `UnexpectedEof`: the frontend used to
+    /// reset on every error because nothing let it tell the two apart, throwing away a running game
+    /// over a state from an older build. Matching on the message text was the alternative, and it
+    /// is the kind of contract that breaks silently the first time someone rewords an error.
+    pub fn is_pre_mutation(&self) -> bool {
+        match self {
+            Self::BadMagic
+            | Self::WrongSystem { .. }
+            | Self::VersionMismatch { .. }
+            | Self::BadHeader(_) => true,
+            Self::UnexpectedEof { .. } | Self::Malformed(_) | Self::TrailingData(_) => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -453,21 +482,28 @@ pub fn encode_state<T: Savable + ?Sized>(system_id: &str, version: u32, value: &
 /// The header is fully validated before a single byte reaches `value.load`, so a state for
 /// the wrong system or version cannot partially clobber a running emulator. Once the payload
 /// starts loading, a mid-payload error does leave `value` inconsistent — callers must reset
-/// on `Err`, per the [`Savable`] contract.
+/// on an `Err` that is not [`StateError::is_pre_mutation`], per the [`Savable`] contract, and need
+/// not on one that is.
 pub fn decode_state<T: Savable + ?Sized>(
     system_id: &str,
     version: u32,
     data: &[u8],
     value: &mut T,
 ) -> Result<(), StateError> {
+    // Every header read maps its error to `BadHeader`, so nothing raised before `value.load` can
+    // be mistaken for a payload error by `StateError::is_pre_mutation`.
+    let header = |e: StateError| StateError::BadHeader(e.to_string());
     let mut r = StateReader::new(data);
     let mut magic = [0u8; 8];
-    r.read_bytes(&mut magic)?;
+    if r.read_bytes(&mut magic).is_err() {
+        // Shorter than the magic itself is not a state at all, which is what `BadMagic` says.
+        return Err(StateError::BadMagic);
+    }
     if magic != MAGIC {
         return Err(StateError::BadMagic);
     }
 
-    let found = r.read_string()?;
+    let found = r.read_string().map_err(header)?;
     if found != system_id {
         return Err(StateError::WrongSystem {
             expected: system_id.to_string(),
@@ -475,7 +511,7 @@ pub fn decode_state<T: Savable + ?Sized>(
         });
     }
 
-    let found_version = r.read_u32()?;
+    let found_version = r.read_u32().map_err(header)?;
     if found_version != version {
         return Err(StateError::VersionMismatch {
             expected: version,
@@ -588,6 +624,31 @@ mod tests {
         );
         // Header validation happens before any payload load, so nothing was clobbered.
         assert_eq!(restored, blank());
+    }
+
+    #[test]
+    fn every_header_error_is_pre_mutation_and_every_payload_error_is_not() {
+        let blob = encode_state("toy", 1, &sample());
+        // 8 magic + 8 length + 3 id + 4 version: everything before this is header.
+        let header_len = 8 + 8 + 3 + 4;
+        for cut in 0..blob.len() {
+            let mut restored = blank();
+            let err = decode_state("toy", 1, &blob[..cut], &mut restored).unwrap_err();
+            assert_eq!(
+                err.is_pre_mutation(),
+                cut < header_len,
+                "cut at {cut} gave {err:?}"
+            );
+            if err.is_pre_mutation() {
+                assert_eq!(restored, blank(), "cut at {cut} touched the target");
+            }
+        }
+        let mut bad_utf8 = blob.clone();
+        bad_utf8[16] = 0xFF;
+        let err = decode_state("toy", 1, &bad_utf8, &mut blank()).unwrap_err();
+        assert!(matches!(err, StateError::BadHeader(_)), "{err:?}");
+        assert!(!StateError::TrailingData(1).is_pre_mutation());
+        assert!(!StateError::Malformed(String::new()).is_pre_mutation());
     }
 
     #[test]

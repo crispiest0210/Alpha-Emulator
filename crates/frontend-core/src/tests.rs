@@ -522,6 +522,102 @@ fn loading_an_empty_slot_is_a_notice_not_an_error() {
     assert!(text.contains("does not exist"), "{text}");
 }
 
+/// Pause, quicksave into `slot`, and return what was written: the path, the frame, and the bytes.
+fn paused_save(session: &mut Session, slot: u8) -> (PathBuf, u64, Vec<u8>) {
+    session.send(SessionCommand::SaveState {
+        slot: Some(slot),
+        label: None,
+    });
+    let saved = wait_event(session, "StateSaved", |event| match event {
+        SessionEvent::StateSaved(saved) => Some(saved.clone()),
+        _ => None,
+    });
+    let bytes = std::fs::read(&saved.path).unwrap();
+    (saved.path, saved.frame, bytes)
+}
+
+/// Where the `savestate` container's version word sits inside a frontend state file: the
+/// frontend's own 12-byte wrapper, the 8-byte container magic, then the system id as a
+/// `u64`-length-prefixed string.
+fn container_version_offset(file: &[u8]) -> usize {
+    let id_len_at = 12 + 8;
+    let id_len = u64::from_le_bytes(file[id_len_at..id_len_at + 8].try_into().unwrap()) as usize;
+    id_len_at + 8 + id_len
+}
+
+#[test]
+fn a_version_mismatched_quickload_keeps_the_frame_counter_and_the_machine() {
+    // The header is validated before a byte of payload reaches the machine, so resetting on this
+    // error threw away a perfectly good running game for nothing — the most common way a player
+    // hits it is a state from an older build, which is exactly when they least want to lose
+    // their place.
+    let fixture = Fixture::new("versionmismatch");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.plain_rom("spin.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 5);
+    session.send(SessionCommand::SetPaused(true));
+    wait_status(&session, SessionStatus::Paused);
+
+    let (_, frame_before, bytes_before) = paused_save(&mut session, 1);
+    assert!(
+        frame_before > 0,
+        "the test needs a counter a reset would visibly zero"
+    );
+
+    let mut stale = bytes_before.clone();
+    let at = container_version_offset(&stale);
+    stale[at] = stale[at].wrapping_add(1);
+    let stale_path = fixture.dir.join("stale-version.ast");
+    std::fs::write(&stale_path, &stale).unwrap();
+    session.send(SessionCommand::LoadState { path: stale_path });
+
+    let message = wait_event(&session, "an error", |event| match event {
+        SessionEvent::Error(message) => Some(message.clone()),
+        SessionEvent::StateLoaded { .. } => panic!("a mismatched version must not load"),
+        _ => None,
+    });
+    assert!(message.contains("version"), "{message}");
+    assert!(
+        !message.contains("reset"),
+        "nothing was applied, so nothing was reset: {message}"
+    );
+
+    let (_, frame_after, bytes_after) = paused_save(&mut session, 2);
+    assert_eq!(frame_after, frame_before, "the frame counter must survive");
+    assert_eq!(
+        bytes_after, bytes_before,
+        "the machine must be exactly where it was before the refused load"
+    );
+}
+
+#[test]
+fn a_file_that_is_not_a_state_at_all_leaves_the_machine_running() {
+    let fixture = Fixture::new("notastate");
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: fixture.plain_rom("spin.gb"),
+        rom_id: None,
+    });
+    wait_frame(&mut session, 5);
+    session.send(SessionCommand::SetPaused(true));
+    wait_status(&session, SessionStatus::Paused);
+    let (_, frame_before, _) = paused_save(&mut session, 1);
+
+    let bad = fixture.dir.join("garbage.ast");
+    std::fs::write(&bad, b"this is not a save state").unwrap();
+    session.send(SessionCommand::LoadState { path: bad });
+    let message = wait_event(&session, "an error", |event| match event {
+        SessionEvent::Error(message) => Some(message.clone()),
+        _ => None,
+    });
+    assert!(!message.contains("reset"), "{message}");
+    let (_, frame_after, _) = paused_save(&mut session, 2);
+    assert_eq!(frame_after, frame_before);
+}
+
 #[test]
 fn a_corrupt_state_resets_the_machine_rather_than_running_on() {
     let fixture = Fixture::new("corrupt");
@@ -532,8 +628,12 @@ fn a_corrupt_state_resets_the_machine_rather_than_running_on() {
     });
     wait_frame(&mut session, 2);
 
-    let bad = fixture.dir.join("garbage.ast");
-    std::fs::write(&bad, b"this is not a save state").unwrap();
+    // A real state cut off partway through its payload: the header is fine, so loading starts,
+    // and the machine is half-overwritten by the time the reader runs out. This is the case the
+    // reset exists for — a file that is not a state at all is refused before anything changes.
+    let (_, _, good) = paused_save(&mut session, 1);
+    let bad = fixture.dir.join("truncated.ast");
+    std::fs::write(&bad, &good[..good.len() / 2]).unwrap();
     session.send(SessionCommand::LoadState { path: bad });
 
     let message = wait_event(&session, "an error", |event| match event {
@@ -807,6 +907,40 @@ fn a_panic_mid_frame_still_flushes_dirty_save_ram() {
     assert_eq!(
         contents[0], 0x77,
         "the marker byte the ROM wrote before the panic must be the one on disk"
+    );
+}
+
+#[test]
+fn a_panic_while_handling_a_command_still_flushes_dirty_save_ram() {
+    // The same property as the test above, for the other half of the loop. A command is not a
+    // safer place to panic than a frame: `LoadState` runs a system crate's whole `Savable::load`
+    // over bytes from disk, and a debugger request walks the machine's memory map.
+    let fixture = Fixture::new("savarampanichandle");
+    let rom = fixture.battery_writing_rom("batterywrite.gb", 0x5A);
+    let save = fixture.paths.save_file(&rom);
+
+    let mut session = fixture.session();
+    session.send(SessionCommand::LoadRom {
+        path: rom.clone(),
+        rom_id: None,
+    });
+    wait_status(&session, SessionStatus::Running);
+    wait_frame(&mut session, 3);
+    // Paused, so the panic is certain to come from `handle` and not from a frame racing it.
+    session.send(SessionCommand::SetPaused(true));
+    wait_status(&session, SessionStatus::Paused);
+    assert!(!save.exists(), "still inside the debounce window");
+
+    session.send(SessionCommand::TestPanicInHandle);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.is_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!session.is_alive(), "the emulation thread should have died");
+    assert_eq!(
+        std::fs::read(&save).expect("dirty save RAM must reach disk")[0],
+        0x5A
     );
 }
 

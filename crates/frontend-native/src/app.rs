@@ -12,9 +12,9 @@
 
 use anyhow::Result;
 use frontend_core::{
-    catalog, screen_size, Action, ChromeAction, Config, DebugSnapshot, Frame, InputTracker,
-    KeybindMap, LoadedRom, Session, SessionCommand, SessionEvent, SessionOptions, SessionStats,
-    SessionStatus,
+    catalog, screen_size, Action, ChromeAction, Config, ConfigOrigin, DebugSnapshot, Frame,
+    InputTracker, KeybindMap, LoadedRom, Session, SessionCommand, SessionEvent, SessionOptions,
+    SessionStats, SessionStatus,
 };
 use library::{AppPaths, Library, RomEntry, RomId, SaveStateEntry};
 use std::path::PathBuf;
@@ -51,6 +51,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 pub struct App {
     paths: AppPaths,
     config: Config,
+    /// Whether the settings file on disk was usable at startup, which decides whether the shutdown
+    /// save backs it up first. See `Config::save_over`.
+    config_origin: ConfigOrigin,
     library: Library,
     session: Session,
     audio: Audio,
@@ -95,7 +98,7 @@ pub struct App {
 impl App {
     pub fn new(paths: AppPaths, rom: Option<PathBuf>) -> Result<Self> {
         paths.create_all()?;
-        let config = Config::load_or_default(&paths);
+        let (config, config_origin) = Config::load(&paths);
 
         let mut library = Library::open(paths.clone())?;
         // Reconciliation before the browser is first shown, so what the user sees is what is on
@@ -144,6 +147,7 @@ impl App {
                 ..Chrome::default()
             },
             config,
+            config_origin,
             library,
             session,
             audio,
@@ -543,7 +547,8 @@ impl App {
         self.closing = true;
         // Persist the HUD's visibility along with everything else, so it is where the user left it.
         self.config.video.hud_visible = self.chrome.show_hud;
-        if let Err(e) = self.config.save(&self.paths) {
+        // `save_over` logs whether a broken file was backed up or the save skipped to protect it.
+        if let Err(e) = self.config.save_over(&self.paths, &mut self.config_origin) {
             tracing::error!("could not write the settings file: {e}");
         }
         // Flush save RAM before the process can exit. `Session::drop` also does this, but doing it

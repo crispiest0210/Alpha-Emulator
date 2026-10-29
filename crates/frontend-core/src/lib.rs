@@ -50,6 +50,12 @@
 //! restored is renamed to the first free `.sav.bak`/`.sav.bak.N` before the first frame runs, so the
 //! game's new progress never lands on top of it.
 //!
+//! A panic out of command handling is caught, flushed and re-raised exactly as one out of a frame
+//! is. A save state refused by its header (`StateError::is_pre_mutation`) leaves the machine, frame
+//! counter and rewind history as they were; only a payload error resets. A settings file that
+//! cannot be used is reported by [`config::Config::load`] as [`config::ConfigOrigin::Unusable`] and
+//! moved aside to `config.toml.bad` by the shutdown save rather than overwritten.
+//!
 //! Not done: gamepad input (the keybind layer in [`input`] is keyboard-only by construction —
 //! [`input::PhysicalKey`] would need a sibling for pads); touch input has a delivery path but no
 //! producer until prompt 13 gives it a DS to point at; and while a breakpoint is set, joypad input is
@@ -77,7 +83,8 @@ pub mod session;
 
 pub use audio::{channel, AudioConsumer, AudioProducer, Resampler, DEFAULT_CAPACITY};
 pub use config::{
-    AudioConfig, Config, EmulationConfig, RewindConfig, ScalingMode, ThemeChoice, VideoConfig,
+    AudioConfig, Config, ConfigOrigin, EmulationConfig, RewindConfig, ScalingMode, ThemeChoice,
+    VideoConfig,
 };
 pub use frame::{frame_pipe, Frame, FramePublisher, FrameSubscriber};
 pub use input::{
