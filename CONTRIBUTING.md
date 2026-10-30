@@ -71,6 +71,11 @@ Concretely: if you add a field that affects emulated behavior, it belongs in tha
 `save`/`load` and in the save-state format version bump. A PR that adds emulated state without
 touching serialization will be asked to fix that before anything else.
 
+Each system has a freshly booted synthetic-cartridge test that pins its save-state version,
+serialized byte length, and FNV hash. If it fails after a layout change, bump the owning system's
+version and update the pin in the same change. The fixed boot image keeps the check reproducible;
+review the saved fields as well, since a pin cannot detect a field that was never written.
+
 ### 3. A UI panel returns what the user asked for; it does not do it
 
 **Nothing under `crates/frontend-native/src/chrome/` may touch the session, the library, the

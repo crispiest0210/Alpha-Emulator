@@ -76,8 +76,9 @@ use crate::{background::Backgrounds, timers::Timers};
 /// discarding the flags it was waiting on a second time. 3 added `GbaBus::bios_open_bus`. 4 added
 /// the PSG: three channels, its register block, and the divider and frame sequencer that clock
 /// them. 5 added the PSG's fourth channel, the wave channel and its two banks. 6 added raw
-/// `SOUNDBIAS` storage.
-const STATE_VERSION: u32 = 6;
+/// `SOUNDBIAS` storage. 7 stores the prefetch latch and the next-access sequence/fetch markers;
+/// version 6 states cannot recover their exact next access and are deliberately incompatible.
+const STATE_VERSION: u32 = 7;
 
 /// Cycles in one frame: 228 scanlines of 1232.
 pub const FRAME_CYCLES: u64 = 280_896;
@@ -1396,6 +1397,10 @@ impl Savable for GbaSystemBus {
         self.psg.save(w);
         self.waits.save(w);
         w.write_u64(self.sample_accumulator);
+        // These describe the next bus access. Reconstructing them from the PC was rejected:
+        // a prior data access or DMA can break sequence without changing the PC.
+        w.write_u32(self.next_sequential);
+        w.write_bool(self.awaiting_fetch);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
@@ -1415,6 +1420,8 @@ impl Savable for GbaSystemBus {
         self.psg.load(r)?;
         self.waits.load(r)?;
         self.sample_accumulator = r.read_u64()?;
+        self.next_sequential = r.read_u32()?;
+        self.awaiting_fetch = r.read_bool()?;
         Ok(())
     }
 }

@@ -8,6 +8,20 @@ use super::*;
 use core_common::{Buttons, Rgba8};
 use ppu_tile2d::DMG_SHADES;
 
+#[test]
+fn gb_state_layout_is_versioned() {
+    let gb = GbSystem::new(rom_with_program(&[0x18, 0xFE]), None).unwrap();
+    let payload = gb.save_state();
+    let hash = payload.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    assert_eq!(
+        (gb.state_version(), payload.len(), hash),
+        (5, 117763, 8887622382485565311),
+        "GB state layout changed: bump the system version and update this pin"
+    );
+}
+
 /// Build a cartridge whose program sits at `0x0150`, entered from the header's jump.
 fn rom_with_program(program: &[u8]) -> Vec<u8> {
     let mut rom = vec![0u8; 0x8000];

@@ -1656,9 +1656,12 @@ impl System for NdsSystem {
     /// cover the display list under construction, the last `POS_TEST`/`VEC_TEST` results, the
     /// half-received `GXFIFO` command, and the rendered framebuffer — a state saved mid-frame used
     /// to restore with a swapped-in *empty* picture rather than the one the game had actually
-    /// built — and the save chip gained its `gave_up` flag, part of `SaveStatus`.
+    /// built — and the save chip gained its `gave_up` flag, part of `SaveStatus`. 6 accounts for
+    /// the firmware image and SPI command state added to `Input` after version 5. Old states are
+    /// rejected: slots are disposable, and a migration reader would have to invent firmware
+    /// contents the original state never recorded.
     fn state_version(&self) -> u32 {
-        5
+        6
     }
 
     fn set_input(&mut self, input: InputState) {

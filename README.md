@@ -36,6 +36,9 @@ that does not carries a written diagnosis of why. See each system's notes for sp
 The application has a ROM library, video, audio, keyboard and touchscreen input, quicksave and
 quickload, rewind, an HUD, a rebindable keymap, screenshots, and an in-app debugger with registers,
 disassembly, a memory viewer, breakpoints, and watchpoints.
+Save-state layouts are pinned by tests for all four systems. GBA states now preserve prefetch and
+access timing across a load; older GBA and DS slots report an incompatible version before changing
+the running game.
 
 ## What actually works
 

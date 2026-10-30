@@ -911,8 +911,14 @@ Each is recorded in the relevant crate's `//!` docs along with why it is open:
 - **`frontend-headless run --state <file>`** loads a save state before running, and `--save-state`
   writes one after. This is how an unreproducible "the graphics are wrong after an hour" becomes a
   two-minute diagnosis: take the user's state file, load it here, and run `graphics_dump` on the
-  exact frame. A state resumes byte-exactly, so five frames past a loaded state hash the same as
-  the whole run from a reset.
+  exact frame. A state resumes byte-exactly, including the GBA's next-access, fetch, and prefetch
+  latches, so five frames past a loaded state hash the same as the whole run from a reset.
+- **Save-state versions are pinned by a freshly booted synthetic cartridge test in every system.**
+  The test records version, byte length, and FNV hash. A layout change requires updating the
+  system version and its pin together. GBA version 7 records the access-stream latches that older
+  states lost; DS version 6 accounts for the firmware image and command state inserted under
+  version 5. Older GBA and DS slots return an incompatible-version error before touching the
+  running machine. Slots are disposable, so migration readers were deliberately rejected.
 - **`frontend-headless run --save-frame out.png`** writes a framebuffer as a PNG, and `identify`
   prints what the library importer would record for a ROM. Comparing that PNG against a published
   reference image is what turned dmg-acid2 and cgb-acid2 from "renders something" into passes.

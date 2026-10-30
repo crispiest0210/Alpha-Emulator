@@ -5,6 +5,8 @@
 //! **Partial, and deliberately so.** Prompt 13 scopes this as the start of DS support rather
 //! than its completion; what is here is built the way the GBA was, as tested units assembled
 //! last. See `README.md` for the authoritative status table.
+//! Save-state version 6 accounts for the firmware image and SPI command state; version 5 slots
+//! are rejected before load rather than read with the wrong offsets.
 //!
 //! Implemented: the dual-CPU memory map ([`memory`]), the BIOS calls both cores make ([`bios`]),
 //! the ARM9's divider and square-root unit ([`math`]),

@@ -491,6 +491,81 @@ fn a_save_state_round_trips_and_resumes_identically() {
 }
 
 #[test]
+fn a_saved_machine_preserves_the_next_bus_access_and_prefetch() {
+    let mut gba = system();
+    gba.bus.next_sequential = 0x0800_0004;
+    gba.bus.awaiting_fetch = false;
+    gba.bus.waits.write16(1 << 14);
+    gba.bus
+        .waits
+        .cost(0x0800_0000, 2, Access::NonSequential, true);
+    let state = gba.save_state();
+    let mut restored = system();
+    restored.load_state(&state).unwrap();
+    assert_eq!(restored.bus.next_sequential, gba.bus.next_sequential);
+    assert_eq!(restored.bus.awaiting_fetch, gba.bus.awaiting_fetch);
+    assert_eq!(
+        restored
+            .bus
+            .waits
+            .cost(0x0800_0002, 2, Access::Sequential, true),
+        gba.bus.waits.cost(0x0800_0002, 2, Access::Sequential, true),
+    );
+}
+
+#[test]
+fn gba_state_layout_is_versioned() {
+    let gba = system();
+    let payload = gba.save_state();
+    let hash = payload.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    assert_eq!(
+        (gba.state_version(), payload.len(), hash),
+        (7, 395993, 11583129481990568363),
+        "GBA state layout changed: bump the system version and update this pin"
+    );
+}
+
+#[test]
+fn gba_resume_matches_uninterrupted_cycles_and_frame() {
+    let mut uninterrupted = system();
+    let mut cycles = 0;
+    for _ in 0..4 {
+        cycles += uninterrupted
+            .step_frame(InputState::default())
+            .cycles_elapsed
+            .get();
+    }
+
+    let mut resumed = system();
+    let mut resumed_cycles = 0;
+    for _ in 0..2 {
+        resumed_cycles += resumed
+            .step_frame(InputState::default())
+            .cycles_elapsed
+            .get();
+    }
+    let state = resumed.save_state();
+    let mut loaded = system();
+    loaded.load_state(&state).unwrap();
+    for _ in 2..4 {
+        resumed_cycles += loaded
+            .step_frame(InputState::default())
+            .cycles_elapsed
+            .get();
+    }
+    assert_eq!(
+        resumed_cycles, cycles,
+        "CPU cycle count diverged after load"
+    );
+    assert_eq!(
+        loaded.framebuffer().as_bytes(),
+        uninterrupted.framebuffer().as_bytes()
+    );
+}
+
+#[test]
 fn two_identical_runs_produce_identical_output() {
     // Determinism is what save states, rewind, and replay all rest on.
     let mut first = system();

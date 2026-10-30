@@ -614,6 +614,20 @@ mod integration_tests {
             system.framebuffer().as_bytes()
         );
     }
+
+    #[test]
+    fn gbc_state_layout_is_versioned() {
+        let gbc = cgb(&[0x18, 0xFE]);
+        let payload = gbc.save_state();
+        let hash = payload.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+        assert_eq!(
+            (gbc.state_version(), payload.len(), hash),
+            (5, 142337, 582138038635572008),
+            "GBC state layout changed: bump the system version and update this pin"
+        );
+    }
 }
 
 /// Dump what a CGB game has actually put in VRAM, OAM, and palette RAM.

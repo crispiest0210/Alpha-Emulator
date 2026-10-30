@@ -44,6 +44,20 @@ fn idle() -> NdsSystem {
     booted(&[SPIN], &[SPIN])
 }
 
+#[test]
+fn nds_state_layout_is_versioned() {
+    let nds = idle();
+    let payload = nds.save_state();
+    let hash = payload.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    assert_eq!(
+        (nds.state_version(), payload.len(), hash),
+        (6, 5679894, 17440672775924686305),
+        "NDS state layout changed: bump the system version and update this pin"
+    );
+}
+
 /// The rotate-and-byte immediate field, if this value fits one.
 ///
 /// ARM data-processing immediates are eight bits rotated right by an even amount, so most

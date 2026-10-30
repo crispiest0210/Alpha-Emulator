@@ -189,18 +189,17 @@ impl WaitControl {
 }
 
 impl Savable for WaitControl {
-    // `prefetch_primed` is not persisted, on the same reasoning as `GbaSystemBus`'s
-    // `next_sequential`: both describe a relationship to whatever access came immediately before,
-    // a save state is only ever taken between complete instructions, and the cost of losing either
-    // one is the same — the single next access pays as if it were the first in a fresh run, which
-    // is at most a few cycles once, not a correctness or determinism difference.
+    // Prefetch is an access-stream latch, not a recomputable cache. Resetting it on load changes
+    // the next fetch's cycle cost. The old one-access approximation was rejected because a state
+    // must resume at the same cycle, including when that cycle crosses a video or timer edge.
     fn save(&self, w: &mut StateWriter) {
         w.write_u16(self.value);
+        w.write_bool(self.prefetch_primed);
     }
 
     fn load(&mut self, r: &mut StateReader) -> Result<(), StateError> {
         self.value = r.read_u16()?;
-        self.prefetch_primed = false;
+        self.prefetch_primed = r.read_bool()?;
         Ok(())
     }
 }
