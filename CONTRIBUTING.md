@@ -147,7 +147,7 @@ is genuinely the point. A reviewer should push back on a one-layer test of any o
 
 ### Known failures are tracked, not silenced
 
-A ROM that does not pass yet carries an `expected_failure` note in `testing/harness/src/corpus.rs`.
+A ROM that does not pass yet carries an `expected_failure` note in `testing/corpus/src/lib.rs`.
 The suite then stays green for *regressions* while that gap is open — and **fails loudly if the
 ROM starts passing**, because a stale marker is a lie about what works.
 

@@ -40,6 +40,61 @@ Save-state layouts are pinned by tests for all four systems. GBA states now pres
 access timing across a load; older GBA and DS slots report an incompatible version before changing
 the running game.
 
+## Status & Next Steps
+
+*Last reviewed 2026-11-24, against `main` at `f46e133`.*
+
+**State: working.** On an Apple Silicon Mac with the pinned toolchain (1.97.1), these all succeed
+on a clean tree:
+
+| Command | Result on 2026-11-24 |
+|---|---|
+| `cargo build --workspace` | builds, no warnings |
+| `cargo test --workspace` | 1821 passed, 0 failed, 8 ignored (about 1 minute warm) |
+| `cargo xtask lint` | `fmt --check` and `clippy -D warnings` both clean |
+| `cargo test -p harness -- --nocapture` (the accuracy suite, ROMs already fetched) | 41 pass, 15 known failures, each with a written diagnosis, none unexpected |
+| `cargo run -p frontend-headless -- run testing/test-roms/gb/dmg-acid2.gb --frames 60 --save-frame out.png` | runs and writes the PNG |
+| `cargo xtask setup` | reports all required dependencies present |
+
+`cargo xtask dev` (the windowed frontend) was **not** run in this review. Its last recorded hands-on
+check is in [AGENTS.md](AGENTS.md) under "What 'verified' means for the frontend".
+
+**In progress.** `f46e133` is committed on `main` but **not pushed**, so CI has not run on it yet.
+It bumps the save-state layout to **GBA v7**, which now serialises the `WAITCNT` prefetch, the next
+sequential address, and the pending-fetch marker, and to **DS v6**, which covers the firmware image
+and SPI command state. It also pins the version, length, and hash of a freshly booted state for all
+four systems. Older GBA v6 and DS v5 save-state slots now fail with an incompatible-version error.
+This is deliberate: there is no migration path.
+
+**Branches.** `nds-bios-hle`, `worktree-gb-mode3-timing`, and `worktree-gba-intrwait` are fully
+merged. The work on `gb-rtc-save-persistence` (patch-identical to `0e693ea`) and on
+`worktree-doc-fixes` (applied selectively in `a2c7c42`) is already on `main`, even though git still
+lists those branches as unmerged. `worktree-gba-harness-fixes` (remote only) is the one branch with
+real work that is not on `main`: a GBA PPU debugger and a rendering golden manifest, both deferred
+in `40c86c8` along with the reasons.
+
+**Next steps, in priority order:**
+
+- [ ] Push `f46e133` to `origin/main` and confirm CI is green on all three OSes.
+- [x] Add `*.ast` (the real save-state extension), `*.sav.bak*`, and `config.toml.bad` to
+      `.gitignore` (done 2026-11-24). Still open: decide whether to ignore BIOS/firmware dumps (`*.bin`).
+- [ ] Fix the GBA FLASH save bug: `gba_suite_save_flash64` and `gba_suite_save_flash128` both fail
+      sub-test 4. They share `cart_common::Flash`, so this is probably one bug. The diagnosis is in
+      the `expected_failure` notes in `testing/corpus/src/lib.rs`.
+- [ ] Fix `gba_suite_save_sram` sub-test 1: the first SRAM read returns `0x00` because fresh SRAM
+      is zero-filled. The root cause has not been confirmed.
+- [ ] Implement GBA EEPROM saves. They are currently reported as absent.
+- [ ] Port the rendering golden manifest from `origin/worktree-gba-harness-fixes`. It needs
+      reimplementing against `testing/corpus` rather than merging; see `40c86c8`.
+- [ ] Find out why the combined `blargg_cpu_instrs` ROM executes `STOP` at `pc=0xC304`, even though
+      all 11 sub-tests pass on their own.
+- [ ] Add real-time clocks: GBA cartridge GPIO (`0x080000C4`-`0x080000C8`) and the DS RTC.
+- [ ] Test the frontend paths that have never been pressed by hand (quicksave, quickload, rewind,
+      the HUD toggle, keybind capture) in a real window.
+- [ ] Longer term: step the GB APU at t-cycles (`dmg_sound` 09/10/12, `cgb_sound` 09), add a
+      per-dot PPU fetcher (the 6 failing mooneye PPU ROMs), add DS accuracy-corpus coverage, and add
+      an ARM7 view to the debugger.
+
 ## What actually works
 
 For each system's implementation status, gaps worth noting, and the bugs worth knowing about before
@@ -101,9 +156,12 @@ with **[00-INDEX-AND-ARCHITECTURE.md](docs/successor-emulator/00-INDEX-AND-ARCHI
 
 ## Accuracy suite
 
-The Game Boy suite runs: `cargo xtask fetch-test-roms` pulls the corpus, then `cargo xtask test --accuracy`
-runs it. Nothing is vendored; the tests skip cleanly when ROMs are absent. **[AGENTS.md](AGENTS.md)**
-documents what ROMs pass, which ones don't, and why.
+`cargo xtask fetch-test-roms` pulls the corpus into the gitignored `testing/test-roms/`, then
+`cargo xtask test --accuracy` runs it. Despite the "Game Boy accuracy suite" heading it prints, the
+corpus covers GB, GBC, GBA (`gba-suite`), and two DS homebrew ROMs. As of 2026-11-24, 41 pass and 15
+are tracked known failures. Nothing is vendored, and the tests skip cleanly when ROMs are absent.
+The ROM list and each `expected_failure` diagnosis live in `testing/corpus/src/lib.rs`.
+**[AGENTS.md](AGENTS.md)** explains the reasoning behind them.
 
 ## Crate architecture
 

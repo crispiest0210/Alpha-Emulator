@@ -45,7 +45,7 @@ Affected documentation means every surface making a claim the change just falsif
 - `SETUP.md` — when a system dependency changes (also `xtask/src/main.rs` and
   `.github/workflows/ci.yml`; those three must move together)
 - Crate-level `//!` docs, especially their Status sections
-- `testing/harness/src/corpus.rs` — `expected_failure` notes, added or removed
+- `testing/corpus/src/lib.rs` — `expected_failure` notes, added or removed
 
 Write a handoff prompt **only** when the context window is genuinely near its limit — not at
 every stopping point. Below that, committing and keeping the docs current *is* the handoff, and
@@ -501,7 +501,8 @@ one is skipped, with a test asserting the backdrop shows through and a comment s
 
 ## Where things stand
 
-`README.md` has the authoritative status. In short: the Game Boy, Game Boy Color, and Game Boy
+`README.md` has the authoritative status, and its "Status & Next Steps" section holds the dated,
+prioritized checklist of what to pick up next. In short: the Game Boy, Game Boy Color, and Game Boy
 Advance are **playable** — window, audio, input, save states, rewind — with real accuracy coverage,
 and every ROM in the corpus either passes or carries a written diagnosis. The Nintendo DS **boots
 and draws both screens with sound and 3D**.
@@ -553,11 +554,11 @@ and draws both screens with sound and 3D**.
   debugger. Thirteen modules, all unit-tested: two memory maps over one store, all nine VRAM banks,
   both 2D engines, the 3D core, the sixteen-channel sound hardware, IPC, interrupts, timers, DMA,
   video timing, keypad and touchscreen, the card transfer interface, and save states over all of it.
-  What is missing is a cartridge save chip, DS accuracy-corpus coverage, and the 3D core's rarer
-  effects. See "The biggest gap".
+  The cartridge save chip and firmware flash have since landed; what is missing is a real-time
+  clock, DS accuracy-corpus coverage, and the 3D core's rarer effects. See "The gaps behind it".
 
 **Every one of the twenty prompts has now been built.** What remains is finishing work, listed
-under "The biggest gap"; there is no next prompt file to open.
+under "The gaps behind it"; there is no next prompt file to open.
 
 ### The four decisions prompt 13 raised, and what was chosen
 
@@ -591,8 +592,8 @@ the system it varies, which is why `system-gbc` depends on `system-gb`, but the 
 not variants of anything here — and `core-common` is closed to platform-specific behaviour, so
 sharing needs a new crate. This was filed as the same question the
 GBA's PSG register layer was stuck on; that one turned out not to be a placement question at all
-(see "The biggest gap"), so this is the only live instance. It is also the weaker case: the two
-timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
+(see "PSG audio on the Game Boy Advance is now done"), so this is the only live instance. It is
+also the weaker case: the two timer blocks are similar but not identical, and a shared crate for one duplicated module is a lot
 of structure for a little reuse. Worth doing only when a third caller appears.
 
 ### PSG audio on the Game Boy Advance is now done
@@ -716,11 +717,11 @@ budget, and no save-chip write timing — a game polling for "write finished" is
 ### Start here
 
 **All twenty prompts are now built.** There is no next prompt to open; what is left is the list
-under "The biggest gap" above, and it is finishing work rather than new hardware.
+under "The gaps behind it" above, and it is finishing work rather than new hardware.
 
-`crates/system-nds/src/lib.rs`'s Status section is the shortest accurate summary of what the DS
-has, and `README.md`'s "What the Nintendo DS does and does not do" is the longer one. Both are kept
-current.
+`crates/system-nds/src/lib.rs`'s Status section is the most complete accurate summary of what the
+DS has; `README.md`'s status table and its "What actually works" entry for the DS are the short
+version. Keep them current together.
 
 Two things to know before picking any of it up:
 

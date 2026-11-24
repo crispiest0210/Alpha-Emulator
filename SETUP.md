@@ -50,9 +50,9 @@ it is added to your library and starts playing.
 | `.gba` | Game Boy Advance | Playable — with two gaps worth knowing about |
 | `.nds` | Nintendo DS | **Partial** — see below |
 
-Game Boy Advance games play at full speed with picture, sound, input, and saves. Two things are
-missing. The GBA can make sound two ways and only one is wired, so **part of the mix is missing**
-in a game that uses the older four-channel hardware alongside the main one. And there is **no
+Game Boy Advance games play at full speed with picture, sound (direct sound and all four PSG
+channels), input, and saves. Two things are missing. **EEPROM saves are not emulated**: a cartridge
+that uses EEPROM is reported as having no save chip. SRAM and FLASH saves work. And there is **no
 cartridge clock**, so a game with a real-time clock will say its internal battery has run dry and
 carry on — which is exactly what a real cartridge with a flat battery does, so nothing is broken,
 but time-of-day events never happen.
