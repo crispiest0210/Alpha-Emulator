@@ -26,3 +26,8 @@
 # must never be committed into the repository they are checked out from.
 /.claude/settings.local.json
 /.claude/worktrees/
+
+# Runtime files the frontend writes (save states, save backups, rejected config)
+*.ast
+*.sav.bak*
+config.toml.bad
